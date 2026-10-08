@@ -1,0 +1,50 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: SpeedBreaker Project <speedbreaker-project@users.noreply.github.com>
+Date: Fri, 25 Sep 2026 19:18:20 +0000
+Subject: [PATCH] Memory barriers: emit fences for sync, lwsync and eieio
+
+They were no-ops, which only works on hosts with strong ordering (x86
+TSO). On ARM64 the hardware and the compiler may reorder around them;
+NFS: Most Wanted's command queues then read a command slot before the
+producer's writes are visible and call a null function pointer.
+---
+ XenonRecomp/recompiler.cpp | 9 ++++++---
+ 1 file changed, 6 insertions(+), 3 deletions(-)
+
+diff --git a/XenonRecomp/recompiler.cpp b/XenonRecomp/recompiler.cpp
+index 9835368..ff3103e 100644
+--- a/XenonRecomp/recompiler.cpp
++++ b/XenonRecomp/recompiler.cpp
+@@ -851,7 +851,8 @@ bool Recompiler::Recompile(
+         break;
+ 
+     case PPC_INST_EIEIO:
+-        // no op
++        // Orders stores; a no-op on x86 (TSO) but not on ARM64.
++        println("\t__atomic_thread_fence(__ATOMIC_RELEASE);");
+         break;
+ 
+     case PPC_INST_EXTSB:
+@@ -1211,7 +1212,8 @@ bool Recompiler::Recompile(
+         break;
+ 
+     case PPC_INST_LWSYNC:
+-        // no op
++        // Weakly ordered hosts (ARM64) need the barrier the guest asked for.
++        println("\t__atomic_thread_fence(__ATOMIC_ACQ_REL);");
+         break;
+ 
+     case PPC_INST_LWZ:
+@@ -1713,7 +1715,8 @@ bool Recompiler::Recompile(
+         break;
+ 
+     case PPC_INST_SYNC:
+-        // no op
++        // Weakly ordered hosts (ARM64) need the barrier the guest asked for.
++        println("\t__atomic_thread_fence(__ATOMIC_SEQ_CST);");
+         break;
+ 
+     case PPC_INST_TDLGEI:
+-- 
+2.50.1 (Apple Git-155)
+

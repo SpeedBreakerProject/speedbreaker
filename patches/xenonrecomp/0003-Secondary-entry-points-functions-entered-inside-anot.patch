@@ -1,0 +1,142 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: SpeedBreaker Project <speedbreaker-project@users.noreply.github.com>
+Date: Fri, 25 Sep 2026 15:05:03 +0000
+Subject: [PATCH 3/3] Secondary entry points: functions entered inside another
+ function's body
+
+MSVC can share one function body between several entry points; a title may
+call the inner one only through a pointer. New config key
+secondary_entries = [addr, ...] emits sub_<addr> with the enclosing
+function's body entered by a goto (placed after the local declarations),
+and registers it for direct and indirect calls.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ XenonRecomp/recompiler.cpp        | 27 +++++++++++++++++++++++++--
+ XenonRecomp/recompiler.h          |  3 ++-
+ XenonRecomp/recompiler_config.cpp |  6 ++++++
+ XenonRecomp/recompiler_config.h   |  4 ++++
+ 4 files changed, 37 insertions(+), 3 deletions(-)
+
+diff --git a/XenonRecomp/recompiler.cpp b/XenonRecomp/recompiler.cpp
+index 01ca7fa..5d822b1 100644
+--- a/XenonRecomp/recompiler.cpp
++++ b/XenonRecomp/recompiler.cpp
+@@ -2456,7 +2456,7 @@ bool Recompiler::Recompile(
+     return true;
+ }
+ 
+-bool Recompiler::Recompile(const Function& fn)
++bool Recompiler::Recompile(const Function& fn, uint32_t entry)
+ {
+     auto base = fn.base;
+     auto end = base + fn.size;
+@@ -2464,6 +2464,8 @@ bool Recompiler::Recompile(const Function& fn)
+ 
+     static std::unordered_set<size_t> labels;
+     labels.clear();
++    if (entry != 0)
++        labels.emplace(entry);
+ 
+     for (size_t addr = base; addr < end; addr += 4)
+     {
+@@ -2546,7 +2548,11 @@ bool Recompiler::Recompile(const Function& fn)
+ 
+     auto symbol = image.symbols.find(fn.base);
+     std::string name;
+-    if (symbol != image.symbols.end())
++    if (entry != 0)
++    {
++        name = fmt::format("sub_{:X}", entry);
++    }
++    else if (symbol != image.symbols.end())
+     {
+         name = symbol->name;
+     }
+@@ -2669,6 +2675,10 @@ bool Recompiler::Recompile(const Function& fn)
+     if (localVariables.ea)
+         println("\tuint32_t ea{{}};");
+ 
++    // Secondary entry: jump in after the local declarations (C++ forbids
++    // jumping past their initialisation).
++    if (entry != 0)
++        println("\tgoto loc_{:X};", entry);
+     out += tempString;
+ 
+     return allRecompiled;
+@@ -2752,6 +2762,9 @@ void Recompiler::Recompile(const std::filesystem::path& headerFilePath)
+         SaveCurrentOutData("ppc_context.h");
+     }
+ 
++    for (uint32_t entry : config.secondaryEntries)
++        image.symbols.emplace(fmt::format("sub_{:X}", entry), entry, 4, Symbol_Function);
++
+     {
+         println("#pragma once\n");
+         println("#include \"ppc_config.h\"");
+@@ -2790,6 +2803,16 @@ void Recompiler::Recompile(const std::filesystem::path& headerFilePath)
+         Recompile(functions[i]);
+     }
+ 
++    for (uint32_t entry : config.secondaryEntries)
++    {
++        auto fn = std::find_if(functions.begin(), functions.end(),
++            [&](const Function& f) { return entry > f.base && entry < f.base + f.size; });
++        if (fn == functions.end())
++            fmt::println("ERROR: secondary entry {:X} is not inside any function", entry);
++        else
++            Recompile(*fn, entry);
++    }
++
+     SaveCurrentOutData();
+ }
+ 
+diff --git a/XenonRecomp/recompiler.h b/XenonRecomp/recompiler.h
+index 8242db5..690570b 100644
+--- a/XenonRecomp/recompiler.h
++++ b/XenonRecomp/recompiler.h
+@@ -62,7 +62,8 @@ struct Recompiler
+         RecompilerLocalVariables& localVariables,
+         CSRState& csrState);
+ 
+-    bool Recompile(const Function& fn);
++    // `entry` != 0: emit the function named after `entry`, entered at it (secondary entry point).
++    bool Recompile(const Function& fn, uint32_t entry = 0);
+ 
+     void Recompile(const std::filesystem::path& headerFilePath);
+ 
+diff --git a/XenonRecomp/recompiler_config.cpp b/XenonRecomp/recompiler_config.cpp
+index 81330a4..1623367 100644
+--- a/XenonRecomp/recompiler_config.cpp
++++ b/XenonRecomp/recompiler_config.cpp
+@@ -58,6 +58,12 @@ void RecompilerConfig::Load(const std::string_view& configFilePath)
+             }
+         }
+ 
++        if (auto entriesArray = main["secondary_entries"].as_array())
++        {
++            for (auto& entry : *entriesArray)
++                secondaryEntries.push_back(*entry.value<uint32_t>());
++        }
++
+         if (auto invalidArray = main["invalid_instructions"].as_array())
+         {
+             for (auto& instr : *invalidArray)
+diff --git a/XenonRecomp/recompiler_config.h b/XenonRecomp/recompiler_config.h
+index 534e503..581e796 100644
+--- a/XenonRecomp/recompiler_config.h
++++ b/XenonRecomp/recompiler_config.h
+@@ -50,6 +50,10 @@ struct RecompilerConfig
+     uint32_t longJmpAddress = 0;
+     uint32_t setJmpAddress = 0;
+     std::unordered_map<uint32_t, uint32_t> functions;
++    // Addresses that are entered from outside but lie inside another function
++    // (MSVC shares one body between several entry points). Each gets its own
++    // function: the enclosing function's body, entered with a goto.
++    std::vector<uint32_t> secondaryEntries;
+     std::unordered_map<uint32_t, uint32_t> invalidInstructions;
+     std::unordered_map<uint32_t, RecompilerMidAsmHook> midAsmHooks;
+ 
+-- 
+2.50.1 (Apple Git-155)
+

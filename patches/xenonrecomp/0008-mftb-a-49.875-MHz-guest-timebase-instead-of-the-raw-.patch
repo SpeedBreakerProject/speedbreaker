@@ -1,0 +1,76 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: SpeedBreaker Project <speedbreaker-project@users.noreply.github.com>
+Date: Sat, 26 Sep 2026 05:06:04 +0000
+Subject: [PATCH] mftb: a 49.875 MHz guest timebase instead of the raw host
+ counter
+
+The Xbox 360 timebase runs at 49.875 MHz and games measure time with it.
+__rdtsc() is 24 MHz on Apple silicon (game time at half speed) and the
+TSC's GHz on x86 (game time many times too fast). mftb now emits
+PPC_QUERY_TIMEBASE(), by default the host monotonic clock scaled to 49.875 MHz.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ XenonRecomp/recompiler.cpp |  3 ++-
+ XenonUtils/ppc_context.h   | 24 ++++++++++++++++++++++++
+ 2 files changed, 26 insertions(+), 1 deletion(-)
+
+diff --git a/XenonRecomp/recompiler.cpp b/XenonRecomp/recompiler.cpp
+index 147f55d..b75a7ef 100644
+--- a/XenonRecomp/recompiler.cpp
++++ b/XenonRecomp/recompiler.cpp
+@@ -1264,7 +1264,8 @@ bool Recompiler::Recompile(
+         break;
+ 
+     case PPC_INST_MFTB:
+-        println("\t{}.u64 = __rdtsc();", r(insn.operands[0]));
++        // The guest timebase (49.875 MHz on the Xbox 360); see ppc_context.h.
++        println("\t{}.u64 = PPC_QUERY_TIMEBASE();", r(insn.operands[0]));
+         break;
+ 
+     case PPC_INST_MR:
+diff --git a/XenonUtils/ppc_context.h b/XenonUtils/ppc_context.h
+index a80eff4..a681071 100644
+--- a/XenonUtils/ppc_context.h
++++ b/XenonUtils/ppc_context.h
+@@ -5,6 +5,7 @@
+ #error "ppc_config.h must be included before ppc_context.h"
+ #endif
+ 
++#include <chrono>
+ #include <climits>
+ #include <cmath>
+ #include <csetjmp>
+@@ -898,6 +899,29 @@ inline simde__m128i simde_mm_vsr(simde__m128i a, simde__m128i b)
+     return simde_mm_castps_si128(simde_mm_insert_ps(simde_mm_castsi128_ps(simde_mm_srl_epi64(a, b)), simde_mm_castsi128_ps(simde_mm_srl_epi64(simde_mm_srli_si128(a, 4), b)), 0x10));
+ }
+ 
++// mftb: the Xbox 360's timebase runs at 49.875 MHz (what
++// KeQueryPerformanceFrequency reports), and games time themselves with it.
++// A raw host counter runs at another rate (24 MHz on Apple silicon, the TSC's
++// GHz on x86): game time then runs at the wrong speed. The default scales the
++// host's monotonic clock; define PPC_QUERY_TIMEBASE first to override.
++#ifndef PPC_QUERY_TIMEBASE
++inline uint64_t PpcQueryTimebase()
++{
++    constexpr uint64_t kTimebaseHz = 49875000;
++#if defined(__aarch64__) || defined(_M_ARM64)
++    uint64_t ticks, frequency;
++    asm volatile("mrs %0, cntvct_el0" : "=r"(ticks)::"memory");
++    asm volatile("mrs %0, cntfrq_el0" : "=r"(frequency));
++    return uint64_t((unsigned __int128)ticks * kTimebaseHz / frequency);
++#else
++    uint64_t ns = uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
++        std::chrono::steady_clock::now().time_since_epoch()).count());
++    return uint64_t((unsigned __int128)ns * kTimebaseHz / 1000000000u);
++#endif
++}
++#define PPC_QUERY_TIMEBASE() PpcQueryTimebase()
++#endif
++
+ #if defined(__aarch64__) || defined(_M_ARM64)
+ inline uint64_t __rdtsc()
+ {
+-- 
+2.50.1 (Apple Git-155)
+

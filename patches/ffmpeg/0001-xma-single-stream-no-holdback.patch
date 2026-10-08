@@ -1,0 +1,14 @@
+--- a/libavcodec/wmaprodec.c
++++ b/libavcodec/wmaprodec.c
+@@ -1923,7 +1923,10 @@
+             nb_samples = FFMIN(nb_samples, av_audio_fifo_size(s->samples[0][i]));
+         }
+ 
+-        if (!eof && avpkt->size)
++        /* nfsmw-recomp: only multi-stream files need samples held back to
++         * keep streams in sync; the Xbox 360's XMA decoder (one stream per
++         * context) outputs every decoded frame at once, and games rely on it. */
++        if (!eof && avpkt->size && s->num_streams > 1)
+             nb_samples -= FFMIN(nb_samples, 4096);
+ 
+         /* copy samples from buffer to output if possible */

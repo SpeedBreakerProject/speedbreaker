@@ -1,0 +1,56 @@
+# Game data is NEVER committed. Players supply their own disc.
+# (Anchored: runtime/game/ is source. No trailing slash: a symlink too.)
+/game
+private/
+*.iso
+*.xex
+*.xexp
+*.xcp
+*.bun
+*.big
+*.lzc
+# The disc's other formats, wherever an extracted copy lands: movies,
+# archives (ZDIR.BIN, ZZDATA*.BIN) and the PADA*/PADB* files.
+*.wmv
+*.xmv
+*.bin
+*.BIN
+PAD[AB][12]
+
+# Generated recompiler output (from the player's own default.xex)
+ppc/
+/ppc
+
+# Build output and packages
+build/
+out/
+.cache/
+*.tar.xz
+*.dmg
+*.dSYM/
+*.ipa
+xcuserdata/
+
+# Third-party tool checkouts (scripts/setup_tools.sh)
+tools/
+/tools
+
+# Local survey binary
+build-survey
+
+# Frame dumps and captured shaders (game data)
+/game/frames/
+/game/shaders/
+*.ppm
+
+# Logs and bug reports (they hold a screenshot of the game)
+last-run.log
+previous-run.log
+speedbreaker-bug-report-*.zip
+
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc

@@ -1,0 +1,202 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: SpeedBreaker Project <speedbreaker-project@users.noreply.github.com>
+Date: Fri, 25 Sep 2026 19:28:03 +0000
+Subject: [PATCH] vpkd3d128: implement every pack type and merge (Xenia
+ semantics)
+
+Only D3DCOLOR and FLOAT16_4 with fixed merges were handled; other types
+emitted a debug trap. NFS: Most Wanted uses NORMSHORT4 (type 4, pack 2)
+in-game. A helper in ppc_context.h packs magic-biased floats as Xenia's
+PACK sequences do (clamp max-then-min, low mantissa bits; float16 rounds
+toward zero) and merges with Xenia's permute controls for every pack and
+shift.
+---
+ XenonRecomp/recompiler.cpp |  48 +---------------
+ XenonUtils/ppc_context.h   | 112 +++++++++++++++++++++++++++++++++++++
+ 2 files changed, 115 insertions(+), 45 deletions(-)
+
+diff --git a/XenonRecomp/recompiler.cpp b/XenonRecomp/recompiler.cpp
+index ff3103e..4e066dd 100644
+--- a/XenonRecomp/recompiler.cpp
++++ b/XenonRecomp/recompiler.cpp
+@@ -2004,51 +2004,9 @@ bool Recompiler::Recompile(
+     }
+ 
+     case PPC_INST_VPKD3D128:
+-        // TODO: vectorize somehow?
+-        // NOTE: handling vector reversal here too
+-        printSetFlushMode(true);
+-        switch (insn.operands[2])
+-        {
+-        case 0: // D3D color
+-            if (insn.operands[3] != 1)
+-                fmt::println("Unexpected D3D color pack instruction at {:X}", base);
+-
+-            for (size_t i = 0; i < 4; i++)
+-            {
+-                constexpr size_t indices[] = { 3, 0, 1, 2 };
+-                println("\t{}.u32[{}] = 0x404000FF;", vTemp(), i);
+-                println("\t{}.f32[{}] = {}.f32[{}] < 3.0f ? 3.0f : ({}.f32[{}] > {}.f32[{}] ? {}.f32[{}] : {}.f32[{}]);", vTemp(), i, v(insn.operands[1]), i, v(insn.operands[1]), i, vTemp(), i, vTemp(), i, v(insn.operands[1]), i);
+-                println("\t{}.u32 {}= uint32_t({}.u8[{}]) << {};", temp(), i == 0 ? "" : "|", vTemp(), i * 4, indices[i] * 8);
+-            }
+-            println("\t{}.u32[{}] = {}.u32;", v(insn.operands[0]), insn.operands[4], temp());
+-            break;
+-
+-        case 5: // float16_4
+-            if (insn.operands[3] != 2 || insn.operands[4] > 2)
+-                fmt::println("Unexpected float16_4 pack instruction at {:X}", base);
+-
+-            for (size_t i = 0; i < 4; i++)
+-            {
+-        		// Strip sign from source
+-        		println("\t{}.u32 = ({}.u32[{}]&0x7FFFFFFF);", temp(), v(insn.operands[1]), i);
+-        		// If |source| is > 65504, clamp output to 0x7FFF, else save 8 exponent bits 
+-        		println("\t{0}.u8[0] = ({1}.f32 != {1}.f32) || ({1}.f32 > 65504.0f) ? 0xFF : (({2}.u32[{3}]&0x7f800000)>>23);", vTemp(), temp(), v(insn.operands[1]), i);
+-        		// If 8 exponent bits were saved, it can only be 0x8E at most
+-        		// If saved, save first 10 bits of mantissa
+-        		println("\t{}.u16 = {}.u8[0] != 0xFF ? (({}.u32[{}]&0x7FE000)>>13) : 0x0;", temp(), vTemp(), v(insn.operands[1]), i);
+-        		// If saved and > 127-15, exponent is converted from 8 to 5-bit by subtracting 0x70
+-        		// If saved but not > 127-15, clamp exponent at 0, add 0x400 to mantissa and shift right by (0x71-exponent)
+-        		// If right shift is greater than 31 bits, manually clamp mantissa to 0 or else the output of the shift will be wrong
+-        		println("\t{0}.u16[{1}] = {2}.u8[0] != 0xFF ? ({2}.u8[0] > 0x70 ? ((({2}.u8[0]-0x70)<<10)+{3}.u16) : (0x71-{2}.u8[0] > 31 ? 0x0 : ((0x400+{3}.u16)>>(0x71-{2}.u8[0])))) : 0x7FFF;", v(insn.operands[0]), i+(2*insn.operands[4]), vTemp(), temp());
+-        		// Add back original sign
+-        		println("\t{}.u16[{}] |= (({}.u32[{}]&0x80000000)>>16);", v(insn.operands[0]), i+(2*insn.operands[4]), v(insn.operands[1]), i);
+-            }
+-            break;
+-
+-        default:
+-            println("\t__builtin_debugtrap();");
+-            break;
+-        }
++        // vD, vB, type, pack, shift: see ppc_vpkd3d128 in ppc_context.h.
++        println("\tppc_vpkd3d128({}, {}, {}, {}, {});", v(insn.operands[0]), v(insn.operands[1]),
++            insn.operands[2], insn.operands[3], insn.operands[4]);
+         break;
+ 
+     case PPC_INST_VPKSHUS:
+diff --git a/XenonUtils/ppc_context.h b/XenonUtils/ppc_context.h
+index fb2c613..865f3f4 100644
+--- a/XenonUtils/ppc_context.h
++++ b/XenonUtils/ppc_context.h
+@@ -205,6 +205,118 @@ union alignas(0x10) PPCVRegister
+     double f64[2];
+ };
+ 
++// vpkd3d128 (VMX128): pack a vector of "magic"-biased floats into a D3D
++// vertex format and merge the result into vD. Semantics from Xenia
++// (ppc_emit_altivec.cc InstrEmit_vpkd3d128 and the x64 PACK sequences).
++// PPC element k (x = 0) is u32[3 - k] here: registers are byte-reversed.
++inline uint16_t ppc_float_to_half_rtz(float value)
++{
++    uint32_t f;
++    memcpy(&f, &value, 4);
++    uint32_t sign = (f >> 16) & 0x8000, exponent = (f >> 23) & 0xFF, mantissa = f & 0x7FFFFF;
++    if (exponent == 0xFF)
++        return uint16_t(sign | 0x7C00 | (mantissa ? 0x200 | (mantissa >> 13) : 0));
++    int e = int(exponent) - 127 + 15;
++    if (e >= 31)
++        return uint16_t(sign | 0x7BFF);  // toward zero: the largest finite value
++    if (e <= 0)
++    {
++        if (e < -10)
++            return uint16_t(sign);
++        return uint16_t(sign | ((mantissa | 0x800000) >> (14 - e)));
++    }
++    return uint16_t(sign | (uint32_t(e) << 10) | (mantissa >> 13));
++}
++
++inline uint32_t ppc_pack_clamp_bits(float value, uint32_t lo, uint32_t hi)
++{
++    float flo, fhi;
++    memcpy(&flo, &lo, 4);
++    memcpy(&fhi, &hi, 4);
++    float r = value > flo ? value : flo;  // max first: NaN packs as the minimum
++    r = r < fhi ? r : fhi;
++    uint32_t u;
++    memcpy(&u, &r, 4);
++    return u;
++}
++
++inline void ppc_vpkd3d128(PPCVRegister& d, const PPCVRegister& b, uint32_t type, uint32_t pack, uint32_t shift)
++{
++    float e[4] = { b.f32[3], b.f32[2], b.f32[1], b.f32[0] };
++    uint32_t p[4] = {};
++    switch (type)
++    {
++    case 0:  // D3DCOLOR: ARGB from w, x, y, z
++    {
++        uint32_t c[4];
++        for (int k = 0; k < 4; k++)
++            c[k] = ppc_pack_clamp_bits(e[k], 0x40400000u, 0x404000FFu) & 0xFF;
++        p[3] = (c[3] << 24) | (c[0] << 16) | (c[1] << 8) | c[2];
++        break;
++    }
++    case 1:  // NORMSHORT2
++    case 4:  // NORMSHORT4
++    {
++        uint32_t s[4];
++        for (int k = 0; k < 4; k++)
++            s[k] = ppc_pack_clamp_bits(e[k], 0x403F8001u, 0x40407FFFu) & 0xFFFF;
++        if (type == 1)
++            p[3] = (s[0] << 16) | s[1];
++        else
++        {
++            p[2] = (s[0] << 16) | s[1];
++            p[3] = (s[2] << 16) | s[3];
++        }
++        break;
++    }
++    case 2:  // NORMPACKED32 2_10_10_10, in every word
++    {
++        uint32_t v = (ppc_pack_clamp_bits(e[0], 0x403FFE01u, 0x404001FFu) & 0x3FF) |
++            ((ppc_pack_clamp_bits(e[1], 0x403FFE01u, 0x404001FFu) & 0x3FF) << 10) |
++            ((ppc_pack_clamp_bits(e[2], 0x403FFE01u, 0x404001FFu) & 0x3FF) << 20) |
++            ((ppc_pack_clamp_bits(e[3], 0x40400000u, 0x40400003u) & 0x3) << 30);
++        p[0] = p[1] = p[2] = p[3] = v;
++        break;
++    }
++    case 3:  // FLOAT16_2
++        p[3] = (uint32_t(ppc_float_to_half_rtz(e[0])) << 16) | ppc_float_to_half_rtz(e[1]);
++        break;
++    case 5:  // FLOAT16_4
++        p[2] = (uint32_t(ppc_float_to_half_rtz(e[0])) << 16) | ppc_float_to_half_rtz(e[1]);
++        p[3] = (uint32_t(ppc_float_to_half_rtz(e[2])) << 16) | ppc_float_to_half_rtz(e[3]);
++        break;
++    default:  // NORMPACKED64 4_20_20_20: not seen yet
++        __builtin_debugtrap();
++        return;
++    }
++
++    // Merge (Xenia's permute controls): {from packed?, word} per element.
++    static const uint8_t merges[4][4][4][2] = {
++        {},
++        { { { 0, 0 }, { 0, 1 }, { 0, 2 }, { 1, 3 } }, { { 0, 0 }, { 0, 1 }, { 1, 3 }, { 0, 3 } },
++          { { 0, 0 }, { 1, 3 }, { 0, 2 }, { 0, 3 } }, { { 1, 3 }, { 0, 1 }, { 0, 2 }, { 0, 3 } } },
++        { { { 0, 0 }, { 0, 1 }, { 1, 2 }, { 1, 3 } }, { { 0, 0 }, { 1, 2 }, { 1, 3 }, { 0, 3 } },
++          { { 1, 2 }, { 1, 3 }, { 0, 2 }, { 0, 3 } }, { { 1, 3 }, { 0, 1 }, { 0, 2 }, { 0, 3 } } },
++        { { { 0, 0 }, { 0, 1 }, { 1, 2 }, { 1, 3 } }, { { 0, 0 }, { 1, 2 }, { 1, 3 }, { 0, 3 } },
++          { { 1, 2 }, { 1, 3 }, { 0, 2 }, { 0, 3 } }, { { 0, 0 }, { 0, 1 }, { 0, 2 }, { 1, 2 } } },
++    };
++    if (pack == 0 || pack > 3 || shift > 3)
++    {
++        __builtin_debugtrap();
++        return;
++    }
++    uint32_t old[4] = { d.u32[3], d.u32[2], d.u32[1], d.u32[0] };
++    uint32_t result[4];
++    for (int i = 0; i < 4; i++)
++    {
++        const uint8_t* m = merges[pack][shift][i];
++        result[i] = m[0] ? p[m[1]] : old[m[1]];
++    }
++    for (int i = 0; i < 4; i++)
++        d.u32[3 - i] = result[i];
++}
++
++
+ #define PPC_ROUND_NEAREST 0x00
+ #define PPC_ROUND_TOWARD_ZERO 0x01
+ #define PPC_ROUND_UP 0x02
+-- 
+2.50.1 (Apple Git-155)
+

@@ -1,0 +1,32 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: SpeedBreaker Project <speedbreaker-project@users.noreply.github.com>
+Date: Fri, 25 Sep 2026 04:53:53 +0000
+Subject: [PATCH 2/3] arm64: widen the FPCR write operand to 64 bits
+
+`msr fpcr, %0` with a uint32_t operand leaves the upper half of the
+register unspecified (clang: -Wasm-operand-widths), and it lands in FPCR's
+reserved bits.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ XenonUtils/ppc_context.h | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/XenonUtils/ppc_context.h b/XenonUtils/ppc_context.h
+index 745e1c0..fb2c613 100644
+--- a/XenonUtils/ppc_context.h
++++ b/XenonUtils/ppc_context.h
+@@ -251,7 +251,9 @@ struct PPCFPSCRRegister
+ 
+     inline void setcsr(uint32_t csr) noexcept
+     {
+-        __asm__ __volatile__("msr fpcr, %0" : : "r"(csr));
++        // msr needs a 64-bit register; a uint32_t operand leaves the upper
++        // half unspecified and it would land in FPCR's reserved bits.
++        __asm__ __volatile__("msr fpcr, %0" : : "r"(uint64_t(csr)));
+     }
+ #else
+ #   error "Missing implementation for FPSCR."
+-- 
+2.50.1 (Apple Git-155)
+

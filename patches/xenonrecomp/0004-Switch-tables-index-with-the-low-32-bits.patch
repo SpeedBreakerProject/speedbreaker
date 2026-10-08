@@ -1,0 +1,32 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: SpeedBreaker Project <speedbreaker-project@users.noreply.github.com>
+Date: Fri, 25 Sep 2026 19:11:22 +0000
+Subject: [PATCH] Switch tables: index with the low 32 bits
+
+A bounds-checked jump table compares the index with cmplwi and loads the
+entry with rlwinm/lwzx, both 32-bit. 64-bit arithmetic before them (e.g.
+addis) can leave carries in the upper half, so switching on the full
+64-bit register can miss every case and hit __builtin_unreachable.
+Seen in NFS: Most Wanted's sub_8217F390 (addis r11,r11,32764).
+---
+ XenonRecomp/recompiler.cpp | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/XenonRecomp/recompiler.cpp b/XenonRecomp/recompiler.cpp
+index 5d822b1..9835368 100644
+--- a/XenonRecomp/recompiler.cpp
++++ b/XenonRecomp/recompiler.cpp
+@@ -609,7 +609,9 @@ bool Recompiler::Recompile(
+     case PPC_INST_BCTR:
+         if (switchTable != config.switchTables.end())
+         {
+-            println("\tswitch ({}.u64) {{", r(switchTable->second.r));
++            // The table index is the low word: 64-bit adds on the way (addis)
++            // can leave carries in the upper half that the hardware ignores.
++            println("\tswitch ({}.u32) {{", r(switchTable->second.r));
+ 
+             for (size_t i = 0; i < switchTable->second.labels.size(); i++)
+             {
+-- 
+2.50.1 (Apple Git-155)
+

@@ -1,0 +1,37 @@
+SpeedBreaker
+Copyright (C) 2026 project(u) and SpeedBreaker contributors
+
+SpeedBreaker is free software: you can redistribute it and/or modify it under
+the terms of the GNU General Public License as published by the Free Software
+Foundation, either version 3 of the License, or (at your option) any later
+version (GPL-3.0-or-later). The full text of version 3 is in COPYING.
+
+SpeedBreaker is distributed in the hope that it will be useful, but WITHOUT
+ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
+
+SpeedBreaker includes, and is built with, software by others under their own
+licenses: see THIRD_PARTY_NOTICES.md and the LICENSES folder.
+
+Source code: SpeedBreaker's own is at
+https://github.com/SpeedBreakerProject/speedbreaker, and each download names
+the commit it was built from (in VERSION, or the Mac app's Info.plist). The
+downloads also contain code by others under the GNU LGPL or GPL: FFmpeg (with
+SpeedBreaker's patch) and libmspack in every download, and the GNU C Library
+and GCC's runtime libraries in the SteamOS x86-64 download. Their complete
+source code, at the versions used, is published next to the downloads of each
+release on the project's Releases page, as
+SpeedBreaker-<version>-third-party-source.tar.xz. If it is ever missing, ask
+through the project's issue tracker: for at least three years after a
+release, its copy is provided at no charge.
+
+SpeedBreaker is an unofficial, fan-made project. It is not affiliated with,
+endorsed by, or sponsored by Electronic Arts Inc., the Need for Speed brand or
+Valve Corporation. "Need for Speed" and "Most Wanted" are trademarks of
+Electronic Arts Inc. Steam, Steam Deck, Steam Machine, Steam Frame and SteamOS
+are trademarks of Valve Corporation. All other trademarks belong to their
+respective owners.
+
+No game files are included or distributed. To play, you need your own legally
+obtained backup (a disc image) of your own Xbox 360 disc of Need for Speed:
+Most Wanted (2005). The in-app installer verifies it and installs it.

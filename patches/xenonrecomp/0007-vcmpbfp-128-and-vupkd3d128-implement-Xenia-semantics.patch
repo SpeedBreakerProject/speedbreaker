@@ -1,0 +1,172 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: SpeedBreaker Project <speedbreaker-project@users.noreply.github.com>
+Date: Fri, 25 Sep 2026 19:31:02 +0000
+Subject: [PATCH] vcmpbfp(128) and vupkd3d128: implement (Xenia semantics)
+
+vcmpbfp emitted a debug trap; vupkd3d128 handled only D3DCOLOR and
+NORMSHORT2. Bounds compare sets bit 31 for a > b and bit 30 for
+!(a >= -b), with CR6 from the out-of-bounds mask for the dotted form.
+Unpacking produces Xenia's magic-biased floats for every type except
+NORMPACKED64 (unused so far).
+---
+ XenonRecomp/recompiler.cpp | 43 ++++++--------------
+ XenonUtils/ppc_context.h   | 82 ++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 95 insertions(+), 30 deletions(-)
+
+diff --git a/XenonRecomp/recompiler.cpp b/XenonRecomp/recompiler.cpp
+index 4e066dd..147f55d 100644
+--- a/XenonRecomp/recompiler.cpp
++++ b/XenonRecomp/recompiler.cpp
+@@ -1836,7 +1836,17 @@ bool Recompiler::Recompile(
+ 
+     case PPC_INST_VCMPBFP:
+     case PPC_INST_VCMPBFP128:
+-        println("\t__builtin_debugtrap();");
++        // Bounds compare (Xenia): bit 31 if a > b, bit 30 if !(a >= -b).
++        printSetFlushMode(true);
++        println("\t{{");
++        println("\t\tsimde__m128 a = simde_mm_load_ps({}.f32), b = simde_mm_load_ps({}.f32);", v(insn.operands[1]), v(insn.operands[2]));
++        println("\t\tsimde__m128 gt = simde_mm_cmpgt_ps(a, b);");
++        println("\t\tsimde__m128 lt = simde_mm_cmpnge_ps(a, simde_mm_xor_ps(b, simde_mm_castsi128_ps(simde_mm_set1_epi32(int(0x80000000)))));");
++        println("\t\tsimde_mm_store_ps({}.f32, simde_mm_or_ps(simde_mm_and_ps(gt, simde_mm_castsi128_ps(simde_mm_set1_epi32(int(0x80000000)))), "
++            "simde_mm_and_ps(lt, simde_mm_castsi128_ps(simde_mm_set1_epi32(0x40000000)))));", v(insn.operands[0]));
++        if (strchr(insn.opcode->name, '.'))
++            println("\t\t{}.setFromMask(simde_mm_or_ps(gt, lt), 0xF);", cr(6));
++        println("\t}}");
+         break;
+ 
+     case PPC_INST_VCMPEQFP:
+@@ -2324,35 +2334,8 @@ bool Recompiler::Recompile(
+         break;
+ 
+     case PPC_INST_VUPKD3D128:
+-        // TODO: vectorize somehow?
+-        // NOTE: handling vector reversal here too
+-        switch (insn.operands[2] >> 2)
+-        {
+-        case 0: // D3D color
+-            for (size_t i = 0; i < 4; i++)
+-            {
+-                constexpr size_t indices[] = { 3, 0, 1, 2 };
+-                println("\t{}.u32[{}] = {}.u8[{}] | 0x3F800000;", vTemp(), i, v(insn.operands[1]), indices[i]);
+-            }
+-            println("\t{} = {};", v(insn.operands[0]), vTemp());
+-            break;
+-
+-        case 1: // 2 shorts
+-            for (size_t i = 0; i < 2; i++)
+-            {
+-                println("\t{}.f32 = 3.0f;", temp());
+-                println("\t{}.s32 += {}.s16[{}];", temp(), v(insn.operands[1]), 1 - i);
+-                println("\t{}.f32[{}] = {}.f32;", vTemp(), 3 - i, temp());
+-            }
+-            println("\t{}.f32[1] = 0.0f;", vTemp());
+-            println("\t{}.f32[0] = 1.0f;", vTemp());
+-            println("\t{} = {};", v(insn.operands[0]), vTemp());
+-            break;
+-
+-        default:
+-            println("\t__builtin_debugtrap();");
+-            break;
+-        }
++        // vD, vB, IMM (type = IMM >> 2): see ppc_vupkd3d128 in ppc_context.h.
++        println("\tppc_vupkd3d128({}, {}, {});", v(insn.operands[0]), v(insn.operands[1]), insn.operands[2] >> 2);
+         break;
+ 
+     case PPC_INST_VUPKHSB:
+diff --git a/XenonUtils/ppc_context.h b/XenonUtils/ppc_context.h
+index 865f3f4..a80eff4 100644
+--- a/XenonUtils/ppc_context.h
++++ b/XenonUtils/ppc_context.h
+@@ -240,6 +240,88 @@ inline uint32_t ppc_pack_clamp_bits(float value, uint32_t lo, uint32_t hi)
+     return u;
+ }
+ 
++inline uint32_t ppc_half_to_float_bits(uint32_t h)
++{
++    uint32_t sign = (h & 0x8000) << 16, exponent = (h >> 10) & 0x1F, mantissa = h & 0x3FF;
++    if (exponent == 0x1F)
++        return sign | 0x7F800000 | (mantissa << 13);
++    if (exponent == 0)
++    {
++        if (mantissa == 0)
++            return sign;
++        int e = -1;
++        do
++        {
++            e++;
++            mantissa <<= 1;
++        } while ((mantissa & 0x400) == 0);
++        return sign | (uint32_t(127 - 15 - e) << 23) | ((mantissa & 0x3FF) << 13);
++    }
++    return sign | ((exponent + 127 - 15) << 23) | (mantissa << 13);
++}
++
++// vupkd3d128 (VMX128): unpack a D3D vertex format into "magic"-biased
++// floats (3.0 + n * 2^-22 for signed normalised values, 1.0 + c * 2^-23 for
++// colours; negative overflow becomes a quiet NaN). Semantics from Xenia's
++// x64 UNPACK sequences.
++inline void ppc_vupkd3d128(PPCVRegister& d, const PPCVRegister& b, uint32_t type)
++{
++    uint32_t w[4] = { b.u32[3], b.u32[2], b.u32[1], b.u32[0] };  // PPC order
++    auto short3 = [](uint32_t v) {
++        uint32_t r = 0x40400000u + uint32_t(int32_t(int16_t(v & 0xFFFF)));
++        return r == 0x403F8000u ? 0x7FC00000u : r;
++    };
++    auto tenbit3 = [](uint32_t v) {
++        uint32_t r = 0x40400000u + uint32_t(int32_t((v & 0x3FF) << 22) >> 22);
++        return r == 0x403FFE00u ? 0x7FC00000u : r;
++    };
++    uint32_t r[4];
++    switch (type)
++    {
++    case 0:  // D3DCOLOR (ARGB in w) -> RGBA
++        r[0] = 0x3F800000u | ((w[3] >> 16) & 0xFF);
++        r[1] = 0x3F800000u | ((w[3] >> 8) & 0xFF);
++        r[2] = 0x3F800000u | (w[3] & 0xFF);
++        r[3] = 0x3F800000u | (w[3] >> 24);
++        break;
++    case 1:  // NORMSHORT2 (in w)
++        r[0] = short3(w[3] >> 16);
++        r[1] = short3(w[3]);
++        r[2] = 0;
++        r[3] = 0x3F800000u;
++        break;
++    case 2:  // NORMPACKED32 2_10_10_10 (in w)
++        r[0] = tenbit3(w[3]);
++        r[1] = tenbit3(w[3] >> 10);
++        r[2] = tenbit3(w[3] >> 20);
++        r[3] = 0x3F800000u + ((w[3] >> 30) & 3);
++        break;
++    case 3:  // FLOAT16_2 (in w)
++        r[0] = ppc_half_to_float_bits(w[3] >> 16);
++        r[1] = ppc_half_to_float_bits(w[3] & 0xFFFF);
++        r[2] = 0;
++        r[3] = 0x3F800000u;
++        break;
++    case 4:  // NORMSHORT4 (in z, w)
++        r[0] = short3(w[2] >> 16);
++        r[1] = short3(w[2]);
++        r[2] = short3(w[3] >> 16);
++        r[3] = short3(w[3]);
++        break;
++    case 5:  // FLOAT16_4 (in z, w)
++        r[0] = ppc_half_to_float_bits(w[2] >> 16);
++        r[1] = ppc_half_to_float_bits(w[2] & 0xFFFF);
++        r[2] = ppc_half_to_float_bits(w[3] >> 16);
++        r[3] = ppc_half_to_float_bits(w[3] & 0xFFFF);
++        break;
++    default:  // NORMPACKED64 4_20_20_20: not seen yet
++        __builtin_debugtrap();
++        return;
++    }
++    for (int i = 0; i < 4; i++)
++        d.u32[3 - i] = r[i];
++}
++
+ inline void ppc_vpkd3d128(PPCVRegister& d, const PPCVRegister& b, uint32_t type, uint32_t pack, uint32_t shift)
+ {
+     float e[4] = { b.f32[3], b.f32[2], b.f32[1], b.f32[0] };
+-- 
+2.50.1 (Apple Git-155)
+
