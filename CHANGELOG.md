@@ -30,7 +30,7 @@ it's built into the game).
   already holds files gets a new SpeedBreaker Game folder inside. The game remembers the folder,
   and says so if its drive isn't connected. On SteamOS the folder picker opens only in Desktop
   Mode: in Game Mode, switch to Desktop Mode and choose the folder there, or run
-  speedbreaker.sh --install <image> --dest <folder> from Konsole in Desktop Mode (or over SSH).
+  `speedbreaker.sh --install <image> --dest <folder>` from Konsole in Desktop Mode (or over SSH).
 - Check for Updates asks GitHub whether a newer SpeedBreaker is out. If one is, it shows what
   changed, opens the download page, and shows that page as a QR code to scan with a phone (for
   Steam Deck Game Mode and the Steam Frame, where no browser may open). Nothing is checked online
