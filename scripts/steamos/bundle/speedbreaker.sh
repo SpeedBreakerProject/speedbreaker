@@ -1,8 +1,10 @@
 #!/bin/bash
 # SpeedBreaker on SteamOS without a distrobox (a Steam Deck, a Steam Machine,
 # a Steam Frame): add this script to Steam as a non-Steam game (README.md next
-# to it). It runs SpeedBreaker from this folder with the libraries in lib/
-# and logs to last-run.log here;
+# to it). It is the only program at the top of this folder: it runs the game,
+# lib/SpeedBreaker, with the libraries in lib/ (the game on its own can't pick
+# them: started directly it fails, e.g. "GLIBC_2.44 not found"), and logs to
+# last-run.log here;
 # the run before stays as previous-run.log, so a relaunch after a crash
 # doesn't lose it. SpeedBreaker's own options pass through
 # (`speedbreaker.sh --install <image>`), and NFSMW_* settings can go in Steam's
@@ -26,7 +28,7 @@
 # game starts (a file dialog) never see these libraries.
 # NFSMW_BUNDLED_GLIBC=1|0 and NFSMW_BUNDLED_CXX=1|0 force a choice (debugging).
 HERE="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
-BIN="$HERE/SpeedBreaker"
+BIN="$HERE/lib/SpeedBreaker"
 
 # The log: here, or in the data folder if this one isn't writable (or /tmp,
 # the last place a log can go). On a terminal it's shown as well
@@ -46,6 +48,26 @@ fi
 
 say() { echo "[launcher] $*"; }
 say "$(cat "$HERE/VERSION" 2>/dev/null || echo "SpeedBreaker (no VERSION file)"), started $(date '+%F %T %z')"
+
+# Up to v0.1.0 the game was here at the top, beside this script; since v0.1.1
+# it is lib/SpeedBreaker. A newer release unpacked over an older folder (the
+# README's way to update) leaves the old program behind: an old version that
+# runs if started directly. With the new one in lib/, it goes (or, if it
+# can't be removed, it's renamed aside), once, and the log says so.
+OLD="$HERE/SpeedBreaker"
+if [ -f "$BIN" ] && [ -f "$OLD" ] && [ ! -L "$OLD" ]; then
+    if rm -f "$OLD" 2>/dev/null && [ ! -e "$OLD" ]; then
+        say "removed SpeedBreaker at the top of this folder: an earlier release's program, left by unpacking this one over it (the game is lib/SpeedBreaker now)"
+    elif mv -f "$OLD" "$OLD.old" 2>/dev/null; then
+        say "renamed SpeedBreaker at the top of this folder to SpeedBreaker.old: an earlier release's program (the game is lib/SpeedBreaker now)"
+    else
+        say "warning: can't remove SpeedBreaker at the top of this folder, an earlier release's program (the game is lib/SpeedBreaker now): delete it, and start the game with speedbreaker.sh"
+    fi
+fi
+if [ ! -f "$BIN" ]; then
+    say "no lib/SpeedBreaker in $HERE: unpack the whole download again"
+    exit 1
+fi
 say "system: $(. /etc/os-release 2>/dev/null; echo "${NAME:-unknown} ${VERSION_ID:-}${BUILD_ID:+ build $BUILD_ID}${VARIANT_ID:+ ($VARIANT_ID)}"), kernel $(uname -r)," \
     "CPU$(grep -m1 '^model name' /proc/cpuinfo | cut -d: -f2-), $(nproc) threads, $(awk '/^MemTotal/ { printf "%.1f GB", $2 / 1048576 }' /proc/meminfo)"
 

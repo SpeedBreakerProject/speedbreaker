@@ -3,9 +3,10 @@
 // The one-time "What's new" note: the first launch of a newer version shows
 // this version's CHANGELOG.md entry, compiled in at build time
 // (generated/whats_new.inc, runtime/CMakeLists.txt), over the game's first
-// frames until the player closes it. Offline only: no update check, nothing
-// sent. main.cpp decides when (user/version_check.h); the version that ran
-// last lives in settings.toml, so it shows once.
+// frames until the player closes it. Offline: the note is built in and
+// nothing is sent (Check for Updates, update/updater.h, goes online only when
+// pressed). main.cpp decides when (user/version_check.h); the version that
+// ran last lives in settings.toml, so it shows once.
 #include <stdafx.h>
 #include "ui.h"
 

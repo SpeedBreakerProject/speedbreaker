@@ -1,19 +1,24 @@
 #!/usr/bin/env python3
 # SpeedBreaker. GPL-3.0-or-later (see COPYING).
 #
-# make_app.py [build dir] [output dir] [--dmg]: SpeedBreaker.app for macOS
-# (Apple silicon) from a build (default build/main), in build/app:
+# make_app.py [build dir] [output dir] [--dmg] [--min-macos=<version>]:
+# SpeedBreaker.app for macOS (Apple silicon) from a build (default
+# build/main), in build/app:
 #   Contents/MacOS/SpeedBreaker      the game
-#   Contents/Frameworks/             the libraries it links (Homebrew's SDL3,
-#                                    Vulkan loader, glslang, SPIRV-Tools, and
-#                                    what they link), named @rpath/<file>, and
-#                                    MoltenVK, the Vulkan driver
+#   Contents/Frameworks/             the libraries it links (SDL3, the Vulkan
+#                                    loader, glslang, SPIRV-Tools, and what
+#                                    they link), named @rpath/<file>, and
+#                                    MoltenVK, the Vulkan driver (Homebrew's
+#                                    1.4.2: it runs on macOS 12+; another
+#                                    version only with MOLTENVK_VERSION=<it>)
 #   Contents/Resources/vulkan/icd.d/ MoltenVK's manifest (the Vulkan loader
 #                                    looks for drivers in the app's bundle)
 #   Contents/Resources/AppIcon.icns  from scripts/macos/AppIcon.png
 #   Contents/Resources/licenses/     COPYING, NOTICE, THIRD_PARTY_NOTICES.md,
 #                                    LICENSES/, and each bundled library's
-#                                    own license files (from its Homebrew keg)
+#                                    own license files (from build_deps.sh's
+#                                    prefix, with what each was built from, or
+#                                    from the library's Homebrew keg)
 #   Contents/Info.plist              a game (macOS Game Mode when fullscreen),
 #                                    versioned from the build: CFBundleShort-
 #                                    VersionString is project()'s version,
@@ -21,6 +26,21 @@
 #                                    the history, LSMinimumSystemVersion the
 #                                    build's deployment target, which every
 #                                    binary in the app must match (checked)
+#
+# The macOS the app runs on: the build's deployment target (CMakeLists.txt's
+# default, 15.0, unless the build was configured with another). Every library
+# in the app, and the FFmpeg the game links statically, must be built for it
+# or an older macOS; a newer one is refused, with the two ways out:
+#   - the libraries built for it by scripts/macos/build_deps.sh <prefix>, the
+#     build configured with -DCMAKE_PREFIX_PATH=<prefix>
+#     -DFFMPEG_XMA=<prefix>/ffmpeg-xma (how the release is built);
+#   - or Homebrew's libraries, which are built for the macOS they were made
+#     on (26.0 on macOS 26), with the build configured for that macOS:
+#     -DCMAKE_OSX_DEPLOYMENT_TARGET=26.0. Fine for an app of your own; it
+#     won't open on an older macOS, and this script says so.
+# --min-macos=<version> (release scripts): refuse an app for any other macOS.
+# scripts/macos/check_app.py checks the app or dmg it makes (the release's
+# gate: the floor, every binary's, what it loads and imports).
 # signed ad hoc (Apple silicon runs nothing unsigned, and rewriting a
 # library's names breaks its signature). Nothing of Homebrew is needed to
 # run it. No game data: the game installs from the player's disc image on
@@ -36,15 +56,27 @@
 # --dmg: also <output>/SpeedBreaker-macos.dmg (the app and a shortcut to
 # Applications, to drag it onto) with its .sha256, the release download, and
 # a copy named by the version (SpeedBreaker-<version>-macos.dmg, a hard link).
-import os, plistlib, re, shutil, subprocess, sys, tempfile
+import json, os, plistlib, re, shutil, subprocess, sys, tempfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 ARGS = [a for a in sys.argv[1:] if not a.startswith('--')]
-DMG = '--dmg' in sys.argv[1:]
+OPTIONS = [a for a in sys.argv[1:] if a.startswith('--')]
+DMG = '--dmg' in OPTIONS
+MIN_MACOS = next((a.split('=', 1)[1] for a in OPTIONS if a.startswith('--min-macos=')), None)
+for a in OPTIONS:
+    if a != '--dmg' and not a.startswith('--min-macos='):
+        raise SystemExit(f'make_app.py: unknown option {a} (usage: make_app.py [build dir] [output dir] [--dmg] [--min-macos=<version>])')
 BUILD = os.path.abspath(ARGS[0] if len(ARGS) > 0 else os.path.join(ROOT, 'build/main'))
 OUT = os.path.abspath(ARGS[1] if len(ARGS) > 1 else os.path.join(ROOT, 'build/app'))
 BIN = os.path.join(BUILD, 'runtime/SpeedBreaker')
 MOLTENVK = os.environ.get('MOLTENVK', '/opt/homebrew/opt/molten-vk/lib/libMoltenVK.dylib')
+# The MoltenVK the releases ship (v0.1.0 and on): the Vulkan driver, so another
+# version can change how the game runs and how fast. A `brew upgrade` must not
+# change it silently: another is taken only when MOLTENVK_VERSION names it.
+MOLTENVK_PINNED = '1.4.2'
+# Projects compiled into a bundled library that come with their own license:
+# their files go next to the library's (LICENSES/ has them).
+EMBEDDED = {'molten-vk': [('cereal, BSD-3-Clause', 'LICENSES/cereal-BSD-3-Clause.txt', 'cereal-LICENSE.txt')]}
 
 
 def run(*args):
@@ -113,13 +145,59 @@ def build_number(commit):
     return out if out.isdigit() else '0'
 
 
+def version_tuple(v):
+    """'15.0' -> (15, 0, 0), comparable."""
+    v = tuple(int(x) for x in str(v).split('.'))
+    return v + (0,) * (3 - len(v))
+
+
+def minos_all(path):
+    """The oldest macOS each Mach-O in a file runs on (LC_BUILD_VERSION or the
+    older LC_VERSION_MIN_MACOSX): one for a binary or library, one per member
+    of a static archive."""
+    found, field = [], None
+    for line in run('otool', '-l', path).splitlines():
+        line = line.strip()
+        if line.startswith('cmd '):
+            field = {'cmd LC_BUILD_VERSION': 'minos', 'cmd LC_VERSION_MIN_MACOSX': 'version'}.get(line)
+        elif field and line.startswith(field + ' '):
+            found.append(version_tuple(line.split()[1]))
+            field = None
+    return found
+
+
 def minos(path):
-    """The oldest macOS a Mach-O file runs on (LC_BUILD_VERSION or the older
-    LC_VERSION_MIN_MACOSX), as a tuple."""
-    out = run('otool', '-l', path)
-    m = re.search(r'cmd LC_BUILD_VERSION\n.*?\n\s+minos (\S+)', out, re.S) or \
-        re.search(r'cmd LC_VERSION_MIN_MACOSX\n.*?\n\s+version (\S+)', out, re.S)
-    return tuple(int(x) for x in m.group(1).split('.')) if m else (0,)
+    """The oldest macOS a Mach-O file runs on, as a tuple ((0, 0, 0) if it
+    doesn't say)."""
+    found = minos_all(path)
+    return max(found) if found else (0, 0, 0)
+
+
+def project_default_target():
+    """CMakeLists.txt's default deployment target (SB_OSX_DEFAULT_TARGET), or None."""
+    try:
+        with open(os.path.join(cache_value('CMAKE_HOME_DIRECTORY') or ROOT, 'CMakeLists.txt')) as f:
+            m = re.search(r'set\(SB_OSX_DEFAULT_TARGET "([0-9.]+)"\)', f.read())
+            return m.group(1) if m else None
+    except OSError:
+        return None
+
+
+def moltenvk_version():
+    """The version of the MoltenVK to bundle (its Homebrew keg's, or
+    MOLTENVK_VERSION's), refused unless it's the pinned one or
+    MOLTENVK_VERSION names it."""
+    k = keg(MOLTENVK)
+    found = k.split('/')[-1] if k else None
+    wanted = os.environ.get('MOLTENVK_VERSION')
+    if found and wanted and found != wanted:
+        raise SystemExit(f'make_app.py: {MOLTENVK} is MoltenVK {found}, not MOLTENVK_VERSION={wanted}')
+    version = found or wanted
+    if version != MOLTENVK_PINNED and not wanted:
+        raise SystemExit(f'make_app.py: {MOLTENVK} is MoltenVK {version or "of an unknown version (not a Homebrew keg)"}, '
+                         f'not {MOLTENVK_PINNED}, the one the releases ship (the Vulkan driver: another can change how the '
+                         f'game runs). To bundle it anyway, set MOLTENVK_VERSION=<its version>.')
+    return version
 
 
 def keg(path):
@@ -128,9 +206,27 @@ def keg(path):
     return m.group(1) if m else None
 
 
+DEPS_RECORD = 'share/speedbreaker-deps.json'   # written by scripts/macos/build_deps.sh
+
+
+def deps_prefix(path):
+    """The scripts/macos/build_deps.sh prefix a library file is in (<prefix>/lib/<file>, or
+    <prefix>/ffmpeg-xma/lib/<file>), or None."""
+    d = os.path.dirname(os.path.realpath(path))
+    for prefix in (os.path.dirname(d), os.path.dirname(os.path.dirname(d))):
+        if os.path.isfile(os.path.join(prefix, DEPS_RECORD)):
+            return prefix
+    return None
+
+
 def copy_licenses(resources, libraries):
     """Contents/Resources/licenses: SpeedBreaker's notices and every bundled
-    library's own license files, from its Homebrew keg."""
+    library's own license files: from the build_deps.sh prefix it was built
+    in (with the project, version, source and SHA-256 it was built from), or
+    from its Homebrew keg. A prefix's projects that the game and the
+    libraries are built with but that aren't a library of their own here
+    (the Vulkan and SPIR-V headers, the FFmpeg the game links statically)
+    get their license files too."""
     licenses = os.path.join(resources, 'licenses')
     os.makedirs(licenses)
     for name in ('COPYING', 'NOTICE', 'THIRD_PARTY_NOTICES.md'):
@@ -139,11 +235,48 @@ def copy_licenses(resources, libraries):
     lines = ['SpeedBreaker is free software under the GPL-3.0-or-later (COPYING, NOTICE). What it is',
              'built from and with, and each license, is in THIRD_PARTY_NOTICES.md and LICENSES/.', '',
              'The libraries in Contents/Frameworks, with their own license files here:']
+    records = {}   # prefix -> its build_deps.sh record
+    used = set()   # (prefix, project) whose license files are here
+
+    def record(prefix):
+        if prefix not in records:
+            with open(os.path.join(prefix, DEPS_RECORD)) as f:
+                records[prefix] = json.load(f)
+        return records[prefix]
+
+    def copy_project(prefix, project):
+        src = os.path.join(prefix, 'share/licenses', project)
+        dest = os.path.join(licenses, project)
+        files = record(prefix)['projects'][project]['licenses']
+        if (prefix, project) not in used:
+            if os.path.exists(dest):
+                raise SystemExit(f'make_app.py: two sources of license files for {project}')
+            for f in files:
+                os.makedirs(os.path.dirname(os.path.join(dest, f)), exist_ok=True)
+                shutil.copy2(os.path.join(src, f), os.path.join(dest, f))
+            used.add((prefix, project))
+        return files
+
+    def describe(prefix, project, built=True):
+        r = record(prefix); j = r['projects'][project]
+        built = f', built for macOS {r["deployment_target"]}+ ({r["architecture"]})' if built else ''
+        return f'{project} {j["version"]}{built}, from {j["url"]} (SHA-256 {j["sha256"]})'
+
     missing = []
     for lib, src in sorted(libraries.items()):
-        k = keg(src)
         found = []
-        if k:
+        prefix = deps_prefix(src)
+        k = keg(src)
+        if prefix:
+            projects = record(prefix)['projects']
+            project = next((n for n, j in projects.items()
+                            if lib in j['libraries'] or os.path.basename(os.path.realpath(src)) in j['libraries']), None)
+            if project:
+                found = copy_project(prefix, project)
+                lines.append(f'  {lib}: {describe(prefix, project)}; license files in {project}/: {", ".join(found)}')
+            else:
+                lines.append(f'  {lib}: from {src} (not in {os.path.join(prefix, DEPS_RECORD)})')
+        elif k:
             package, version = k.split('/')[-2:]
             dest = os.path.join(licenses, package)
             candidates = [os.path.join(k, f) for f in os.listdir(k)
@@ -159,11 +292,40 @@ def copy_licenses(resources, libraries):
                     if not os.path.exists(target):
                         shutil.copy2(c, target)
                     found.append(os.path.basename(c))
-            lines.append(f'  {lib}: {package} {version} ({", ".join(sorted(set(found))) or "no license file found"})')
+            embedded = []
+            for name, text, file in EMBEDDED.get(package, []) if found else []:
+                shutil.copy2(os.path.join(ROOT, text), os.path.join(dest, file))
+                embedded.append(f'{name} ({file})')
+            lines.append(f'  {lib}: {package} {version}, from Homebrew '
+                         f'({", ".join(sorted(set(found))) or "no license file found"})'
+                         + (f'; it includes {", ".join(embedded)}' if embedded else ''))
         else:
-            lines.append(f'  {lib}: from {src} (not a Homebrew keg)')
+            lines.append(f'  {lib}: from {src} (neither a build_deps.sh prefix nor a Homebrew keg)')
         if not found:
             missing.append(lib)
+
+    # What the game and those libraries are built with from the same prefixes
+    # (the headers of a prefix that a bundled library came from), and the
+    # FFmpeg the game links statically when it comes from one. A prefix only
+    # FFmpeg came from, as when the libraries are Homebrew's, gives FFmpeg
+    # alone: the game was built with Homebrew's headers then.
+    library_prefixes = {prefix for prefix, _ in used}
+    ffmpeg = cache_value('FFMPEG_XMA')
+    ffmpeg_prefix = deps_prefix(os.path.join(ffmpeg, 'lib/libavcodec.a')) if ffmpeg else None
+    if ffmpeg_prefix:
+        record(ffmpeg_prefix)
+    # (A project with libraries of its own that aren't in the app isn't in it at all.)
+    others = [(prefix, project) for prefix in sorted(records) for project, j in records[prefix]['projects'].items()
+              if (prefix, project) not in used
+              and (prefix == ffmpeg_prefix if project == 'FFmpeg'
+                   else not j['libraries'] and prefix in library_prefixes)]
+    if others:
+        lines += ['', 'Built into the game and the libraries above, with their license files here:']
+        for prefix, project in others:
+            files = copy_project(prefix, project)
+            ffmpeg_here = project == 'FFmpeg'
+            what = 'linked into the game, statically, with SpeedBreaker\'s patch' if ffmpeg_here else 'headers'
+            lines.append(f'  {describe(prefix, project, built=ffmpeg_here)}: {what}; license files in {project}/: {", ".join(files)}')
     with open(os.path.join(licenses, 'README.txt'), 'w') as f:
         f.write('\n'.join(lines) + '\n')
     if missing:
@@ -204,6 +366,14 @@ def main():
     minimum = cache_value('CMAKE_OSX_DEPLOYMENT_TARGET')
     if not re.fullmatch(r'\d+(\.\d+)*', minimum):
         raise SystemExit(f'make_app.py: no CMAKE_OSX_DEPLOYMENT_TARGET in {BUILD} (the top-level CMakeLists.txt sets one)')
+    if MIN_MACOS and version_tuple(MIN_MACOS) != version_tuple(minimum):
+        raise SystemExit(f'make_app.py: {BUILD} is built for macOS {minimum}, not {MIN_MACOS} (--min-macos); '
+                         f'configure it with -DCMAKE_OSX_DEPLOYMENT_TARGET={MIN_MACOS}, or in a new build folder')
+    default = project_default_target()
+    if default and version_tuple(default) != version_tuple(minimum):
+        print(f'make_app.py: warning: {BUILD} is configured for macOS {minimum}, not the project\'s {default} '
+              f'(CMakeLists.txt): not for release', file=sys.stderr)
+    mvk_version = moltenvk_version()
     app = os.path.join(OUT, 'SpeedBreaker.app')
     shutil.rmtree(app, ignore_errors=True)
     contents = os.path.join(app, 'Contents')
@@ -277,17 +447,35 @@ def main():
                 run('sips', '-z', str(px), str(px), src, '--out', os.path.join(iconset, name))
         run('iconutil', '-c', 'icns', iconset, '-o', os.path.join(resources, 'AppIcon.icns'))
 
-    # Every binary here runs on the macOS the plist promises.
-    def norm(v):
-        v = tuple(v)
-        return v + (0,) * (3 - len(v))
-    need = {f: norm(minos(f)) for f in [exe] + [os.path.join(frameworks, n) for n in os.listdir(frameworks)]}
-    floor = norm(int(x) for x in minimum.split('.'))
-    newer = [f'{os.path.basename(f)} ({".".join(map(str, v))})' for f, v in need.items() if v > floor]
+    # Every binary here runs on the macOS the plist promises, and so does the
+    # FFmpeg linked into the game (an archive built for a newer macOS links
+    # with only an ld warning).
+    def show(v):
+        return '.'.join(map(str, v[:2] if v[2] == 0 else v))
+    floor = version_tuple(minimum)
+    need = {f: minos(f) for f in [exe] + [os.path.join(frameworks, n) for n in os.listdir(frameworks)]}
+    newer = [f'{os.path.basename(f)} ({show(v)}, from {origin[f]})' for f, v in sorted(need.items()) if v > floor]
+    newest = max(need.values())
+    ffmpeg = cache_value('FFMPEG_XMA')
+    for a in ('lib/libavcodec.a', 'lib/libavutil.a') if ffmpeg else ():
+        path = os.path.join(ffmpeg, a)
+        found = minos_all(path) if os.path.isfile(path) else []
+        if any(v > floor for v in found):
+            newer.append(f'{os.path.basename(a)} ({show(max(found))}, from {path}, linked into the game)')
+            newest = max(newest, max(found))
     if newer:
-        raise SystemExit(f'make_app.py: these need a newer macOS than the build\'s {minimum}: ' + ', '.join(newer))
+        brew = any('/Cellar/' in n or '/opt/homebrew/' in n for n in newer)
+        raise SystemExit(
+            f'make_app.py: these need a newer macOS than the build\'s {minimum}, so the app would not open on macOS '
+            f'{minimum}:\n  ' + '\n  '.join(newer) + '\n'
+            + ('Homebrew\'s bottles are built for the macOS they were made on. ' if brew else '')
+            + f'Either build the libraries for {minimum} (how the release is built):\n'
+            f'  scripts/macos/build_deps.sh <prefix>, then configure the build with -DCMAKE_PREFIX_PATH=<prefix> '
+            f'-DFFMPEG_XMA=<prefix>/ffmpeg-xma and rebuild;\n'
+            f'or make an app for this Mac\'s macOS and newer only: configure the build with '
+            f'-DCMAKE_OSX_DEPLOYMENT_TARGET={show(newest)} and rebuild.')
     if need[exe] != floor:
-        raise SystemExit(f'make_app.py: the game was built for macOS {".".join(map(str, need[exe]))}, not {minimum}')
+        raise SystemExit(f'make_app.py: the game was built for macOS {show(need[exe])}, not {minimum}')
 
     copy_licenses(resources, {**copied, 'libMoltenVK.dylib': MOLTENVK})
 
@@ -322,13 +510,16 @@ def main():
     run('codesign', '--force', '--sign', '-', app)
     run('codesign', '--verify', '--deep', '--strict', app)
 
-    leftover = [f'{os.path.basename(f)}: {r}' for f in [exe] + [os.path.join(frameworks, n) for n in os.listdir(frameworks)]
-                for r in deps(f) if r.startswith('/opt/') or r.startswith('/usr/local/')]
+    # Nothing but the system's and the app's own: no library or search path
+    # outside it (Homebrew's, or the prefix the libraries were built in).
+    binaries = [exe] + [os.path.join(frameworks, n) for n in os.listdir(frameworks)]
+    leftover = [f'{os.path.basename(f)}: {r}' for f in binaries for r in deps(f) if not r.startswith('@rpath/')]
+    leftover += [f'{os.path.basename(f)}: rpath {r}' for f in binaries for r in rpaths(f) if not r.startswith('@')]
     if leftover:
         raise SystemExit('make_app.py: still linked outside the app: ' + '; '.join(leftover))
     size = int(run('du', '-sk', app).split()[0]) // 1024
     print(f'{app} ({size} MB, v{version}, {commit}{"-dirty" if dirty else ""}, macOS {minimum}+): '
-          f'{len(copied)} libraries and MoltenVK in Frameworks; symbols in {dsym}')
+          f'{len(copied)} libraries and MoltenVK {mvk_version} in Frameworks; symbols in {dsym}')
     if DMG:
         dmg = make_dmg(app, version)
         print(f'{dmg} ({os.path.getsize(dmg) // (1 << 20)} MB) and {os.path.basename(dmg)}.sha256')

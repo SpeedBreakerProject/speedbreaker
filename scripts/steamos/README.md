@@ -62,10 +62,12 @@ or a compiler. After building (step 3), inside the container:
 This makes `build/bundle/SpeedBreaker/` and the release download
 `build/bundle/SpeedBreaker-steamos-x86_64.tar.xz` (+ `.sha256`; about 16 MB,
 64 MB unpacked), with a copy named by the version
-(`SpeedBreaker-<version>-steamos-x86_64.tar.xz`): the game (its debug
-information stripped; the full symbols go to `build/bundle/symbols/`, never
-published), SDL3, glslang, SPIRV-Tools, the C and C++ runtimes it was built
-against, the launcher `bundle/speedbreaker.sh`, the player's instructions
+(`SpeedBreaker-<version>-steamos-x86_64.tar.xz`): the game, `lib/SpeedBreaker`
+(its debug information stripped; the full symbols go to
+`build/bundle/symbols/`, never published), SDL3, glslang, SPIRV-Tools, the C
+and C++ runtimes it was built against (all in `lib/`), the launcher
+`bundle/speedbreaker.sh` (the only program at the top of the folder: the game
+can't pick its libraries on its own), the player's instructions
 `bundle/README.md` and licenses (`COPYING`, `NOTICE`,
 `THIRD_PARTY_NOTICES.md`, `LICENSES/` and each bundled library's package
 licenses). The version is `project()`'s in the top-level `CMakeLists.txt`. No

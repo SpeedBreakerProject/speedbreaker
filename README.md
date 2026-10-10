@@ -38,7 +38,8 @@
 > disc images. See the full [legal notice](#legal-notice).
 
 **Contents:** [What it is](#what-is-speedbreaker) · [Highlights](#highlights) ·
-[Download](#download) · [Quick start](#quick-start) · [Setup by platform](#setup-by-platform) ·
+[Download](#download) · [Quick start](#quick-start) · [How to update](#how-to-update) ·
+[Setup by platform](#setup-by-platform) ·
 [Controls](#controls) · [Settings](#settings) · [Tips](#tips-for-smooth-play) ·
 [FAQ](#faq-and-troubleshooting) · [What's next](#whats-next) ·
 [For developers](#for-developers) · [Credits](#credits) · [License](#license) ·
@@ -62,14 +63,14 @@ and a settings menu you can open mid-race.
 - **Up to 4K.** The 3D scene renders at 1x, 2x or 3x the console's 720p (3x is 3840x2160).
   *Auto* picks a scale for your screen and device.
 - **Ultrawide done right.** On 21:9 screens the view gets wider instead of stretched, and the
-  HUD and the rear-view mirror stay in place. A 4:3 iPad or a 3:2 screen shows more above and
-  below instead. 16:10 screens, like the Steam Deck's, keep thin bars.
+  HUD and the rear-view mirror stay in place. A 4:3 iPad, a 3:2 screen or the 16:10 screens of
+  the Steam Deck and many Macs show more above and below instead, and fill the screen.
 - **Up to 60 fps,** locked to your 60 Hz display. You can also pick a steady 30 at full game
   speed, or *Auto*, which drops to 30 only while a device is hot or can't hold 60.
 - **The sun glare is back.** The low sun glows in open sky and fades behind buildings, as it did
   on the console.
-- **The original look:** correct colours on Apple devices, proper car paint and mirror
-  reflections, and distant textures that don't shimmer. Anti-aliasing, sharpening and up to 16x
+- **The original look:** sunlit roads and shadows as on the console, correct colours on Apple
+  devices, proper car paint and mirror reflections, and distant textures that don't shimmer. Anti-aliasing, sharpening and up to 16x
   anisotropic filtering are also available.
 - **A guided installer.** It finds your disc image, checks that it is the right game, and
   verifies all 49 files as it copies them. An interrupted install never leaves a broken game.
@@ -81,6 +82,9 @@ and a settings menu you can open mid-race.
   carries on where it stopped.
 - **One-button bug reports.** Logs, settings and a screenshot go into one zip file. Nothing is
   uploaded, and you decide what to send.
+- **Check for Updates.** One press in the settings asks GitHub whether a newer release is out,
+  shows what changed and opens the download page (or shows it as a QR code for your phone).
+  Nothing is checked online unless you press Check for Updates.
 
 <table>
   <tr>
@@ -108,7 +112,7 @@ belongs to its owners.</sub>
 | **Steam Deck** and **Steam Machine** (SteamOS) | [Download][dl-steamos-x86_64]<br>`SpeedBreaker-steamos-x86_64.tar.xz` | Steam Deck OLED (SteamOS 3.9.2). Steam Machine (SteamOS 3.8) on a 3440x1440 ultrawide. The Steam Deck LCD hasn't been tested yet. |
 | **Steam Frame** (SteamOS, arm64) | [Download][dl-steamos-arm64]<br>`SpeedBreaker-steamos-arm64.tar.xz` | Steam Frame (SteamOS 0.3.0). It plays as a big flat screen in the headset; it is not a VR mode. |
 | **Linux** (x86-64) | [Download][dl-steamos-x86_64] the x86-64 SteamOS build, `SpeedBreaker-steamos-x86_64.tar.xz`, or [build from source](#building-from-source) | SteamOS only so far. Other distributions and NVIDIA or Intel GPUs are untested: reports welcome. |
-| **Mac** (Apple silicon) | [Download][dl-macos]<br>`SpeedBreaker-macos.dmg` | MacBook Pro (M1 Pro) and Mac Studio (M4 Max), on macOS 26. There is no Intel Mac build. |
+| **Mac** (Apple silicon) | [Download][dl-macos]<br>`SpeedBreaker-macos.dmg` | MacBook Pro (M1 Pro) and Mac Studio (M4 Max), on macOS 26; macOS 15.6 (Sequoia) in a virtual machine. There is no Intel Mac build. |
 | **iPhone** and **iPad** | [Build it yourself](#iphone-and-ipad) with Xcode | iPhone 15 Pro Max (iOS 27). iPad Pro 12.9-inch (M2, iPadOS 27) with a Backbone Pro. Not on the App Store. |
 | **Windows** | Coming soon | |
 | **Android** | Coming soon | |
@@ -129,8 +133,8 @@ should say OK. What changed in each release is in [CHANGELOG.md](CHANGELOG.md).
   Vulkan 1.2 graphics card.
 - **Steam Frame** (the arm64 SteamOS download): SteamOS on the Steam Frame. The arm64 download
   is for the Frame only; it hasn't been tested on any other arm64 Linux device.
-- **Mac:** Apple silicon and **macOS 26** or later. The app won't open on older versions of
-  macOS, and there is no Intel Mac build.
+- **Mac:** Apple silicon and **macOS 15** (Sequoia) or later. The app won't open on older
+  versions of macOS, and there is no Intel Mac build.
 - **iPhone and iPad:** iOS or iPadOS 17 or later, on an A15-class chip or newer (iPhone 13 and
   later, M-series iPads), and a controller or keyboard. Devices with less memory than the tested
   ones are untested.
@@ -150,9 +154,15 @@ should say OK. What changed in each release is in [CHANGELOG.md](CHANGELOG.md).
 
    <img src="assets/screenshots/speedbreaker-12-installer-every-file-verified.png" alt="The installer's last page: every file matched the known-good disc" width="600">
 
-4. **Race.** Your saves and settings are kept apart from the game, so they stay when you update
-   SpeedBreaker or reinstall the game. The settings open with **F1**, **Back + Start** on a
+4. **Race.** Your saves and settings are kept apart from the game, so they stay when you
+   [update SpeedBreaker](#how-to-update) or reinstall the game. The settings open with **F1**, **Back + Start** on a
    controller, or a **three-finger tap** on iPhone and iPad.
+
+### How to update
+
+- **Mac:** drag the new SpeedBreaker into Applications, choose **Replace**, then allow it once more with **Open Anyway** (see [Mac setup](#mac)).
+- **Steam Deck, Steam Machine, Steam Frame and Linux:** unpack the new download over the old folder (`~/Games/SpeedBreaker`); your Steam shortcut keeps working.
+- **Everywhere:** your saves, settings and the installed game are kept, and no disc image is needed. Settings > Advanced > **Check for Updates** says when there's a new release, and so does GitHub's **Watch > Custom > Releases**.
 
 ## Setup by platform
 
@@ -167,12 +177,12 @@ should say OK. What changed in each release is in [CHANGELOG.md](CHANGELOG.md).
    ```
 
    Keep it on internal storage or on an SD card formatted by SteamOS, and don't use `:`, `;` or
-   `$` in the folder names. To update later, delete the old download, download the new one and
-   unpack it over the same folder.
+   `$` in the folder names. To update later, unpack the new download over the same folder
+   ([How to update](#how-to-update)).
 
 2. **Add it to Steam.** Steam > Games > *Add a Non-Steam Game to My Library* > Browse. Set the
-   file type to *All Files* and pick `~/Games/SpeedBreaker/speedbreaker.sh`. Leave
-   *Compatibility* (Proton) off: this is a native Linux game.
+   file type to *All Files* and pick `~/Games/SpeedBreaker/speedbreaker.sh`, the launcher (the
+   program itself is in `lib/`). Leave *Compatibility* (Proton) off: this is a native Linux game.
 3. **Put your disc image in Downloads,** or in the top folder of an SD card. SpeedBreaker also
    looks in your home folder, Desktop, Documents, Games, USB drives and EmuDeck's
    `Emulation/roms/xbox360`. Game Mode only sees SD cards and USB drives formatted by SteamOS;
@@ -180,13 +190,20 @@ should say OK. What changed in each release is in [CHANGELOG.md](CHANGELOG.md).
 4. **Install** (back in Game Mode). Start SpeedBreaker from your library. It highlights the image
    it found (*Ready to install*; with several, pick yours with Up and Down): press **A**, then
    **A** again on *Install*. Use the images it finds rather than *Browse for image...*, which may
-   not open in Game Mode.
+   not open in Game Mode. The game goes to the internal storage; to put it on the SD card or in
+   another folder, press Up and pick with Left and Right before *Install*. *Choose a folder...*
+   opens a folder picker in Desktop Mode only. From Game Mode, switch to Desktop Mode and choose
+   the folder there, or run `~/Games/SpeedBreaker/speedbreaker.sh --install <image> --dest <folder>`
+   from Konsole in Desktop Mode (or over SSH). Use a folder on the internal storage or on a card
+   formatted by SteamOS, or Game Mode won't find the game.
 5. **Check the screen settings.**
    - **Steam Deck OLED: set the refresh rate to 60 Hz** (Quick Access > Performance). At 90 Hz
      the game stutters. On any Deck, leave the Framerate Limit off.
    - **Docked, or on a Steam Machine:** in the shortcut's Properties > General > Game
      Resolution, choose **Native**.
-   - The thin bars above and below the picture on the Deck's screen are intended.
+   - The picture fills the Deck's 16:10 screen, with a slightly taller view and the HUD kept at
+     16:9. For the console's 16:9 picture with thin bars above and below, set Settings > Display
+     > Aspect Ratio to 16:9.
 
 **Controls:** the Deck's controls work through Steam Input (default Gamepad layout).
 **Settings:** hold **View** (two squares, left of the screen) and press **Menu** (three lines,
@@ -210,8 +227,8 @@ The Steam Frame has its own download. You set it up on the Frame's desktop: open
    ```
 
    This makes `~/Games/SpeedBreaker`. Keep it on the Frame's internal storage, and don't use `:`,
-   `;` or `$` in the folder names. To update later, delete the old download, download the new
-   one and unpack it over the same folder.
+   `;` or `$` in the folder names. To update later, unpack the new download over the same folder
+   ([How to update](#how-to-update)).
 
 2. **Add it to Steam.** In the file manager, open `~/Games/SpeedBreaker`, right-click
    `speedbreaker.sh` and choose *Add to Steam*. Or, in Konsole:
@@ -222,7 +239,7 @@ The Steam Frame has its own download. You set it up on the Frame's desktop: open
 4. **Install.** Start SpeedBreaker from your Steam library. It highlights the image it found
    (*Ready to install*): press **A**, then **A** again on *Install*. Or install
    from Konsole: `~/Games/SpeedBreaker/speedbreaker.sh --install ~/Downloads/your-image.iso`
-   (with your image's name).
+   (with your image's name; add `--dest <folder>` to put the game in a folder of your choice).
 
 SpeedBreaker plays as a big flat screen in the headset. It is not a VR mode.
 
@@ -237,8 +254,12 @@ There's no separate desktop-Linux package yet. Try the x86-64 SteamOS download,
 [`SpeedBreaker-steamos-x86_64.tar.xz`][dl-steamos-x86_64], which brings its own runtime libraries
 but hasn't been tested outside SteamOS, or [build from source](#building-from-source). Unpack it,
 put your `.iso` in your home folder, Downloads, Desktop, Documents or Games (or on a USB drive),
-and run `speedbreaker.sh`. The game starts in a window; Display > Fullscreen switches to full
-screen.
+and run `speedbreaker.sh`: always start the game with it, since it picks the libraries the
+program in `lib/` needs (started on its own, the program fails on most systems with a message
+such as `GLIBC_2.44 not found`). The game starts in a window; Display > Fullscreen switches to full
+screen. The installer puts the game in `~/.local/share/speedbreaker/game`, or on a drive, or in
+any folder you pick with *Choose a folder...* (it needs a file chooser portal or zenity; without
+one, use `--dest`, below).
 
 ### Mac
 
@@ -253,10 +274,15 @@ screen.
    place SpeedBreaker looks by itself, so macOS doesn't have to ask for access to your other
    folders. For an image anywhere else, use *Browse for image...*.
 4. **Install.** The game goes to `~/Library/Application Support/SpeedBreaker/game`, or to an
-   external drive if you choose one.
+   external drive or any other folder if you choose one (*Choose a folder...*, with the arrows on
+   the *To* row). An empty folder is used as it is; a folder that already holds files gets a new
+   `SpeedBreaker Game` folder inside it. For a folder in Desktop, Documents or Downloads, or on an
+   external drive, macOS asks once whether SpeedBreaker may use it: choose **Allow**. iCloud Drive
+   can't hold the game (nor Desktop and Documents, if your Mac keeps them in iCloud): macOS would
+   upload it and can remove its files from the Mac to save space.
 
 **Settings:** **F1** or **Cmd+,**, or Back + Start on a controller. The game starts in a window;
-Display > Fullscreen switches to full screen. SpeedBreaker needs macOS 26 or later.
+Display > Fullscreen switches to full screen. SpeedBreaker needs macOS 15 (Sequoia) or later.
 
 ### iPhone and iPad
 
@@ -333,7 +359,7 @@ Each page has a *Reset page* button.
 | V-Sync | On / Off | On. Off can tear, but shows frames sooner. |
 | Frame Rate | Auto / 60 fps / 30 fps | 60 fps on most devices. 30 fps keeps the game at full speed. Auto runs at 60, or at a steady 30 while the device is hot or can't hold 60. |
 | Screen Resolution | Full / 75% | Full. iPhone and iPad only: 75% is slightly softer and saves graphics work. |
-| Aspect Ratio | Fill Screen / 16:9 | Fill Screen: wider screens get a wider view, 4:3 and 3:2 screens a taller one. 16:9 always shows the classic picture with bars. |
+| Aspect Ratio | Fill Screen / 16:9 | Fill Screen: wider screens get a wider view; 4:3, 3:2 and 16:10 screens (the Steam Deck, many Macs) a taller one. 16:9 always shows the classic picture with bars. |
 
 **Graphics**
 
@@ -354,7 +380,8 @@ Vibration (On).
 
 **Advanced:** Asynchronous Shaders (On: an object is skipped for a frame or two while its shader
 compiles, instead of the game stuttering), Performance Overlay (Off: fps, frame times, and CPU
-and GPU time per frame), and **Save Bug Report**. The page also shows which build you're running.
+and GPU time per frame), **Save Bug Report**, and **Check for Updates** (the only thing that goes
+online, and only when you press it). The page also shows which build you're running.
 
 </details>
 
@@ -408,7 +435,8 @@ It always says what to do. The usual causes:
 - *Missing or corrupt files:* make a new backup from your disc.
 
 **My Mac says SpeedBreaker can't be opened.** Use **Open Anyway** in System Settings > Privacy &
-Security (see [Mac setup](#mac)).
+Security (see [Mac setup](#mac)), again after each update. SpeedBreaker needs macOS 15 (Sequoia)
+or later on Apple silicon.
 
 **The game stutters on my Steam Deck OLED.** Set the screen to 60 Hz (see
 [Steam Deck setup](#steam-deck-and-steam-machine)).
@@ -416,11 +444,21 @@ Security (see [Mac setup](#mac)).
 **The picture is small or stretched on my TV or monitor in Game Mode.** Set the shortcut's
 Properties > General > Game Resolution to Native.
 
-**My Deck shows bars above and below the picture.** That's intended: the game is 16:9 and the
-Deck's screen is 16:10.
+**Can I have the bars back on my Deck?** Yes. The game is 16:9 and the Deck's screen 16:10, and
+since v0.1.1 the picture fills it with a slightly taller view. Set Settings > Display > Aspect
+Ratio to 16:9 for the console's picture with thin bars above and below.
 
 **My SD card or USB drive doesn't show up in Game Mode.** Game Mode only sees drives formatted by
 SteamOS. Copy the image into Downloads from Desktop Mode.
+
+**Can I install the game somewhere other than the default folder?** Yes. On the installer's last
+page, choose where it goes on the *To* row: internal storage, a removable drive, or *Choose a
+folder...* for any folder (SteamOS: in Desktop Mode). An empty folder is used as it is; a folder
+that already holds files gets a new `SpeedBreaker Game` folder inside it, and the top of a drive
+gets the drive's own `speedbreaker/game` (`SpeedBreaker/game` on a Mac). Or install from a
+terminal with `--dest` (see [Command-line installer](#command-line-installer)). SpeedBreaker
+remembers the place; if it's on a drive that isn't connected when the game starts, the installer
+says so: connect it and start the game again.
 
 **The car steers by itself.** Raise Settings > Input > Stick Deadzone.
 
@@ -432,10 +470,11 @@ Touch only works in SpeedBreaker's own screens; a three-finger tap opens the set
 | | Linux and SteamOS | Mac | iPhone and iPad |
 |---|---|---|---|
 | Saves, settings, logs | `~/.local/share/speedbreaker/` | `~/Library/Application Support/SpeedBreaker/` | Inside the app (not shown in the Files app) |
-| Installed game | `game/` in that folder, or `speedbreaker/game` on a drive | `game/` in that folder, or `SpeedBreaker/game` on a drive | Inside the app |
+| Installed game | `game/` in that folder, `speedbreaker/game` on a drive, or the folder you chose | `game/` in that folder, `SpeedBreaker/game` on a drive, or the folder you chose | Inside the app |
 | Shader caches (safe to delete) | `~/.cache/speedbreaker/` | `~/Library/Caches/SpeedBreaker/` | Inside the app |
 
-Deleting that folder, or deleting the iPhone or iPad app, deletes your saves.
+Deleting that folder, or deleting the iPhone or iPad app, deletes your saves. A game you
+installed in a folder of your own stays there until you delete that folder.
 
 ### Reporting a bug
 
@@ -443,14 +482,15 @@ Deleting that folder, or deleting the iPhone or iPad app, deletes your saves.
 2. A notice says where the zip file went: your **Desktop** (on SteamOS, pick it up in Desktop
    Mode, or in the Desktop app on a Steam Frame), the **SpeedBreaker** folder in the Files app on
    iPhone and iPad, or the data folder above when there is no Desktop. Its name says which
-   version you were running, for example `speedbreaker-bug-report-v0.1.0-<date>_<time>.zip`.
+   version you were running, for example `speedbreaker-bug-report-v0.1.1-<date>_<time>.zip`.
 3. Open an [issue][issues], attach the zip, and say what you were doing, what you expected, what
    happened, and roughly how long into the session it happened.
 
 The zip holds recent logs, any crash and hang reports, your settings, a summary of your system
 and a screenshot of the last game frame. Paths in your home folder show as `~`. If the game
 crashed, start it again and save a report: the crash report is included. **Never attach game
-files or disc images to an issue.**
+files or disc images to an issue.** [CONTRIBUTING.md](CONTRIBUTING.md) says how bug reports and
+pull requests are handled.
 
 ## What's next
 
@@ -488,15 +528,20 @@ no game data or assets.
 
 ### Command-line installer
 
-The installer also runs from a terminal. On SteamOS, run it through `speedbreaker.sh`; on a Mac,
-the program is `SpeedBreaker.app/Contents/MacOS/SpeedBreaker`.
+The installer also runs from a terminal. On SteamOS and Linux, run it through `speedbreaker.sh`
+(`~/Games/SpeedBreaker/speedbreaker.sh --install ...`); on a Mac, the program is
+`SpeedBreaker.app/Contents/MacOS/SpeedBreaker`.
 
 ```sh
-SpeedBreaker --install <image or folder> [--dest <dir>]   # install
+SpeedBreaker --install <image or folder> [--dest <dir>]   # install (into exactly <dir>, if given)
 SpeedBreaker --verify <image or folder>                   # check every file without copying
 SpeedBreaker --find-images                                # list the disc images it can find
 SpeedBreaker --where                                      # show where the game is installed
 ```
+
+Without `--dest` the game goes to the default folder, as from the installer screen. `--dest`
+installs into exactly that folder, which must be new, empty or hold a previous install (not a
+temporary folder kept in memory, such as `/tmp` on SteamOS); the game remembers it.
 
 ### Building from source
 
@@ -509,8 +554,12 @@ The supported executable is 3,936,256 bytes, with SHA-256
 
 #### 1. Dependencies
 
-- **Mac:** Xcode's command-line tools, and from Homebrew: `brew install llvm lld cmake ninja sdl3
-  molten-vk vulkan-loader vulkan-headers glslang spirv-tools`
+- **Mac:** Xcode's command-line tools, and from Homebrew: `brew install llvm lld cmake ninja
+  molten-vk`. The libraries the app bundles (SDL3, the Vulkan loader, glslang, SPIRV-Tools and
+  FFmpeg's XMA decoder) are built from their own source releases by
+  `scripts/macos/build_deps.sh`, for macOS 15 like the release (step 3). Homebrew's bottles of
+  them (`brew install sdl3 vulkan-loader vulkan-headers glslang spirv-tools`) also work, for an
+  app that runs only on the macOS you build on (step 3).
 - **SteamOS:** build inside an Arch Linux distrobox (podman and distrobox ship with SteamOS). The
   development launcher, `scripts/steamos/speedbreaker.sh`, expects the container to be called
   `nfsmw-build`:
@@ -552,10 +601,16 @@ tools/XenonRecomp/build/XenonRecomp/XenonRecomp config/nfsmw.toml tools/XenonRec
 cmake -S . -B build/main -G Ninja -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++
 
-# Mac (Homebrew's LLVM)
+# Mac (Homebrew's LLVM): the libraries for macOS 15, as the release (a few minutes; it downloads
+# their source archives and checks each one's SHA-256), then the game against them
+scripts/macos/build_deps.sh build/deps
 cmake -S . -B build/main -G Ninja -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_C_COMPILER=/opt/homebrew/opt/llvm/bin/clang \
-  -DCMAKE_CXX_COMPILER=/opt/homebrew/opt/llvm/bin/clang++
+  -DCMAKE_CXX_COMPILER=/opt/homebrew/opt/llvm/bin/clang++ \
+  -DCMAKE_PREFIX_PATH="$PWD/build/deps" -DFFMPEG_XMA="$PWD/build/deps/ffmpeg-xma"
+# (or, with Homebrew's libraries instead of build_deps.sh, an app for your own macOS only: the
+#  same cmake line with -DCMAKE_OSX_DEPLOYMENT_TARGET=<your macOS, e.g. 26.0> instead of the last
+#  two options; make_app.py names the version if it's wrong)
 
 ninja -C build/main SpeedBreaker
 ```
@@ -566,11 +621,14 @@ Run `build/main/runtime/SpeedBreaker` from the repository root. With the whole d
 #### 4. Package it (optional)
 
 - **Mac app:** `python3 scripts/macos/make_app.py` makes `build/app/SpeedBreaker.app`, with its
-  libraries, MoltenVK and the license notices inside. Add `--dmg` for
+  libraries, MoltenVK and the license notices inside. It refuses a library built for a newer
+  macOS than the build (and says how to fix it); `python3 scripts/macos/check_app.py
+  build/app/SpeedBreaker.app` runs the release's checks. Add `--dmg` for
   `build/app/SpeedBreaker-macos.dmg` and its `.sha256`, laid out like the download on Releases.
 - **SteamOS bundle (x86-64):** inside the container, `scripts/steamos/make_bundle.sh` makes
   `build/bundle/SpeedBreaker-steamos-x86_64.tar.xz` and its `.sha256` (plus a copy named by the
-  version, `SpeedBreaker-<version>-steamos-x86_64.tar.xz`). Install it as described in
+  version, `SpeedBreaker-<version>-steamos-x86_64.tar.xz`): `speedbreaker.sh` at the top, the
+  program and its libraries in `lib/`. Install it as described in
   [Steam Deck setup](#steam-deck-and-steam-machine).
 - **Steam Frame bundle (arm64):** the Steam Frame download on Releases is built on a Frame, and
   so is your own: the Frame's SteamOS ships clang, CMake, Ninja, glslang and the Vulkan headers,

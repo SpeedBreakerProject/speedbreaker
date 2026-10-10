@@ -9,8 +9,11 @@
 #include <debug/timeline.h>
 #include <unordered_set>
 #include "block_ranges.h"
+#include "edge_bars.h"
+#include "memory_plan.h"
 #include "shader_translator.h"
 #include "zpd_report.h"
+#include "depth24_glsl.h"
 #include "shared_memory_glsl.h"
 #include "xenos/registers.h"
 
@@ -167,16 +170,6 @@ namespace gpu::renderer
             return 0;
         }
 
-        // `prefer` when some type has it (e.g. device-local and host-visible:
-        // VRAM the CPU can write, with resizable BAR), else `want`.
-        uint32_t FindMemoryTypePreferring(uint32_t bits, VkMemoryPropertyFlags prefer, VkMemoryPropertyFlags want)
-        {
-            for (uint32_t i = 0; i < s_memProps.memoryTypeCount; i++)
-                if ((bits & (1u << i)) && (s_memProps.memoryTypes[i].propertyFlags & prefer) == prefer)
-                    return i;
-            return FindMemoryType(bits, want);
-        }
-
         // Guest physical memory (512 MB), imported without a copy.
         constexpr VkDeviceSize kSharedSize = 512ull << 20;
         VkBuffer s_shared = VK_NULL_HANDLE;
@@ -233,11 +226,13 @@ namespace gpu::renderer
         {
             return { buffer ? buffer : s_shared, 0, buffer || !s_splitMemory ? VK_WHOLE_SIZE : kSharedPart };
         }
-        // Discrete GPUs, and drivers that can't import the guest's memory
-        // (amdgpu imports only anonymous memory, and guest physical memory is
-        // a shared mapping, mirrored three times): the GPU gets its own copy
-        // (VRAM the CPU writes through resizable BAR when there is one), kept
-        // current page by page from the write watch (writewatch::SyncShadow).
+        // Discrete GPUs whose CPU-mapped VRAM holds it, and drivers that can't
+        // import the guest's memory (amdgpu imports only anonymous memory, and
+        // guest physical memory is a shared mapping, mirrored three times;
+        // Intel's Linux driver loses the device when the write watch protects
+        // imported pages): the GPU gets its own copy, kept current page by
+        // page from the write watch (writewatch::SyncShadow). Where it goes,
+        // and when guest memory is imported instead: gpu/memory_plan.h.
         // NFSMW_SHARED_MEMORY=import|shadow overrides the choice.
         bool s_shadowMode = false;
         bool s_shadowInVram = false;  // (the "ready" line)
@@ -4400,14 +4395,14 @@ vec4 px(uint x, uint y)
 }
 
 uint unorm(float v, float m) { return uint(clamp(v, 0.0, 1.0) * m + 0.5); }
-
+)" GLSL_DEPTH24_PACK R"(
 uint pack32(vec4 c)
 {
     switch (p.format)
     {
     case 6u: case 14u: return packUnorm4x8(c);
     case 7u: return unorm(c.r, 1023.0) | (unorm(c.g, 1023.0) << 10) | (unorm(c.b, 1023.0) << 20) | (unorm(c.a, 3.0) << 30);
-    case 22u: case 23u: return unorm(c.r, 16777215.0) << 8;
+    case 22u: case 23u: return packDepth24(c.r) << 8;  // (not unorm: 1.0 overflows 24 bits, see depth24_glsl.h)
     case 25u: return packSnorm2x16(c.rg);
     case 31u: return packHalf2x16(c.rg);
     case 33u: case 36u: return floatBitsToUint(c.r);
@@ -4528,6 +4523,8 @@ void main()
 #endif
     {
         uint v = swapWord(m, p.texEndian);
+        // (D24: m is packDepth24's, clamped, so the far plane stores 1.0 here
+        // too, not 0.)
         uint o = p.texConvert == 4u ? floatBitsToUint(float(v >> 8) / 16777215.0) : v;
 #ifdef TEX_OFFSET
         imageStore(t_image, ivec2(int(x + p.texX), int(y + p.texY)), uvec4(o, 0u, 0u, 0u));
@@ -4690,6 +4687,219 @@ void main()
             // A newer clear covering an older one replaces it.
             std::erase_if(s_pendingClears, [&](const PendingClear& pc) { return pc.rt == rt && Contains(rect, pc.rect); });
             s_pendingClears.push_back({ rt, rect, ca.clearValue });
+        }
+
+        // NFSMW_LOG_SHADOWMAP=1 (diagnostic): every 5 s, the first depth
+        // resolve from a surface of pitch 1600 (the sun's shadow map) is
+        // copied back after it, and a [shadowmap] line gives the share of its
+        // texels that are exactly 0 (nearest) and exactly 0xFFFFFF (far: the
+        // clear, no caster there). Before d24-fix every far texel read 0
+        // (depth24_glsl.h). A GPU copy into host memory: guest memory may be
+        // the GPU's copy in VRAM (shadow mode), uncached to the CPU. Once a
+        // swap finds the copy's submission done, a thread of its own counts
+        // the 2.56M texels. (Counted at the swap, on the command processor,
+        // they made the next frame late: after every sample on the Steam
+        // Machine, 3-5 ms more CP time and a ~20 ms frame.) The command
+        // processor still records the copy (10 MB) and its two barriers
+        // every 5 s, so time perf with the probe off. Off (the default): a
+        // constant tested per resolve and per swap, nothing allocated.
+        const bool s_logShadowMap = [] { const char* v = std::getenv("NFSMW_LOG_SHADOWMAP"); return v && v[0] && v[0] != '0'; }();
+        struct ShadowMapProbe
+        {
+            VkBuffer buffer = VK_NULL_HANDLE;
+            VkDeviceMemory memory = VK_NULL_HANDLE;
+            const uint8_t* host = nullptr;
+            bool coherent = true;
+            VkDeviceSize size = 0;
+            bool failed = false;
+            uint64_t submission = 0, frame = 0;  // the copy's submission, and the frame
+            double seconds = 0;
+            uint32_t rangeBase = 0, rangeBytes = 0, destBase = 0, destPitch = 0, endian = 0, format = 0, srcBase = 0;
+            Rect rect{};
+            std::chrono::steady_clock::time_point next{};
+        };
+        std::unique_ptr<ShadowMapProbe> s_shadowMapProbe;
+        std::chrono::steady_clock::time_point s_shadowMapClock{};  // the first swap
+        // Idle: a resolve may record a copy. Recorded: the copy waits for its
+        // submission. Counting: the counting thread reads the buffer, and the
+        // command processor neither refills nor reallocates it until the
+        // thread sets idle (release; the resolve's check acquires). Static
+        // storage: a count still running at exit outlives s_shadowMapProbe.
+        enum : uint8_t { kProbeIdle, kProbeRecorded, kProbeCounting };
+        std::atomic<uint8_t> s_shadowMapState{ kProbeIdle };
+
+        // What the counting thread needs, copied: it reads the buffer only.
+        struct ShadowMapSample
+        {
+            const uint8_t* host;
+            uint32_t rangeBase, rangeBytes, destBase, destPitch, endian, format, srcBase;
+            Rect rect;
+            uint64_t frame;
+            double seconds;
+        };
+
+        void ShadowMapCount(ShadowMapSample p)
+        {
+            SetHostThreadName("nfsmw-shadowmap");
+            hostcpu::LeaveReservedCore();  // started by the command processor
+#ifdef __APPLE__
+            pthread_set_qos_class_self_np(QOS_CLASS_UTILITY, 0);  // (not the CP's interactive class)
+#endif
+            // By 32x32 tiles: 32-bit texels make a tile 4 KB of consecutive
+            // bytes (Tiled2D), so a tile wholly inside the rectangle is read
+            // in order; the rest texel by texel.
+            // (farTexels, not "far": <windows.h> defines far and near as nothing.)
+            uint64_t texels = 0, zero = 0, farTexels = 0, outside = 0;
+            auto count = [&](uint32_t offset) {
+                if (uint64_t(offset) + 4 > p.rangeBytes)
+                {
+                    outside++;
+                    return;
+                }
+                uint32_t word;
+                memcpy(&word, p.host + offset, 4);
+                uint32_t d = GpuSwap(word, p.endian >= 4 ? 2 : p.endian) >> 8;
+                texels++;
+                zero += d == 0;
+                farTexels += d == 0xFFFFFF;
+            };
+            auto offsetOf = [&](uint32_t x, uint32_t y) { return ((p.destBase + Tiled2D(x, y, p.destPitch, 2)) & 0x1FFFFFFF) - p.rangeBase; };
+            const uint32_t x0 = uint32_t(p.rect.x0), y0 = uint32_t(p.rect.y0), x1 = uint32_t(p.rect.x1), y1 = uint32_t(p.rect.y1);
+            for (uint32_t ty = y0 >> 5; ty <= (y1 - 1) >> 5; ty++)
+                for (uint32_t tx = x0 >> 5; tx <= (x1 - 1) >> 5; tx++)
+                {
+                    uint32_t ax = std::max(x0, tx * 32), bx = std::min(x1, tx * 32 + 32);
+                    uint32_t ay = std::max(y0, ty * 32), by = std::min(y1, ty * 32 + 32);
+                    if (bx - ax == 32 && by - ay == 32)
+                        for (uint32_t i = 0, base = offsetOf(tx * 32, ty * 32); i < 1024; i++)
+                            count(base + i * 4);
+                    else
+                        for (uint32_t y = ay; y < by; y++)
+                            for (uint32_t x = ax; x < bx; x++)
+                                count(offsetOf(x, y));
+                }
+            auto pct = [&](uint64_t n) { return texels ? 100.0 * double(n) / double(texels) : 0.0; };
+            fprintf(stderr, "[shadowmap] frame %llu (%.1f s): depth resolve b%u p1600 fmt %u rect (%d,%d)-(%d,%d) -> %08X: %llu texels, "
+                "zero %.2f%%, far %.2f%%%s\n", (unsigned long long)p.frame, p.seconds, p.srcBase, p.format, p.rect.x0, p.rect.y0,
+                p.rect.x1, p.rect.y1, p.destBase, (unsigned long long)texels, pct(zero), pct(farTexels),
+                outside ? std::format(" ({} texels outside the copy)", outside).c_str() : "");
+            s_shadowMapState.store(kProbeIdle, std::memory_order_release);
+        }
+
+        void ShadowMapProbeRecord(uint32_t rangeBase, uint32_t rangeBytes, const ResolveConstants& rc, const Rect& r, uint32_t srcBase)
+        {
+            if (!s_shadowMapProbe)
+                s_shadowMapProbe = std::make_unique<ShadowMapProbe>();
+            ShadowMapProbe& p = *s_shadowMapProbe;
+            auto now = std::chrono::steady_clock::now();
+            if (p.failed || s_shadowMapState.load(std::memory_order_acquire) != kProbeIdle || now < p.next || rangeBytes == 0)
+                return;
+            if (p.size < rangeBytes)
+            {
+                if (p.buffer)
+                {
+                    vkDestroyBuffer(s_dev, p.buffer, nullptr);
+                    vkFreeMemory(s_dev, p.memory, nullptr);
+                    p.buffer = VK_NULL_HANDLE;
+                    p.memory = VK_NULL_HANDLE;
+                    p.host = nullptr;
+                    p.size = 0;
+                }
+                VkBufferCreateInfo bci{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+                bci.size = rangeBytes;
+                bci.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+                VkMemoryRequirements req{};
+                VkMemoryAllocateInfo mai{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+                void* mapped = nullptr;
+                const VkMemoryPropertyFlags visible = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT;
+                bool ok = vkCreateBuffer(s_dev, &bci, nullptr, &p.buffer) == VK_SUCCESS;
+                if (ok)
+                {
+                    vkGetBufferMemoryRequirements(s_dev, p.buffer, &req);
+                    mai.allocationSize = req.size;
+                    // Cached host memory when there is some (the CPU reads the
+                    // copy), else any host-visible coherent type. (Inline: the
+                    // memory plan, gpu/memory_plan.h, replaced the renderer's
+                    // FindMemoryTypePreferring; the windows branch does the same.)
+                    const VkMemoryPropertyFlags cached = visible | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT;
+                    mai.memoryTypeIndex = UINT32_MAX;
+                    for (uint32_t i = 0; i < s_memProps.memoryTypeCount && mai.memoryTypeIndex == UINT32_MAX; i++)
+                        if ((req.memoryTypeBits & (1u << i)) && (s_memProps.memoryTypes[i].propertyFlags & cached) == cached)
+                            mai.memoryTypeIndex = i;
+                    if (mai.memoryTypeIndex == UINT32_MAX)
+                        mai.memoryTypeIndex = FindMemoryType(req.memoryTypeBits, visible | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+                    ok = (s_memProps.memoryTypes[mai.memoryTypeIndex].propertyFlags & visible) == visible &&
+                        vkAllocateMemory(s_dev, &mai, nullptr, &p.memory) == VK_SUCCESS;
+                }
+                ok = ok && vkBindBufferMemory(s_dev, p.buffer, p.memory, 0) == VK_SUCCESS &&
+                    vkMapMemory(s_dev, p.memory, 0, VK_WHOLE_SIZE, 0, &mapped) == VK_SUCCESS;
+                if (!ok)
+                {
+                    fprintf(stderr, "[shadowmap] no host-visible buffer for the copy (%u bytes): off\n", rangeBytes);
+                    if (p.buffer)
+                        vkDestroyBuffer(s_dev, p.buffer, nullptr);
+                    if (p.memory)
+                        vkFreeMemory(s_dev, p.memory, nullptr);
+                    p.buffer = VK_NULL_HANDLE;
+                    p.memory = VK_NULL_HANDLE;
+                    p.failed = true;
+                    return;
+                }
+                p.host = static_cast<const uint8_t*>(mapped);
+                p.size = rangeBytes;
+                p.coherent = (s_memProps.memoryTypes[mai.memoryTypeIndex].propertyFlags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) != 0;
+            }
+            // The resolve's writes -> the copy -> the host's reads (after
+            // the submission's fence).
+            VkMemoryBarrier mb{ VK_STRUCTURE_TYPE_MEMORY_BARRIER };
+            mb.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+            mb.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+            vkCmdPipelineBarrier(s_cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &mb, 0, nullptr, 0, nullptr);
+            VkBufferCopy copy{ rangeBase, 0, rangeBytes };
+            vkCmdCopyBuffer(s_cmd, s_shared, p.buffer, 1, &copy);
+            mb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            mb.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+            vkCmdPipelineBarrier(s_cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &mb, 0, nullptr, 0, nullptr);
+            s_shadowMapState.store(kProbeRecorded, std::memory_order_relaxed);
+            p.submission = s_submissionCounter;
+            p.frame = s_frame;
+            p.seconds = s_shadowMapClock.time_since_epoch().count()
+                ? std::chrono::duration<double>(now - s_shadowMapClock).count() : 0.0;
+            p.rangeBase = rangeBase;
+            p.rangeBytes = rangeBytes;
+            p.destBase = rc.destBase;
+            p.destPitch = rc.destPitch;
+            p.endian = rc.endian;
+            p.format = rc.format;
+            p.srcBase = srcBase;
+            p.rect = r;
+            p.next = now + std::chrono::seconds(5);
+        }
+
+        // At a swap: the recorded copy, once its submission is done, goes to
+        // a counting thread (ShadowMapCount).
+        void ShadowMapProbeOnSwap()
+        {
+            if (!s_shadowMapClock.time_since_epoch().count())
+                s_shadowMapClock = std::chrono::steady_clock::now();
+            if (!s_shadowMapProbe || s_shadowMapState.load(std::memory_order_relaxed) != kProbeRecorded)
+                return;
+            ShadowMapProbe& p = *s_shadowMapProbe;
+            {
+                std::lock_guard lock(s_submitMutex);
+                bool done = p.submission < s_submissionCounter &&
+                    (s_inFlight.empty() || s_submissions[s_inFlight.front()].number > p.submission);
+                if (!done)
+                    return;
+            }
+            if (!p.coherent)
+            {
+                VkMappedMemoryRange range{ VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE, nullptr, p.memory, 0, VK_WHOLE_SIZE };
+                vkInvalidateMappedMemoryRanges(s_dev, 1, &range);
+            }
+            s_shadowMapState.store(kProbeCounting, std::memory_order_relaxed);
+            std::thread(ShadowMapCount, ShadowMapSample{ p.host, p.rangeBase, p.rangeBytes, p.destBase, p.destPitch, p.endian, p.format,
+                p.srcBase, p.rect, p.frame, p.seconds }).detach();
         }
 
         void Resolve()
@@ -5080,6 +5290,8 @@ void main()
                         FullBarrier();  // (above 1x: as before)
                     else
                         ResolveBarrier(rangeBase, rangeBytes, fused ? fused->guestStart : 0);
+                    if (s_logShadowMap && depthSource && pitch == 1600 && bl == 2)
+                        ShadowMapProbeRecord(rangeBase, rangeBytes, rc, r, source->base);
                     SubmitIfStarving();
                     // Write sequences are per host page: guest pages of the
                     // edge host pages outside this resolve whose scaled copy
@@ -5713,11 +5925,123 @@ void main()
 
         // ---------------------------------------------------------------
 
-        // Guest physical memory imported without a copy (unified memory).
+        // Where guest memory and the upload ring go: gpu/memory_plan.h, which
+        // lists the places to try in order. A place the driver refuses (out of
+        // memory, say) is logged and the next one tried; only when none is
+        // left does the renderer give up.
+        memplan::Memory s_planMemory;  // the plan's view of the device's memory
+        uint32_t s_guestType = memplan::kNoType;  // the copy's memory type (kNoType: imported)
+        std::string s_guestChoice;  // for the [renderer] memory line
+
+        // Test hooks for the plan's fallbacks, which the machines we test on
+        // never need:
+        //   NFSMW_TEST_BAR_HEAP_MB=<MB>: the heaps holding CPU-mapped VRAM read
+        //     as that size to the plan, and the copy's and the ring's
+        //     allocations from those types fail (out of device memory) once
+        //     they would pass it, as on a GPU without resizable BAR;
+        //   NFSMW_TEST_ALLOC_FAIL=<places>: those places fail as out of device
+        //     memory (comma-separated: import, copy-vram, copy-system,
+        //     copy-cached, ring-vram, ring-cached, ring-system);
+        //   NFSMW_TEST_GPU_KIND=integrated|discrete|other: the plan takes the
+        //     GPU for that kind (the Deck's choice on the Steam Machine, say).
+        struct MemoryTest
+        {
+            uint64_t barBytes = 0, barUsed = 0;
+            std::string fail;  // ",a,b,"
+            const char* kind = nullptr;
+        };
+        MemoryTest s_memoryTest = [] {
+            MemoryTest t;
+            if (const char* v = std::getenv("NFSMW_TEST_BAR_HEAP_MB"); v && std::atoi(v) > 0)
+                t.barBytes = uint64_t(std::atoi(v)) << 20;
+            if (const char* v = std::getenv("NFSMW_TEST_ALLOC_FAIL"); v && v[0])
+                t.fail = std::string(",") + v + ",";
+            t.kind = std::getenv("NFSMW_TEST_GPU_KIND");
+            return t;
+        }();
+
+        // NFSMW_TEST_ALLOC_FAIL names this place.
+        bool MemoryTestRefuses(memplan::Place place, bool ring)
+        {
+            const char* name = memplan::Name(place, ring);
+            if (s_memoryTest.fail.find(std::string(",") + name + ",") == std::string::npos)
+                return false;
+            fprintf(stderr, "[renderer] NFSMW_TEST_ALLOC_FAIL: %s refused (out of device memory)\n", name);
+            return true;
+        }
+
+        // vkAllocateMemory for a planned place, through the test hooks.
+        VkResult AllocatePlanned(const memplan::Candidate& c, bool ring, VkDeviceSize size, VkDeviceMemory& memory)
+        {
+            if (MemoryTestRefuses(c.place, ring))
+                return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+            const VkMemoryPropertyFlags bar = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT | VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT;
+            bool mappedVram = (s_memProps.memoryTypes[c.type].propertyFlags & bar) == bar;
+            if (mappedVram && s_memoryTest.barBytes && s_memoryTest.barUsed + size > s_memoryTest.barBytes)
+            {
+                fprintf(stderr, "[renderer] NFSMW_TEST_BAR_HEAP_MB: %llu MB of CPU-mapped VRAM refused (%llu of %llu MB taken)\n",
+                    (unsigned long long)(size >> 20), (unsigned long long)(s_memoryTest.barUsed >> 20),
+                    (unsigned long long)(s_memoryTest.barBytes >> 20));
+                return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+            }
+            VkMemoryAllocateInfo mai{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+            mai.allocationSize = size;
+            mai.memoryTypeIndex = c.type;
+            VkResult r = vkAllocateMemory(s_dev, &mai, nullptr, &memory);
+            if (r == VK_SUCCESS && mappedVram)
+                s_memoryTest.barUsed += size;
+            return r;
+        }
+
+        // The device's memory as the plan sees it (NFSMW_TEST_BAR_HEAP_MB
+        // applied), logged once: bug reports then show what a GPU offers.
+        memplan::Memory PlanMemory()
+        {
+            memplan::Memory m;
+            std::string line;
+            for (uint32_t h = 0; h < s_memProps.memoryHeapCount; h++)
+            {
+                m.heaps.push_back(s_memProps.memoryHeaps[h].size);
+                line += std::format("{}{} {}{}", h ? ", " : "", h, memplan::Size(m.heaps.back()),
+                    (s_memProps.memoryHeaps[h].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) ? " device-local" : "");
+            }
+            line += "; types (type:heap/flags):";
+            for (uint32_t i = 0; i < s_memProps.memoryTypeCount; i++)
+            {
+                m.types.push_back({ s_memProps.memoryTypes[i].propertyFlags, s_memProps.memoryTypes[i].heapIndex });
+                line += std::format(" {}:{}/{:X}", i, m.types.back().heap, m.types.back().flags);
+            }
+            if (s_memoryTest.barBytes)
+            {
+                memplan::ShrinkMappedVram(m, s_memoryTest.barBytes);
+                line += std::format(" (NFSMW_TEST_BAR_HEAP_MB: CPU-mapped VRAM's heaps read as {} MB)", s_memoryTest.barBytes >> 20);
+            }
+            fprintf(stderr, "[renderer] memory heaps: %s\n", line.c_str());
+            return m;
+        }
+
+        uint32_t DriverId(const VkPhysicalDeviceProperties& props)
+        {
+            if (props.apiVersion < VK_API_VERSION_1_2)
+                return 0;
+            VkPhysicalDeviceDriverProperties driver{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES };
+            VkPhysicalDeviceProperties2 props2{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2 };
+            props2.pNext = &driver;
+            vkGetPhysicalDeviceProperties2(s_vk->physical, &props2);
+            return uint32_t(driver.driverID);
+        }
+
+        // Guest physical memory imported without a copy (unified memory, or
+        // a discrete GPU reading system memory over PCIe).
         bool ImportSharedMemory()
         {
             if (!s_vk->getMemoryHostPointerProperties)  // (no host-memory import)
                 return false;
+            if (MemoryTestRefuses(memplan::Place::kImport, false))
+            {
+                fprintf(stderr, "[renderer] importing guest memory failed (%d)\n", int(VK_ERROR_OUT_OF_DEVICE_MEMORY));
+                return false;
+            }
             VkMemoryHostPointerPropertiesEXT hpp{ VK_STRUCTURE_TYPE_MEMORY_HOST_POINTER_PROPERTIES_EXT };
             if (s_vk->getMemoryHostPointerProperties(s_dev, VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT,
                     s_sharedHost, &hpp) != VK_SUCCESS)
@@ -5741,59 +6065,66 @@ void main()
             mai.allocationSize = kSharedSize;
             mai.memoryTypeIndex = FindMemoryType(req.memoryTypeBits & hpp.memoryTypeBits,
                 VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-            if (VkResult r = vkAllocateMemory(s_dev, &mai, nullptr, &s_sharedMemory); r != VK_SUCCESS)
+            VkResult r = vkAllocateMemory(s_dev, &mai, nullptr, &s_sharedMemory);
+            if (r == VK_SUCCESS && (r = vkBindBufferMemory(s_dev, s_shared, s_sharedMemory, 0)) != VK_SUCCESS)
+            {
+                vkFreeMemory(s_dev, s_sharedMemory, nullptr);
+                s_sharedMemory = VK_NULL_HANDLE;
+            }
+            if (r != VK_SUCCESS)
             {
                 fprintf(stderr, "[renderer] importing guest memory failed (%d)\n", int(r));
                 vkDestroyBuffer(s_dev, s_shared, nullptr);
                 s_shared = VK_NULL_HANDLE;
                 return false;
             }
-            Check(vkBindBufferMemory(s_dev, s_shared, s_sharedMemory, 0), "vkBindBufferMemory(shared)");
             return true;
         }
 
-        void CreateShadowSharedMemory()
+        // The buffer of guest memory's copy (an unbound one: a place that
+        // fails before binding leaves it for the next).
+        VkBuffer NewCopyBuffer(VkMemoryRequirements& req)
         {
             VkBufferCreateInfo bci{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
             bci.size = kSharedSize;
             bci.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
-            Check(vkCreateBuffer(s_dev, &bci, nullptr, &s_shared), "vkCreateBuffer(shadow)");
-            VkMemoryRequirements req;
-            vkGetBufferMemoryRequirements(s_dev, s_shared, &req);
-            VkMemoryAllocateInfo mai{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
-            mai.allocationSize = req.size;
-            // An integrated GPU's (the Deck's) copy goes in system memory:
-            // host-visible and not device-local (write-combined GTT on amdgpu,
-            // uncached first). Its "VRAM" is a carve-out of the same RAM, 1 GB
-            // on a Deck, and the copy there with the textures and targets
-            // didn't fit: at every world load the kernel moved ~500 MB of it
-            // out to GTT, and the GPU reads GTT as fast. A discrete GPU keeps
-            // it in VRAM the CPU writes through resizable BAR when there is
-            // some. NFSMW_SHADOW_MEMORY=vram|gtt overrides.
-            VkPhysicalDeviceProperties props;
-            vkGetPhysicalDeviceProperties(s_vk->physical, &props);
-            const char* where = std::getenv("NFSMW_SHADOW_MEMORY");
-            bool system = where ? strcmp(where, "gtt") == 0 : props.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU;
-            const VkMemoryPropertyFlags mapped = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
-            mai.memoryTypeIndex = UINT32_MAX;
-            for (int pass = 0; system && pass < 2 && mai.memoryTypeIndex == UINT32_MAX; pass++)
-                for (uint32_t i = 0; i < s_memProps.memoryTypeCount; i++)
-                {
-                    VkMemoryPropertyFlags f = s_memProps.memoryTypes[i].propertyFlags;
-                    if ((req.memoryTypeBits & (1u << i)) && (f & mapped) == mapped && !(f & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) &&
-                        (pass == 1 || !(f & VK_MEMORY_PROPERTY_HOST_CACHED_BIT)))
-                    {
-                        mai.memoryTypeIndex = i;
-                        break;
-                    }
-                }
-            if (mai.memoryTypeIndex == UINT32_MAX)  // (all device-local: unified memory)
-                mai.memoryTypeIndex = FindMemoryTypePreferring(req.memoryTypeBits,
-                    VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT | VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, mapped);
-            Check(vkAllocateMemory(s_dev, &mai, nullptr, &s_sharedMemory), "vkAllocateMemory(shadow)");
-            Check(vkBindBufferMemory(s_dev, s_shared, s_sharedMemory, 0), "vkBindBufferMemory(shadow)");
-            void* p;
-            Check(vkMapMemory(s_dev, s_sharedMemory, 0, VK_WHOLE_SIZE, 0, &p), "vkMapMemory(shadow)");
+            VkBuffer buffer = VK_NULL_HANDLE;
+            Check(vkCreateBuffer(s_dev, &bci, nullptr, &buffer), "vkCreateBuffer(shadow)");
+            vkGetBufferMemoryRequirements(s_dev, buffer, &req);
+            return buffer;
+        }
+
+        // Guest memory's copy for the GPU in `c`'s memory type, kept current
+        // page by page from the write watch (writewatch::SyncShadow): on a
+        // discrete GPU in VRAM the CPU writes through resizable BAR when it
+        // holds the copy, else in system memory; on an integrated one in
+        // system memory (memory_plan.h). False, with nothing kept, when the
+        // driver refuses it; `buffer` is then still unbound, or replaced.
+        bool CreateShadowSharedMemory(VkBuffer& buffer, const VkMemoryRequirements& req, const memplan::Candidate& c)
+        {
+            VkDeviceMemory memory = VK_NULL_HANDLE;
+            void* p = nullptr;
+            const char* what = "vkAllocateMemory(shadow)";
+            VkResult r = AllocatePlanned(c, false, req.size, memory);
+            if (r == VK_SUCCESS && (r = vkMapMemory(s_dev, memory, 0, VK_WHOLE_SIZE, 0, &p)) != VK_SUCCESS)
+                what = "vkMapMemory(shadow)";
+            else if (r == VK_SUCCESS && (r = vkBindBufferMemory(s_dev, buffer, memory, 0)) != VK_SUCCESS)
+            {
+                what = "vkBindBufferMemory(shadow)";
+                vkDestroyBuffer(s_dev, buffer, nullptr);  // (a buffer binds once)
+                VkMemoryRequirements again;
+                buffer = NewCopyBuffer(again);
+            }
+            if (r != VK_SUCCESS)
+            {
+                fprintf(stderr, "[renderer] %s failed: %d (%s, memory type %u): trying the next place\n", what, int(r),
+                    memplan::Name(c.place, false), c.type);
+                if (memory)
+                    vkFreeMemory(s_dev, memory, nullptr);
+                return false;
+            }
+            s_shared = buffer;
+            s_sharedMemory = memory;
             // Write every page of the mapping once, before anything uses it.
             // The first CPU write to a page of mapped VRAM faults it into the
             // page tables; left to the first sync, a burst of new textures
@@ -5811,10 +6142,17 @@ void main()
             double prefaultMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - prefaultStart).count();
             writewatch::EnableShadow(static_cast<uint8_t*>(p));
             s_shadowMode = true;
-            s_shadowInVram = (s_memProps.memoryTypes[mai.memoryTypeIndex].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) != 0;
+            s_shadowInVram = (s_memProps.memoryTypes[c.type].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) != 0;
             fprintf(stderr, "[renderer] guest memory: GPU copy in %s (memory type %u, flags %X), updated from the write watch%s\n",
-                s_shadowInVram ? "VRAM (CPU-mapped)" : "host memory", mai.memoryTypeIndex, s_memProps.memoryTypes[mai.memoryTypeIndex].propertyFlags,
+                s_shadowInVram ? "VRAM (CPU-mapped)" : "host memory", c.type, s_memProps.memoryTypes[c.type].propertyFlags,
                 prefault ? std::format(" (pages touched in {:.0f} ms)", prefaultMs).c_str() : "");
+            return true;
+        }
+
+        // `failed`, a list of place names, as the log's ", after ... failed".
+        std::string AfterFailed(const std::string& failed)
+        {
+            return failed.empty() ? std::string() : " after " + failed + " failed";
         }
 
         void CreateSharedMemory()
@@ -5842,14 +6180,55 @@ void main()
                     anisotropy < 0 ? "the game's" : std::format("{}x", std::min(float(anisotropy), s_maxAnisotropy)).c_str());
             }
 
-            const char* mode = std::getenv("NFSMW_SHARED_MEMORY");
-            bool shadow = mode ? strcmp(mode, "shadow") == 0 : props.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU;
-            if (!shadow && ImportSharedMemory())
+            s_planMemory = PlanMemory();
+            memplan::GuestInput in;
+            in.gpu = props.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU ? memplan::Gpu::kDiscrete
+                : props.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU ? memplan::Gpu::kIntegrated : memplan::Gpu::kOther;
+            if (const char* kind = s_memoryTest.kind)
             {
-                fprintf(stderr, "[renderer] guest memory: imported (zero-copy)\n");
-                return;
+                std::string_view k(kind);
+                in.gpu = k == "integrated" ? memplan::Gpu::kIntegrated : k == "discrete" ? memplan::Gpu::kDiscrete
+                    : k == "other" ? memplan::Gpu::kOther : in.gpu;
+                fprintf(stderr, "[renderer] NFSMW_TEST_GPU_KIND=%s: memory planned as for %s GPU\n", kind,
+                    in.gpu == memplan::Gpu::kDiscrete ? "a discrete" : in.gpu == memplan::Gpu::kIntegrated ? "an integrated" : "another");
             }
-            CreateShadowSharedMemory();
+            in.importable = s_vk->getMemoryHostPointerProperties != nullptr;
+            in.importRefusal = memplan::ImportRefusal(DriverId(props));
+            in.overrides = memplan::ParseOverrides(std::getenv("NFSMW_SHARED_MEMORY"), std::getenv("NFSMW_SHADOW_MEMORY"),
+                std::getenv("NFSMW_RING_MEMORY"));
+            VkMemoryRequirements req;
+            VkBuffer copy = NewCopyBuffer(req);
+            in.bits = req.memoryTypeBits;
+            memplan::Plan plan = memplan::PlanGuestMemory(s_planMemory, in);
+            std::string failed;
+            const memplan::Candidate* placed = nullptr;
+            for (const memplan::Candidate& c : plan.order)
+            {
+                if (c.place == memplan::Place::kImport ? ImportSharedMemory() : CreateShadowSharedMemory(copy, req, c))
+                {
+                    placed = &c;
+                    break;
+                }
+                failed += std::string(failed.empty() ? "" : ", ") + memplan::Name(c.place, false);
+            }
+            if (!placed)
+            {
+                fprintf(stderr, "[renderer] guest memory: no place could hold it (%s failed; %s)\n", failed.c_str(), plan.why.c_str());
+                abort();
+            }
+            if (placed->place == memplan::Place::kImport)
+            {
+                vkDestroyBuffer(s_dev, copy, nullptr);
+                fprintf(stderr, "[renderer] guest memory: imported (zero-copy)\n");
+                s_guestChoice = "imported (zero-copy)";
+            }
+            else
+            {
+                s_guestType = placed->type;
+                s_guestChoice = std::format("as a GPU copy in {}, memory type {}", placed->place == memplan::Place::kVram ? "CPU-mapped VRAM"
+                    : placed->place == memplan::Place::kCached ? "cached host memory" : "host memory", placed->type);
+            }
+            s_guestChoice += " (" + plan.why + ")" + AfterFailed(failed);
         }
 
         void CreateRing()
@@ -5860,24 +6239,55 @@ void main()
             Check(vkCreateBuffer(s_dev, &bci, nullptr, &s_ring), "vkCreateBuffer(ring)");
             VkMemoryRequirements req;
             vkGetBufferMemoryRequirements(s_dev, s_ring, &req);
-            VkMemoryAllocateInfo mai{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
-            mai.allocationSize = req.size;
-            // Device-local when the host can map it (resizable BAR), so the
-            // GPU reads constants and indices from VRAM. NFSMW_RING_MEMORY=cached
-            // prefers cached system memory instead: the CPU's ~40 MB of writes
-            // a frame then aren't write-combined PCIe stores (A/B experiment).
-            static const bool cached = [] { const char* v = std::getenv("NFSMW_RING_MEMORY"); return v && std::string_view(v) == "cached"; }();
-            mai.memoryTypeIndex = FindMemoryTypePreferring(req.memoryTypeBits,
-                cached ? VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT
-                       : VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT | VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-            fprintf(stderr, "[renderer] upload ring: memory type %u (flags %X)\n", mai.memoryTypeIndex,
-                s_memProps.memoryTypes[mai.memoryTypeIndex].propertyFlags);
-            Check(vkAllocateMemory(s_dev, &mai, nullptr, &s_ringMemory), "vkAllocateMemory(ring)");
-            vkBindBufferMemory(s_dev, s_ring, s_ringMemory, 0);
-            void* p;
-            Check(vkMapMemory(s_dev, s_ringMemory, 0, VK_WHOLE_SIZE, 0, &p), "vkMapMemory(ring)");
-            s_ringHost = static_cast<uint8_t*>(p);
+            // Device-local when the host can map it (resizable BAR) and it
+            // fits, so the GPU reads constants and indices from VRAM; else
+            // cached system memory (memory_plan.h). NFSMW_RING_MEMORY=cached
+            // prefers cached system memory anyway: the CPU's ~40 MB of
+            // writes a frame then aren't write-combined PCIe stores (an A/B
+            // experiment: on the Steam Machine 2% less CPU, twice the GPU
+            // time); =vram|system name the other places.
+            memplan::Overrides o = memplan::ParseOverrides(nullptr, nullptr, std::getenv("NFSMW_RING_MEMORY"));
+            memplan::Plan plan = memplan::PlanRing(s_planMemory, req.memoryTypeBits, s_guestType, o.ring);
+            std::string failed;
+            const memplan::Candidate* placed = nullptr;
+            for (const memplan::Candidate& c : plan.order)
+            {
+                VkDeviceMemory memory = VK_NULL_HANDLE;
+                void* p = nullptr;
+                const char* what = "vkAllocateMemory(ring)";
+                VkResult r = AllocatePlanned(c, true, req.size, memory);
+                if (r == VK_SUCCESS && (r = vkMapMemory(s_dev, memory, 0, VK_WHOLE_SIZE, 0, &p)) != VK_SUCCESS)
+                    what = "vkMapMemory(ring)";
+                else if (r == VK_SUCCESS && (r = vkBindBufferMemory(s_dev, s_ring, memory, 0)) != VK_SUCCESS)
+                {
+                    what = "vkBindBufferMemory(ring)";
+                    vkDestroyBuffer(s_dev, s_ring, nullptr);  // (a buffer binds once)
+                    Check(vkCreateBuffer(s_dev, &bci, nullptr, &s_ring), "vkCreateBuffer(ring)");
+                }
+                if (r != VK_SUCCESS)
+                {
+                    fprintf(stderr, "[renderer] %s failed: %d (%s, memory type %u): trying the next place\n", what, int(r),
+                        memplan::Name(c.place, true), c.type);
+                    if (memory)
+                        vkFreeMemory(s_dev, memory, nullptr);
+                    failed += std::string(failed.empty() ? "" : ", ") + memplan::Name(c.place, true);
+                    continue;
+                }
+                fprintf(stderr, "[renderer] upload ring: memory type %u (flags %X)\n", c.type, s_memProps.memoryTypes[c.type].propertyFlags);
+                s_ringMemory = memory;
+                s_ringHost = static_cast<uint8_t*>(p);
+                placed = &c;
+                break;
+            }
+            if (!placed)
+            {
+                fprintf(stderr, "[renderer] upload ring: no place could hold it (%s failed; %s)\n", failed.c_str(), plan.why.c_str());
+                abort();
+            }
+            // The choice and why, in one line.
+            fprintf(stderr, "[renderer] memory: guest memory %s; upload ring in %s, memory type %u (%s)%s\n", s_guestChoice.c_str(),
+                placed->place == memplan::Place::kVram ? "CPU-mapped VRAM" : placed->place == memplan::Place::kCached ? "cached host memory"
+                    : "host memory", placed->type, plan.why.c_str(), AfterFailed(failed).c_str());
         }
 
         void CreateSet0()
@@ -7205,6 +7615,10 @@ void main()
         // reaches the screen's top and bottom, its sides cropped ("cover"):
         // stretched in y alone it would be distorted by up to 1/sv. The rest
         // of the front end is clipped to the band (below).
+        // Edge bars (gpu/edge_bars.h): the copies of a police vid-cam side
+        // bar or the intro's black frame that fill the screen past the 16:9
+        // band, drawn right after it.
+        gpu::bars::Plan barPlan;
         if (const float s = game::AspectScaleX(), sv = game::AspectScaleY(); s < 1.0f || sv < 1.0f)
         {
             if (const float feX = game::FrontEndScaleX(); feX > 0.0f)
@@ -7278,6 +7692,29 @@ void main()
                     bool outside = false;  // a primitive wholly above or below the band
                     uint32_t prims = 0;
                     std::string primList;
+                    // NFSMW_LOG_FRONTEND=1: up to four primitives that cross
+                    // an edge of the 16:9 band (past it by more than half a
+                    // percent of the band) and stop short of the screen's
+                    // edge, the shape that leaves a strip of the world (the
+                    // vid cam's mask did): logged below as "edge candidate"
+                    // with what the rules here did to them. And ("inset
+                    // candidate") one centred in the band, covering most of
+                    // it in x and y and stopping short of its edges in one
+                    // or both, the shape of the intro's black frame between
+                    // two shots, which the world showed all round.
+                    struct EdgeHit
+                    {
+                        uint32_t prim;
+                        const char* edge;  // "+y", "-y", "+x" or "-x" (clip space), or "in" (inset)
+                        float lo, hi, past, end;  // band units along that axis; the outer end in clip units
+                                                  // (inset: band x, then its reach in clip x and y)
+                        float acrossLo, acrossHi;  // band units along the other axis (inset: band y)
+                        uint32_t colours[4];
+                        uint32_t colourCount;
+                    };
+                    EdgeHit edgeHits[4];
+                    uint32_t edgeHitCount = 0;
+                    const float bandMidX = c[3] * (1.0f - s), bandLoX = bandMidX - s, bandHiX = bandMidX + s;
                     if (scan)
                     {
                         const uint32_t base = vf[0] & 0x1FFFFFFC, endian = vf[1] & 3;
@@ -7330,6 +7767,56 @@ void main()
                             outside = outside || (measureY && (hiY < bandLo || loY > bandHi));
                             if (logFrontEnd && prims < 8)
                                 primList += std::format(" [{:.3f}..{:.3f} {:.3f}..{:.3f}]", lo, hi, loY, hiY);
+                            // (The front-end shader's draws only: one that
+                            // inherits the constants reads no ePolys.)
+                            if (logFrontEnd && feShader && edgeHitCount < 4)
+                            {
+                                auto hit = [&](const char* edge, float a, float b, float mid, float scale, float past, float end) {
+                                    if (edgeHitCount >= 4)
+                                        return;
+                                    EdgeHit& e = edgeHits[edgeHitCount++];
+                                    const bool y = edge[1] == 'y';
+                                    const float c0 = y ? lo : loY, c1 = y ? hi : hiY, cMid = y ? bandMidX : bandMid, cScale = y ? s : sv;
+                                    e = { prims, edge, (a - mid) / scale, (b - mid) / scale, past / scale, end, (c0 - cMid) / cScale,
+                                        (c1 - cMid) / cScale, {}, 0 };
+                                    for (uint32_t k = 0; k < per && k < 4; k++)
+                                    {
+                                        const uint32_t v = src.Get(v0 + k) + first;  // (in range: read above)
+                                        e.colours[e.colourCount++] = GpuSwap(LoadPhysical(base + (v * 8 + 3) * 4), endian);
+                                    }
+                                };
+                                const float my = 0.005f * sv, mx = 0.005f * s;
+                                if (sv < 1.0f)
+                                {
+                                    if (hiY > bandHi + my && hiY < 1.0f && loY < bandHi)
+                                        hit("+y", loY, hiY, bandMid, sv, hiY - bandHi, hiY);
+                                    if (loY < bandLo - my && loY > -1.0f && hiY > bandLo)
+                                        hit("-y", loY, hiY, bandMid, sv, bandLo - loY, loY);
+                                }
+                                if (s < 1.0f)
+                                {
+                                    if (hi > bandHiX + mx && hi < 1.0f && lo < bandHiX)
+                                        hit("+x", lo, hi, bandMidX, s, hi - bandHiX, hi);
+                                    if (lo < bandLoX - mx && lo > -1.0f && hi > bandLoX)
+                                        hit("-x", lo, hi, bandMidX, s, bandLoX - lo, lo);
+                                }
+                                // Inset: centred within 2% of the band,
+                                // reaching 80% of it or more each way, short
+                                // of its edge (99%) in x or y.
+                                const float xl = (lo - bandMidX) / s, xh = (hi - bandMidX) / s, yl = (loY - bandMid) / sv, yh = (hiY - bandMid) / sv;
+                                const float bandReachX = std::min(-xl, xh), bandReachY = std::min(-yl, yh);
+                                if (edgeHitCount < 4 && std::fabs(xl + xh) <= 0.04f && std::fabs(yl + yh) <= 0.04f && bandReachX >= 0.8f &&
+                                    bandReachY >= 0.8f && std::min(bandReachX, bandReachY) < 0.99f)
+                                {
+                                    EdgeHit& e = edgeHits[edgeHitCount++];
+                                    e = { prims, "in", xl, xh, std::min(-lo, hi), std::min(-loY, hiY), yl, yh, {}, 0 };
+                                    for (uint32_t k = 0; k < per && k < 4; k++)
+                                    {
+                                        const uint32_t v = src.Get(v0 + k) + first;  // (in range: read above)
+                                        e.colours[e.colourCount++] = GpuSwap(LoadPhysical(base + (v * 8 + 3) * 4), endian);
+                                    }
+                                }
+                            }
                             prims++;
                         }
                         fullWidth = fullWidth && valid;
@@ -7408,15 +7895,181 @@ void main()
                     bool clipped = false;
                     if (tall && !extended && !cover && !meetsBand && vte.vport_y_scale_ena && vte.vport_y_offset_ena)
                     {
-                        const float hostH = h * float(scaleY);
-                        const float n0 = bandLo * ps1 + ps3, n1 = bandHi * ps1 + ps3;  // NDC y of the band's edges
-                        const float a = std::round((std::min(n0, n1) + 1.0f) * 0.5f * hostH * 256.0f) / 256.0f;
-                        const float b = std::round((std::max(n0, n1) + 1.0f) * 0.5f * hostH * 256.0f) / 256.0f;
-                        const int32_t top = std::max(scissor.offset.y, int32_t(std::ceil(a - 0.5f)));
-                        const int32_t bottom = std::min(scissor.offset.y + int32_t(scissor.extent.height), int32_t(std::ceil(b - 0.5f)));
+                        // (The rows the edge-bar fills leave, by the same rule.)
+                        const gpu::bars::Rows band = gpu::bars::BandRows(bandLo, bandHi, ps1, ps3, h * float(scaleY));
+                        const int32_t top = std::max(scissor.offset.y, band.top);
+                        const int32_t bottom = std::min(scissor.offset.y + int32_t(scissor.extent.height), band.bottom);
                         scissor.offset.y = top;
                         scissor.extent.height = uint32_t(std::max(bottom - top, 0));
                         clipped = true;
+                    }
+                    // The police vid-cam's mask (career intro) ends with two
+                    // solid black side bars that reach ~3% past the 16:9
+                    // frame's top and bottom: under Vert+ the world shows in
+                    // the rows above and below them (and the CRT bezel's
+                    // quadrants, which stop at the same place), under Hor+
+                    // past a 2.50:1 screen beside them. The intro's cut
+                    // between two shots (~95 s) is a few frames of one black
+                    // quad 0.970 x 0.939 of the 16:9 frame: the world shows
+                    // all round it. Such a quad (gpu::bars::PlanFill: one
+                    // black rectangle of the front-end shader the rules
+                    // above left alone; a bar a little past both band edges
+                    // in y, from inside the band to well past one side; a
+                    // black frame centred, short of the band's edges) is
+                    // drawn again after itself, stretched over the frame and
+                    // scissored to (its half of) what lies outside the band:
+                    // nothing inside the band changes.
+                    // NFSMW_BAR_FILL=0 turns it off (an A/B switch).
+                    static const bool barFill = [] { const char* v = std::getenv("NFSMW_BAR_FILL"); return !(v && v[0] == '0'); }();
+                    const uint32_t blend0 = s_regs[XE_GPU_REG_RB_BLENDCONTROL0] & 0x1FFF1FFF;
+                    if (barFill)
+                    {
+                        xenos::xe_gpu_texture_fetch_t t0;
+                        memcpy(&t0, &s_regs[XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0], sizeof(t0));
+                        const gpu::bars::Draw draw{ .prim = prim,
+                            .count = count,
+                            .c = c,
+                            .frontEndY = feY,
+                            .scaleX = s,
+                            .scaleY = sv,
+                            .frontEndShader = feShader,
+                            .leftAlone = kX == 1.0f && kY == 1.0f && kCover == 1.0f && !clipped,
+                            .occlusion = zpdCount,
+                            .vte = vte.value,
+                            .blend0 = blend0,
+                            .t0Sampled = (s_ps->info.texture2DMask & 1) != 0,
+                            .t0Width = uint32_t(t0.size_2d.width) + 1,
+                            .t0Height = uint32_t(t0.size_2d.height) + 1,
+                            .posScale = { pc.posScale[0], pc.posScale[1], pc.posScale[2], pc.posScale[3] },
+                            .hostW = w * float(scaleX),
+                            .hostH = h * float(scaleY),
+                            .scissor = { scissor.offset.x, scissor.offset.y, scissor.offset.x + int32_t(scissor.extent.width),
+                                scissor.offset.y + int32_t(scissor.extent.height) } };
+                        const uint32_t base = vf[0] & 0x1FFFFFFC, endian = vf[1] & 3;
+                        const uint32_t words = (vf[1] >> 2) & 0xFFFFFF, first = s_regs[XE_GPU_REG_VGT_INDX_OFFSET];
+                        barPlan = gpu::bars::PlanFill(draw, [&](uint32_t k, uint32_t j, uint32_t& word) {
+                            const uint32_t v = src.Get(k) + first;  // an ePoly: 8 words
+                            if ((v + 1) * 8 > words)
+                                return false;
+                            word = GpuSwap(LoadPhysical(base + (v * 8 + j) * 4), endian);
+                            return true;
+                        });
+                    }
+                    if (barPlan.fill != gpu::bars::Fill::None)
+                    {
+                        // Once per kind, screen shape and outcome, in every
+                        // log (a tester's too); a match each frame skips
+                        // building the line once its key is logged.
+                        const uint32_t kind = uint32_t(barPlan.fill);
+                        const bool blackout = barPlan.fill == gpu::bars::Fill::Blackout;
+                        const gpu::bars::Box& box = barPlan.box;
+                        const uint64_t key = (0x36ull << 56) | (uint64_t(kind) << 40) | (uint64_t(barPlan.rectCount) << 36) |
+                            (uint64_t(std::lround(s * 4096.0f)) << 18) | uint64_t(std::lround(sv * 4096.0f));
+                        static uint64_t loggedKey[4] = { ~0ull, ~0ull, ~0ull, ~0ull };
+                        if (loggedKey[kind] != key)
+                        {
+                            loggedKey[kind] = key;
+                            char fills[96];
+                            if (barPlan.rectCount)
+                                snprintf(fills, sizeof(fills), "fills %u rectangle(s) past the 16:9 band, first [%d,%d)x[%d,%d) (host px)",
+                                    barPlan.rectCount, barPlan.rects[0].x0, barPlan.rects[0].x1, barPlan.rects[0].y0, barPlan.rects[0].y1);
+                            else
+                                snprintf(fills, sizeof(fills), "%s", blackout ? "fills nothing" : "reaches the screen edge: nothing to fill");
+                            LogOnce(key,
+                                "edge bars: frame %llu vs_%016llx ps_%016llx: %s (clip x %.3f..%.3f y %.3f..%.3f, colour %08X; view scale x %.4f y %.4f) %s",
+                                (unsigned long long)s_frame, (unsigned long long)s_vs->hash, (unsigned long long)s_ps->hash,
+                                blackout ? "a black frame" : kind == uint32_t(gpu::bars::Fill::RightBar) ? "the right vid-cam bar" : "the left vid-cam bar",
+                                box.x0, box.x1, box.y0, box.y1, barPlan.argb, s, sv, fills);
+                        }
+                        // NFSMW_LOG_FRONTEND=1: the first frame of each
+                        // run of frames with a match, bars and black frames
+                        // apart (one run per vid-cam scene and per cut; any
+                        // other is a draw this should not take).
+                        static uint64_t lastBarFrame[2] = { ~0ull - 1, ~0ull - 1 };
+                        uint64_t& last = lastBarFrame[blackout ? 1 : 0];
+                        if (logFrontEnd && s_frame != last && s_frame != last + 1)
+                            fprintf(stderr, "[frontend] edge bars: matching from frame %llu: %s x %.3f..%.3f y %.3f..%.3f colour %08X, %u rect(s)\n",
+                                (unsigned long long)s_frame, blackout ? "black frame" : kind == uint32_t(gpu::bars::Fill::RightBar) ? "right bar" : "left bar",
+                                box.x0, box.x1, box.y0, box.y1, barPlan.argb, barPlan.rectCount);
+                        last = s_frame;
+                    }
+                    // The edge candidates (above) that still stop short of
+                    // the screen's edge after the rules, each distinct line
+                    // once, at most 4 per (t0, edge, kind) and 256 per run:
+                    // a sliding or fading element makes a new line each
+                    // frame, so the frame number is not part of the line.
+                    // Their own cap, not the per-shader-pair one (every
+                    // front-end draw shares one shader pair, and the title
+                    // screen and menus use it up).
+                    for (uint32_t i = 0; i < edgeHitCount; i++)
+                    {
+                        static std::unordered_set<std::string> logged;
+                        static std::unordered_map<uint64_t, uint32_t> perKey;
+                        static uint32_t lines = 0;
+                        if (lines > 256)
+                            break;
+                        const EdgeHit& e = edgeHits[i];
+                        const bool inset = e.edge[0] == 'i';
+                        // One the rules above take past the screen's edge
+                        // (widened, stretched or zoomed about the centre: the
+                        // fades, dims and loading band) leaves no strip; an
+                        // inset one, none when they take it past both.
+                        if (inset ? e.past * kX * kCover >= 1.0f && e.end * kY * kCover >= 1.0f
+                                  : std::fabs(e.end * (e.edge[1] == 'x' ? kX : kY) * kCover) >= 1.0f)
+                            continue;
+                        auto fetch = [](uint32_t n) {
+                            xenos::xe_gpu_texture_fetch_t f;
+                            memcpy(&f, &s_regs[XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0 + n * 6], sizeof(f));
+                            return f;
+                        };
+                        const xenos::xe_gpu_texture_fetch_t f0 = fetch(0), f1 = fetch(1);
+                        const uint32_t t0 = (s_ps->info.texture2DMask & 1) ? (uint32_t(f0.base_address) << 12) & 0x1FFFFFFFu : 0;
+                        const uint32_t t1 = (s_ps->info.texture2DMask & 2) ? (uint32_t(f1.base_address) << 12) & 0x1FFFFFFFu : 0;
+                        bool same = true;
+                        uint32_t minAlpha = 0xFF;
+                        for (uint32_t k = 0; k < e.colourCount; k++)
+                        {
+                            same = same && e.colours[k] == e.colours[0];
+                            minAlpha = std::min(minAlpha, e.colours[k] >> 24);
+                        }
+                        // At most 4 lines per (t0, edge, kind: opaque black,
+                        // opaque, translucent): checked before the line is
+                        // made, so a capped element costs nothing more. (By
+                        // kind too: the game's white texture is under every
+                        // flat panel, and a fading glow would use them up.)
+                        const uint64_t kind = (minAlpha >= 0xF0 ? 1u : 0u) | (same && (e.colours[0] & 0xFFFFFFu) == 0 ? 2u : 0u);
+                        const uint64_t edgeCode = inset ? 4u : (uint64_t(e.edge[0] == '+') << 1) | uint64_t(e.edge[1] == 'x');
+                        uint32_t& perT0Edge = perKey[(uint64_t(t0) << 32) | (kind << 3) | edgeCode];
+                        if (perT0Edge >= 4)
+                            continue;
+                        const std::string action = barPlan.rectCount
+                            ? std::string(barPlan.fill == gpu::bars::Fill::Blackout ? "black frame fill" : "bar fill")
+                            : clipped ? std::format("clipped to rows {}..{}", scissor.offset.y, scissor.offset.y + int32_t(scissor.extent.height))
+                            : kCover != 1.0f ? std::format("cover x{:.3f}", kCover)
+                            : (kX != 1.0f || kY != 1.0f) ? std::format("widened x{:.3f} y{:.3f}", kX, kY)
+                            : std::string("left alone");
+                        const std::string textures = std::format("t0 {} t1 {}",
+                            t0 ? std::format("{:08X} {}x{} f{}", t0, uint32_t(f0.size_2d.width) + 1, uint32_t(f0.size_2d.height) + 1, uint32_t(f0.format)) : std::string("-"),
+                            t1 ? std::format("{:08X}", t1) : std::string("-"));
+                        const std::string colour = same ? std::format("{:08X}", e.colours[0]) : std::string("varies");
+                        const std::string line = inset
+                            ? std::format("vs_{:016x} ps_{:016x} n{} prim {}/{} {}: band x {:.3f}..{:.3f} y {:.3f}..{:.3f}, short of the band's edges by "
+                                "{:.3f} in x and {:.3f} in y, reaches clip x {:.3f} y {:.3f}; colour {} alpha {:02X} blend {:08X}: {}",
+                                s_vs->hash, s_ps->hash, count, e.prim, prims, textures, e.lo, e.hi, e.acrossLo, e.acrossHi,
+                                1.0f - std::min(-e.lo, e.hi), 1.0f - std::min(-e.acrossLo, e.acrossHi), e.past, e.end, colour, minAlpha, blend0, action)
+                            : std::format("vs_{:016x} ps_{:016x} n{} prim {}/{} {} {}: band {:.3f}..{:.3f} ({} {:.3f}..{:.3f}), "
+                                "{:.3f} past its edge, ends at clip {:.3f} (short of the screen edge); colour {} alpha {:02X} blend {:08X}: {}",
+                                s_vs->hash, s_ps->hash, count, e.prim, prims, textures, e.edge, e.lo, e.hi, e.edge[1] == 'y' ? "x" : "y", e.acrossLo,
+                                e.acrossHi, e.past, e.end, colour, minAlpha, blend0, action);
+                        if (!logged.insert(line).second)
+                            continue;
+                        perT0Edge++;
+                        if (++lines > 256)
+                        {
+                            fprintf(stderr, "[frontend] edge candidate: cap reached (256 lines), no more\n");
+                            break;
+                        }
+                        fprintf(stderr, "[frontend] %s candidate: frame %llu %s\n", inset ? "inset" : "edge", (unsigned long long)s_frame, line.c_str());
                     }
                     if (logFrontEnd && fullWidth)
                     {
@@ -7485,6 +8138,8 @@ void main()
             for (uint32_t n = 0; n < 32; n++)
                 if ((s_ps->info.texture2DMask | s_ps->info.texture3DMask | s_ps->info.textureCubeMask) & (1u << n))
                     line += std::format(" {}:{:08X}", n, (s_regs[XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0 + n * 6 + 1] & 0x1FFFF000u));
+            if (barPlan.rectCount)
+                line += std::format(" +edge {} fill x{}", barPlan.fill == gpu::bars::Fill::Blackout ? "black frame" : "bar", barPlan.rectCount);
             static std::string last;
             static uint32_t repeats = 0;
             if (line == last)
@@ -7547,11 +8202,20 @@ void main()
             vkCmdSetViewport(s_cmd, 0, 1, &viewport);
             bound.viewport = viewport;
         }
+        // The scissor and the push constants are recorded through these, so
+        // the bound state always follows what was recorded: the edge-bar
+        // copies (below) change both, and a stale cache would skip the next
+        // draw's own scissor and clip it to a fill rectangle.
+        auto setScissor = [&](const VkRect2D& r) {
+            vkCmdSetScissor(s_cmd, 0, 1, &r);
+            bound.scissor = r;
+        };
+        auto pushConstants = [&](const DrawConstants& c) {
+            vkCmdPushConstants(s_cmd, layout.pipeline, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(c), &c);
+            bound.pc = c;
+        };
         if (fresh || memcmp(&bound.scissor, &scissor, sizeof(scissor)) != 0)
-        {
-            vkCmdSetScissor(s_cmd, 0, 1, &scissor);
-            bound.scissor = scissor;
-        }
+            setScissor(scissor);
         auto front = Reg<reg::RB_STENCILREFMASK>();
         auto back = depthControl.backface_enable ? RegAt<reg::RB_STENCILREFMASK>(XE_GPU_REG_RB_STENCILREFMASK_BF) : front;
         uint32_t stencil[6] = { front.stencilmask, back.stencilmask, front.stencilwritemask, back.stencilwritemask,
@@ -7624,10 +8288,7 @@ void main()
             }
         }
         if (fresh || memcmp(&bound.pc, &pc, sizeof(pc)) != 0)
-        {
-            vkCmdPushConstants(s_cmd, layout.pipeline, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(pc), &pc);
-            bound.pc = pc;
-        }
+            pushConstants(pc);
 
         // Guest memory this draw reads when the GPU runs it: vertex data, and
         // indices when the shader fetches them itself.
@@ -7685,6 +8346,25 @@ void main()
         else
         {
             vkCmdDraw(s_cmd, vertexCount, 1, 0, 0);
+        }
+        // Edge bars (above): the same draw again per rectangle, with the
+        // stretched posScale and the rectangle as its scissor (inside this
+        // draw's own, so inside the pass); through setScissor and
+        // pushConstants, so the bound state follows.
+        if (barPlan.rectCount)
+        {
+            DrawConstants fill = pc;
+            memcpy(fill.posScale, barPlan.posScale, sizeof(barPlan.posScale));
+            pushConstants(fill);
+            for (uint32_t i = 0; i < barPlan.rectCount; i++)
+            {
+                const gpu::bars::Rect& r = barPlan.rects[i];
+                setScissor(VkRect2D{ { r.x0, r.y0 }, { uint32_t(r.x1 - r.x0), uint32_t(r.y1 - r.y0) } });
+                if (useIndices)
+                    vkCmdDrawIndexed(s_cmd, vertexCount, 1, 0, 0, 0);
+                else
+                    vkCmdDraw(s_cmd, vertexCount, 1, 0, 0);
+            }
         }
         if (s_submitAfterDraw)
         {
@@ -8062,6 +8742,8 @@ void main()
         s_frame = frame;
         if (s_zpdOn)
             ZpdOnSwap(frame);
+        if (s_logShadowMap)
+            ShadowMapProbeOnSwap();
         // NFSMW_PASS_BARRIER: per frame of the window ending here, with the
         // level it ran at, before its [perf] line. Vertex barriers cost a
         // pass's overlap (a split: a pass too).

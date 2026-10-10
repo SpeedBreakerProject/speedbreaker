@@ -49,9 +49,22 @@ fi
 
 # FFmpeg for XMA audio: a minimal static libavcodec (XMA1/XMA2/WMAPro
 # decoders only) with patches/ffmpeg applied (scripts/build_ffmpeg_xma.sh).
+# On macOS it is linked into the game, so it is built for the oldest macOS
+# the game runs on (CMakeLists.txt's SB_OSX_DEFAULT_TARGET), not this Mac's
+# own; one built for another macOS is rebuilt.
 FFMPEG_VERSION=7.1.1
 FFMPEG_SHA256=733984395e0dbbe5c046abda2dc49a5544e7e0e1e2366bba849222ae9e3a03b1
-if [ ! -f "$TOOLS/ffmpeg-xma/lib/libavcodec.a" ]; then
+ffmpeg_ok=1
+[ -f "$TOOLS/ffmpeg-xma/lib/libavcodec.a" ] || ffmpeg_ok=0
+if [ "$(uname -s)" = Darwin ]; then
+  export MACOSX_DEPLOYMENT_TARGET="$(sed -n 's/^set(SB_OSX_DEFAULT_TARGET "\([0-9.]*\)").*/\1/p' "$ROOT/CMakeLists.txt" | head -1)"
+  [ -n "$MACOSX_DEPLOYMENT_TARGET" ] || { echo "no SB_OSX_DEFAULT_TARGET in $ROOT/CMakeLists.txt"; exit 1; }
+  if [ $ffmpeg_ok = 1 ] && [ "$(otool -l "$TOOLS/ffmpeg-xma/lib/libavcodec.a" "$TOOLS/ffmpeg-xma/lib/libavutil.a" \
+       | awk '/LC_BUILD_VERSION/{b=1} b&&/minos/{print $2; b=0}' | sort -u)" != "$MACOSX_DEPLOYMENT_TARGET" ]; then
+    echo "tools/ffmpeg-xma isn't built for macOS $MACOSX_DEPLOYMENT_TARGET: rebuilding it"; ffmpeg_ok=0
+  fi
+fi
+if [ $ffmpeg_ok = 0 ]; then
   mkdir -p "$TOOLS/ffmpeg-src"
   cd "$TOOLS/ffmpeg-src"
   [ -f "ffmpeg-$FFMPEG_VERSION.tar.xz" ] || curl -sfLO "https://ffmpeg.org/releases/ffmpeg-$FFMPEG_VERSION.tar.xz"

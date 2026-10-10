@@ -8,10 +8,12 @@ or Valve.
 This is the arm64 SteamOS download, for the Steam Frame (the Steam Deck,
 Steam Machine and Linux PCs have their own, the x86-64 one). In the headset
 the game plays on a big flat screen: it is not a VR mode. This folder has the
-game program, the libraries it needs and a launcher. It has **no game data**:
-you need your own disc image of your own Xbox 360 disc of the game (an
-`.iso`), and the game installs itself from it on the first run. `VERSION`
-says which release this is.
+launcher, `speedbreaker.sh`, and in `lib/` the game program and the libraries
+it needs. **Always start the game with `speedbreaker.sh`** (your Steam
+shortcut does): the program in `lib/` doesn't find its libraries on its own.
+It has **no game data**: you need your own disc image of your own Xbox 360
+disc of the game (an `.iso`), and the game installs itself from it on the
+first run. `VERSION` says which release this is.
 
 It runs on the Frame's SteamOS as it is (tested on SteamOS 0.3.0) and needs
 no developer tools. About 60 MB, plus 7.2 GB for the installed game.
@@ -37,8 +39,13 @@ should say OK.
 Keep the folder on the Frame's internal storage, and don't use `:`, `;` or
 `$` in the names of the folders it's in: the game can't start from there.
 
-To update later, unpack a newer download over the same folder. Your saves,
-settings and the installed game are kept elsewhere (below).
+To update later, unpack the newer download over the same folder (the same
+command). Your Steam shortcut keeps working, and your saves, settings and the
+installed game are kept (they're elsewhere, below), so no disc image is
+needed. Over v0.1.0, which kept the program at the top of this folder, the
+first start removes that old copy. Settings menu > Advanced > **Check for
+Updates** says whether a newer one is out, with a QR code of the download page
+for your phone. Nothing is checked online unless you press Check for Updates.
 
 ## 3. Add it to Steam
 
@@ -68,6 +75,12 @@ delete the `.iso`.
 From Konsole, the same install:
 `~/Games/SpeedBreaker/speedbreaker.sh --install ~/Downloads/<your image>.iso`
 
+The game goes to `~/.local/share/speedbreaker/game`. To put it somewhere
+else, add `--dest <folder>` to that command: it installs into exactly that
+folder, and the game remembers it. (The installer's own "Choose a
+folder..." opens a folder picker only on a desktop; started from your Steam
+library, it says to use this command instead.)
+
 ## Controls and settings
 
 - The Frame's controllers work as an Xbox 360 controller.
@@ -93,11 +106,13 @@ the run before is kept as `previous-run.log`.
 
 ## Where things are
 
-- The installed game, saves and `settings.toml`: `~/.local/share/speedbreaker/`.
+- Saves and `settings.toml`: `~/.local/share/speedbreaker/`.
+- The installed game: `game/` in that folder, or the folder you gave
+  `--dest`.
 - Shader caches (safe to delete): `~/.cache/speedbreaker/`.
 - To uninstall: delete this folder, `~/.local/share/speedbreaker/` (that
-  deletes your saves too) and `~/.cache/speedbreaker/`, and remove the
-  shortcut from Steam.
+  deletes your saves too), `~/.cache/speedbreaker/` and the game's folder
+  if you chose one, and remove the shortcut from Steam.
 
 ## Licenses
 

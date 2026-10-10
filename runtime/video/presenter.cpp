@@ -2599,6 +2599,11 @@ void main()
 #endif
     }
 
+    bool GameMode()
+    {
+        return s_gameMode;
+    }
+
     void FrameRegion(uint32_t& width, uint32_t& height)
     {
         width = height = 0;

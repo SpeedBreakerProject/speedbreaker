@@ -153,6 +153,11 @@ namespace video
     // there.
     bool FullscreenLocked();
 
+    // SteamOS Game Mode (gamescope; NFSMW_GAME_MODE=1|0 says otherwise), as
+    // detected when the window was made. No desktop is on screen there, so a
+    // system file dialog can't be seen either.
+    bool GameMode();
+
     // NFSMW_PRESENT_SCALE (iOS): the present scale it sets for this run, over
     // Settings > Display > Screen Resolution; 0 when it isn't set.
     float PresentScaleOverride();

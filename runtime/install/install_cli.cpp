@@ -2,6 +2,11 @@
 #include "install_cli.h"
 #include "installer.h"
 #include "locate.h"
+#include "placement.h"
+
+#ifdef __APPLE__
+#include <TargetConditionals.h>
+#endif
 
 #include <chrono>
 #include <csignal>
@@ -129,23 +134,46 @@ namespace install
             return {};
         }
 
-        int RunInstall(const char* sourcePath, const fs::path& destination)
+        // `named`: the player gave the folder (--dest). Without --dest it's
+        // the default folder, which gets what the installer screen's
+        // "Internal storage" entry gets: only Install's own checks.
+        int RunInstall(const char* sourcePath, const fs::path& destination, bool named)
         {
+            // --dest: into exactly that folder (no subfolder, unlike the
+            // installer screen's "Choose a folder..."), with the screen's
+            // refusals for a folder the player picks: not SpeedBreaker's own
+            // folder, inside an install, the home folder, iCloud Drive, a
+            // folder kept in memory... (install/placement.h). Then the folder
+            // as the checks saw it (absolute, links resolved, no trailing
+            // separator) is installed into and recorded as such.
+            fs::path folder = destination;
+            std::vector<std::string> notes;
+            if (named)
+            {
+                FolderChoice where = CheckExactFolder(destination, true);
+                if (!where.result.Ok())
+                    return Failed(where.result);
+                folder = where.gameDir;
+                notes = std::move(where.notes);
+            }
             std::unique_ptr<DiscSource> source;
             if (Result r = OpenAndCheck(sourcePath, source); !r.Ok())
                 return Failed(r);
-            printf("Installing %s to %s\n", FormatSize(GameManifest().totalBytes).c_str(), destination.c_str());
+            for (const std::string& note : notes)
+                printf("Note: %s\n", note.c_str());
+            printf("Installing %s to %s\n", FormatSize(GameManifest().totalBytes).c_str(), folder.string().c_str());
 
             InterruptGuard guard;
             ProgressPrinter printer;
-            Result r = Install(*source, destination, std::ref(printer), &s_cancel);
+            Result r = Install(*source, folder, std::ref(printer), &s_cancel);
             printer.Finish();
             if (!r.Ok())
                 return Failed(r);
-            printf("Installed and verified in %.0f s: %s\n", printer.Seconds(), destination.c_str());
+            printf("Installed and verified in %.0f s: %s\n", printer.Seconds(), folder.string().c_str());
             // So the game finds it there (the default location clears the record).
-            if (!RecordInstallPath(destination))
-                fprintf(stderr, "Couldn't record the install location; start the game with NFSMW_GAME_DIR=%s\n", destination.c_str());
+            if (!RecordInstallPath(folder))
+                fprintf(stderr, "Couldn't record the install location; start the game with NFSMW_GAME_DIR=%s\n",
+                    folder.string().c_str());
             return 0;
         }
 
@@ -188,7 +216,16 @@ namespace install
             std::optional<GameInstall> game = FindGameInstall();
             if (!game)
             {
-                printf("No game install found. Install one with --install <image|folder>.\n");
+                // The installer screen's notice: a recorded folder that isn't there now, say.
+                RecordedInstall recorded = CheckRecordedInstall();
+#if defined(__APPLE__) && !TARGET_OS_IOS
+                std::string notice = DescribeRecordedInstall(recorded, recorded.path.string(), true);
+#else
+                std::string notice = DescribeRecordedInstall(recorded, recorded.path.string(), false);
+#endif
+                if (!notice.empty())
+                    printf("%s\n", notice.c_str());
+                printf("No game install found. Install one with --install <image|folder> [--dest <dir>].\n");
                 return 1;
             }
             const char* origin = game->origin == InstallOrigin::Environment ? "NFSMW_GAME_DIR"
@@ -209,14 +246,18 @@ namespace install
                     return Usage("--install needs the disc image or folder to install from.");
                 const char* source = argv[i + 1];
                 fs::path destination = DefaultInstallPath();
+                bool named = false;
                 for (int j = i + 2; j < argc; j++)
                 {
                     if (std::string_view(argv[j]) == "--dest" && j + 1 < argc)
+                    {
                         destination = argv[++j];
+                        named = true;
+                    }
                     else
                         return Usage((std::string("unexpected argument: ") + argv[j]).c_str());
                 }
-                return RunInstall(source, destination);
+                return RunInstall(source, destination, named);
             }
             if (arg == "--verify")
             {

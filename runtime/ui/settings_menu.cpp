@@ -5,8 +5,9 @@
 // left/right changes it, A toggles, LB/RB turn pages, B closes. The mouse
 // works too (a click selects a row, its arrows change it, the tabs turn
 // pages), and touch as the mouse (on iOS a drag scrolls the rows: ui.cpp).
-// Advanced also has Save Bug Report (report/bug_report.cpp), the build's
-// identity (version and commit) and the legal notice.
+// Advanced also has Save Bug Report (report/bug_report.cpp), Check for
+// Updates (update_dialog.cpp), the build's identity (version and commit) and
+// the legal notice.
 #include <stdafx.h>
 #include "ui.h"
 
@@ -16,6 +17,7 @@
 #include <video/presenter.h>
 
 #include <imgui.h>
+#include <imgui_internal.h>  // ClosePopupToLevel: a dialog left open when the menu closed
 
 namespace ui
 {
@@ -29,6 +31,7 @@ namespace ui
         bool s_focusFirstRow = true; // put the controller's cursor on the page's first row
         Id s_described = Id::Count;  // the row the help line describes
         bool s_describedBugReport = false;  // ...or Save Bug Report's
+        bool s_describedUpdate = false;     // ...or Check for Updates'
         bool s_opened = true;        // just opened: take focus
 
         constexpr int kCategories = int(Category::Count);
@@ -243,11 +246,12 @@ namespace ui
             }
         }
 
-        // An action, not an option: A (or a click) saves the report.
-        void BugReportRow(float valueWidth)
+        // An action, not an option: a label and what it shows now (no
+        // arrows). True when A (or a click) pressed it.
+        bool ActionRow(const char* id, const char* label, const char* value, float valueWidth, bool& described)
         {
             const float rowHeight = RowHeight();
-            ImGui::PushID("bug-report");
+            ImGui::PushID(id);
             ImGui::TableNextRow(ImGuiTableRowFlags_None, rowHeight);
             ImGui::TableNextColumn();
             ImGui::SetCursorPosX(ImGui::GetCursorPosX() + LabelInset());
@@ -256,24 +260,41 @@ namespace ui
                 ImGuiSelectableFlags_SpanAllColumns | ImGuiSelectableFlags_AllowOverlap, ImVec2(0, rowHeight));
             bool focused = ImGui::IsItemFocused();
             if (focused || (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenOverlappedByItem) && s_described == Id::Count))
-                s_describedBugReport = true;
-            const float mid = RowLabel(labelPos, "Save Bug Report");
+                described = true;
+            const float mid = RowLabel(labelPos, label);
             ImGui::TableNextColumn();
             float arrow = ImGui::GetFrameHeight();
             ImGui::SetCursorPosY(ImGui::GetCursorPosY() + (rowHeight - arrow) * 0.5f);
             ImVec2 min = ImGui::GetCursorScreenPos();
             ImGui::Dummy(ImVec2(valueWidth + arrow * 2, arrow));
-            const char* text = BugReportValue();
-            ImVec2 size = ImGui::CalcTextSize(text);
+            ImVec2 size = ImGui::CalcTextSize(value);
             ImGui::GetWindowDrawList()->AddText(ImVec2(min.x + arrow + (valueWidth - size.x) * 0.5f, CentredTextTop(mid)),
-                ImGui::GetColorU32(focused ? ImGuiCol_PlotLines : ImGuiCol_Text), text);
-            if (activated)
-                report::SaveBugReport();
+                ImGui::GetColorU32(focused ? ImGuiCol_PlotLines : ImGuiCol_Text), value);
             ImGui::PopID();
+            return activated;
+        }
+
+        // A (or a click) saves the report.
+        void BugReportRow(float valueWidth)
+        {
+            if (ActionRow("bug-report", "Save Bug Report", BugReportValue(), valueWidth, s_describedBugReport))
+                report::SaveBugReport();
+        }
+
+        // A (or a click) asks GitHub, and the dialog shows the answer.
+        void UpdateRow(float valueWidth)
+        {
+            if (ActionRow("check-updates", "Check for Updates", UpdateRowValue(), valueWidth, s_describedUpdate))
+                OpenUpdateDialog();
         }
 
         void HelpLine()
         {
+            if (s_describedUpdate)
+            {
+                UpdateRowHelp();
+                return;
+            }
             if (s_describedBugReport)
             {
 #if defined(__APPLE__) && TARGET_OS_IOS
@@ -374,8 +395,9 @@ namespace ui
         TitleText("Settings", "F1 / Back + Start");
 #endif
 
-        // Pages: LB/RB (Q/E) or the tabs.
-        if (int delta = PageDelta())
+        // Pages: LB/RB (Q/E) or the tabs; not under a dialog, which keeps them.
+        const bool dialog = ImGui::IsPopupOpen("reset") || UpdateDialogOpen();
+        if (int delta = dialog ? 0 : PageDelta())
         {
             s_category = Category((int(s_category) + delta + kCategories) % kCategories);
             s_tabPending = true;
@@ -383,6 +405,7 @@ namespace ui
         }
         s_described = Id::Count;
         s_describedBugReport = false;
+        s_describedUpdate = false;
         if (ImGui::BeginTabBar("pages", ImGuiTabBarFlags_NoTooltip))
         {
             for (int c = 0; c < kCategories; c++)
@@ -427,7 +450,8 @@ namespace ui
                         if (o.category == category && !o.hidden)
                             valueWidth = std::max(valueWidth, ValueWidth(o));
                     if (category == Category::Advanced)
-                        valueWidth = std::max(valueWidth, ImGui::CalcTextSize("Saving...").x);
+                        for (const char* text : { "Saving...", "Checking...", UpdateRowValue() })
+                            valueWidth = std::max(valueWidth, ImGui::CalcTextSize(text).x);
                     valueWidth += 2 * kSpaceM * s;
                     float arrow = ImGui::GetFrameHeight();
                     ImGui::PushStyleVar(ImGuiStyleVar_CellPadding, cellPadding);
@@ -442,7 +466,10 @@ namespace ui
                                 focusFirst = false;
                             }
                         if (category == Category::Advanced)
+                        {
                             BugReportRow(valueWidth);
+                            UpdateRow(valueWidth);
+                        }
                         ImGui::EndTable();
                     }
                     ImGui::PopStyleVar();
@@ -495,8 +522,10 @@ namespace ui
             ImGui::TextDisabled("%s", legend);
         }
 
+        bool popup = false;  // a dialog has the input: B is its, not the menu's
         if (ImGui::BeginPopupModal("reset", nullptr, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoTitleBar))
         {
+            popup = true;
             ImGui::Text("Reset every %s setting to its default?", settings::CategoryName(s_category));
             ImGui::Spacing();
             if (ImGui::Button("Reset"))
@@ -515,7 +544,9 @@ namespace ui
             ImGui::SetItemDefaultFocus();
             ImGui::EndPopup();
         }
-        else if (ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows) && !ImGui::IsAnyItemActive() &&
+        if (DrawUpdateDialog())
+            popup = true;
+        if (!popup && ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows) && !ImGui::IsAnyItemActive() &&
             (ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false) || ImGui::IsKeyPressed(ImGuiKey_Escape, false)))
             CloseSettings();
         ImGui::End();
@@ -524,5 +555,10 @@ namespace ui
     void ResetSettingsMenu()
     {
         s_opened = true;
+        // A dialog the menu was closed under (Start or Back alone closes it
+        // from anywhere) doesn't come back with it.
+        if (ImGuiContext* g = ImGui::GetCurrentContext(); g && g->OpenPopupStack.Size > 0)
+            ImGui::ClosePopupToLevel(0, false);
+        ForgetUpdateDialog();
     }
 }

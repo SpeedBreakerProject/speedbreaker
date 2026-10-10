@@ -59,13 +59,25 @@ int main()
     Fill(2560, 1080, 0.75f, 1.0f, 2560, 1080);      // Hor+
     Fill(3440, 1440, 0.7442f, 1.0f, 3440, 1440);
     Fill(2796, 1290, 0.8202f, 1.0f, 2796, 1290);    // iPhone 15 Pro Max
-    Fill(1280, 800, 1.0f, 1.0f, 1280, 720);         // Steam Deck: 16:10 keeps its bars (kTallMinStretch)
-    Fill(3024, 1890, 1.0f, 1.0f, 3024, 1701);       // 16:10 Mac fullscreen, likewise
+    Fill(1280, 800, 1.0f, 0.9f, 1280, 800);         // Steam Deck: 16:10 is Vert+ too (kTallMinStretch 1.01)
+    Fill(3024, 1890, 1.0f, 0.9f, 3024, 1890);       // 16:10 Mac fullscreen, likewise
     Fill(2160, 1440, 1.0f, 0.84375f, 2160, 1440);   // 3:2: Vert+
     Fill(2732, 2048, 1.0f, 0.7504f, 2732, 2048);    // iPad Pro 12.9"
     Fill(1024, 768, 1.0f, 0.75f, 1024, 768);
     Fill(1280, 1024, 1.0f, 0.75f, 1280, 960);       // narrower than 4:3: a 4:3 picture, letterboxed
     Fill(720, 1280, 1.0f, 0.75f, 720, 540);         // portrait
+
+    printf("Fill Screen on 16:9 and within 1%% of it: letterboxed exactly as before Vert+:\n");
+    {
+        // kTallMinStretch 1.01 lets 16:10 fill; 16:9 itself, and screens a
+        // hair wider (1366x768) or narrower (1360x768) than it, must not.
+        const uint32_t nearWide[][2] = { { 1280, 720 }, { 1920, 1080 }, { 2560, 1440 }, { 3840, 2160 }, { 1366, 768 }, { 1360, 768 } };
+        for (const auto& s : nearWide)
+        {
+            Letterbox(s[0], s[1], 1280.0f, 720.0f, FitPicture(s[0], s[1], 1280.0f, 720.0f, true, true), "Fill Screen");
+            Letterbox(s[0], s[1], 2560.0f, 1440.0f, FitPicture(s[0], s[1], 2560.0f, 1440.0f, true, true), "Fill Screen (2x2 image)");
+        }
+    }
 
     printf("16:9 setting (or no hooks at all), and no Vert+ hooks:\n");
     const uint32_t screens[][2] = { { 1280, 720 }, { 1366, 768 }, { 2560, 1080 }, { 3440, 1440 }, { 1280, 800 }, { 2732, 2048 },

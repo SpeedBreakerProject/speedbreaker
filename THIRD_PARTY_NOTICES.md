@@ -27,21 +27,26 @@ collected when the bundle is made).
 | **stb_truetype, stb_rect_pack, stb_textedit**: Copyright (c) 2017 Sean Barrett | Font rasterising and text editing, inside Dear ImGui. | MIT (or public domain) | [`LICENSES/stb-MIT.txt`](LICENSES/stb-MIT.txt) |
 | **Roboto** (Medium): Copyright 2011 Google Inc. | The menus' font, embedded in the program. Roboto is a trademark of Google. | Apache-2.0 | [`LICENSES/Apache-2.0.txt`](LICENSES/Apache-2.0.txt) |
 | **o1heap**: Copyright (c) 2020 Pavel Kirienko | The game's heap allocator (`runtime/thirdparty/o1heap`). | MIT | [`LICENSES/o1heap-MIT.txt`](LICENSES/o1heap-MIT.txt) |
+| **QR Code generator library** (C) 1.8.0: Copyright (c) 2022 Project Nayuki | The QR code of the download page in Settings > Advanced > Check for Updates (`runtime/thirdparty/qrcodegen`). | MIT | [`LICENSES/qrcodegen-MIT.txt`](LICENSES/qrcodegen-MIT.txt) |
 | **FFmpeg** 7.1.1: the FFmpeg developers | The XMA1, XMA2 and WMA Pro audio decoders, linked statically. Built without any GPL parts, with one SpeedBreaker change: [`patches/ffmpeg/0001-xma-single-stream-no-holdback.patch`](patches/ffmpeg/0001-xma-single-stream-no-holdback.patch) (no sample hold-back for single-stream XMA, which the game's audio mixer depends on). Source: `https://ffmpeg.org/releases/ffmpeg-7.1.1.tar.xz` plus that patch; [`scripts/build_ffmpeg_xma.sh`](scripts/build_ffmpeg_xma.sh) builds it. | LGPL-2.1-or-later | [`LICENSES/FFmpeg-LGPL-2.1.txt`](LICENSES/FFmpeg-LGPL-2.1.txt) |
 
 ## Libraries in the downloads
 
 | Project | Where | License | Text |
 |---|---|---|---|
-| **SDL3**: Copyright (C) 1997-2026 Sam Lantinga | Windows, input, audio and the app's lifecycle. In the Mac app and both SteamOS downloads. | zlib | [`LICENSES/SDL3-Zlib.txt`](LICENSES/SDL3-Zlib.txt) |
+| **SDL3**: Copyright (C) 1997-2026 Sam Lantinga | Windows, input, audio and the app's lifecycle. In the Mac app and both SteamOS downloads. It includes HIDAPI (controllers; Copyright (c) 2010 Alan Ott, Signal 11 Software; under its BSD-style license, one of the three it offers) and yuv2rgb (Copyright (c) 2016 Adrien Descamps). | zlib; HIDAPI and yuv2rgb: BSD-3-Clause | [`LICENSES/SDL3-Zlib.txt`](LICENSES/SDL3-Zlib.txt); [`LICENSES/HIDAPI-BSD-3-Clause.txt`](LICENSES/HIDAPI-BSD-3-Clause.txt); [`LICENSES/yuv2rgb-BSD-3-Clause.txt`](LICENSES/yuv2rgb-BSD-3-Clause.txt) |
 | **glslang**: The Khronos Group Inc. and others | Compiles the game's shaders while it runs. In the Mac app and both SteamOS downloads. | BSD-3-Clause and others (its own list) | [`LICENSES/glslang.txt`](LICENSES/glslang.txt) |
 | **SPIRV-Tools**: The Khronos Group Inc. and others | Used by glslang. In the Mac app and both SteamOS downloads. | Apache-2.0 | [`LICENSES/Apache-2.0.txt`](LICENSES/Apache-2.0.txt) |
-| **MoltenVK** (with SPIRV-Cross): Copyright (c) 2015-2026 The Brenwill Workshop Ltd., The Khronos Group Inc. | Vulkan on Apple's Metal. In the Mac app (and an iPhone or iPad build). | Apache-2.0 | [`LICENSES/Apache-2.0.txt`](LICENSES/Apache-2.0.txt) |
-| **Vulkan Loader**: The Khronos Group Inc., Valve Corporation, LunarG, Inc. | In the Mac app (SteamOS has its own). | Apache-2.0 | [`LICENSES/Apache-2.0.txt`](LICENSES/Apache-2.0.txt) |
+| **MoltenVK** (with SPIRV-Cross): Copyright (c) 2015-2026 The Brenwill Workshop Ltd., The Khronos Group Inc. | Vulkan on Apple's Metal. In the Mac app (and an iPhone or iPad build). It includes cereal (Copyright (c) 2013-2022 Randolph Voorhies, Shane Grant; BSD-3-Clause), which saves its shader conversions, and SPIRV-Tools (below). | Apache-2.0; cereal: BSD-3-Clause | [`LICENSES/Apache-2.0.txt`](LICENSES/Apache-2.0.txt); [`LICENSES/cereal-BSD-3-Clause.txt`](LICENSES/cereal-BSD-3-Clause.txt) |
+| **Vulkan Loader**: The Khronos Group Inc., Valve Corporation, LunarG, Inc. | In the Mac app (SteamOS has its own). It includes cJSON (Copyright (c) 2009-2017 Dave Gamble and cJSON contributors). | Apache-2.0; cJSON: MIT | [`LICENSES/Apache-2.0.txt`](LICENSES/Apache-2.0.txt); [`LICENSES/cJSON-MIT.txt`](LICENSES/cJSON-MIT.txt) |
+| **Vulkan-Headers** and **SPIRV-Headers**: The Khronos Group Inc. | Headers the game, the Vulkan Loader, glslang and SPIRV-Tools are built with. | Apache-2.0 or MIT (Vulkan-Headers); MIT (SPIRV-Headers) | [`LICENSES/Apache-2.0.txt`](LICENSES/Apache-2.0.txt) or [`LICENSES/Vulkan-Headers-MIT.txt`](LICENSES/Vulkan-Headers-MIT.txt); [`LICENSES/SPIRV-Headers.txt`](LICENSES/SPIRV-Headers.txt) |
 | **GNU C Library** (glibc) and **GCC's runtime libraries** (libstdc++, libgcc_s) | In the SteamOS x86-64 download only, from the Arch Linux packages it was built with (the download's `licenses/README.txt` names each package and version). The Steam Frame download uses SteamOS's own. | glibc: LGPL-2.1-or-later. GCC's runtime: GPL-3.0 with the GCC Runtime Library Exception | in the download's `licenses/` |
 
 Every SteamOS download's `licenses/` folder also holds the license files of the exact packages its
-libraries came from.
+libraries came from. The Mac app's libraries (all but MoltenVK) are built from their projects' own
+source releases by [`scripts/macos/build_deps.sh`](scripts/macos/build_deps.sh), for the oldest macOS
+the app supports; the app's `Contents/Resources/licenses/README.txt` names the version, source archive
+and SHA-256 of each, next to its license files.
 
 ## Source code of the LGPL and GPL parts
 

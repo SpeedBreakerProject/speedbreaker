@@ -62,6 +62,8 @@ namespace ui
     // Main thread: NFSMW_UI_KEYS asked for a capture of the next presented
     // frame ("Shot"); true once per request.
     bool TakeShot();
+    // Main thread: the same request from elsewhere (NFSMW_VIRTUAL_PAD's SHOT).
+    void RequestShot();
 
     // Main thread: every SDL event, before the game's input sees it. Opens
     // and closes the settings menu (keys, controller chord, three-finger
@@ -117,8 +119,24 @@ namespace ui
 
     // Screens (settings_menu.cpp, perf_overlay.cpp, installer_screen.cpp).
     void DrawSettings();
-    void ResetSettingsMenu();  // on opening: focus the first row
+    void ResetSettingsMenu();  // on opening: focus the first row, no dialog left open
     void DrawPerfOverlay();
+
+    // Settings > Advanced > Check for Updates (update_dialog.cpp, the check
+    // itself is update/updater.h): the row's value and help lines, and its
+    // dialog, drawn inside the settings window.
+    const char* UpdateRowValue();  // "Check", "Checking...", "Up to date", "v0.1.2 is out", "Failed"
+    void UpdateRowHelp();
+    // Starts a check (unless one is running) and opens the dialog next frame.
+    void OpenUpdateDialog();
+    // Every frame inside the settings window, at its top level (not in a
+    // child or a table: the popup's ID). True while the dialog is open: B
+    // closes it, not the menu.
+    bool DrawUpdateDialog();
+    bool UpdateDialogOpen();  // at the same level
+    // The menu closed or reopened: the dialog is gone (a check still running
+    // then ends in a toast).
+    void ForgetUpdateDialog();
 
     // Shared look (ui.cpp).
     SDL_Window* GetWindow();

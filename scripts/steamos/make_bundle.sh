@@ -16,6 +16,13 @@
 # arm64) and licenses. Never any game data: players install from their own
 # disc image on the first run.
 #
+# The launcher is the only program at the top of the folder: the game is
+# lib/SpeedBreaker, beside its libraries (since v0.1.1; v0.1.0 had it at the
+# top, where a player ran it directly and got "GLIBC_2.44 not found", since
+# only the launcher picks the C library it needs). A v0.1.1 folder unpacked
+# over a v0.1.0 one still holds v0.1.0's SpeedBreaker at the top: the
+# launcher removes it at its first start.
+#
 # The game's binary has its debug information stripped (its symbol table
 # stays: crash reports name functions with it, and the recompiled ones with
 # the game's own table either way). The full symbols go to
@@ -98,20 +105,21 @@ OBJCOPY="$(command -v objcopy || command -v llvm-objcopy || true)"
 [ -n "$OBJCOPY" ] || { echo "make_bundle.sh: no objcopy (binutils) to strip the binary" >&2; exit 1; }
 DEBUG="SpeedBreaker-$VERSION-$COMMIT-steamos-$ARCH.debug"
 "$OBJCOPY" --only-keep-debug "$BIN" "$SYMBOLS/$DEBUG"
-"$OBJCOPY" --strip-debug --add-gnu-debuglink="$SYMBOLS/$DEBUG" "$BIN" "$STAGE/SpeedBreaker"
+GAME="$STAGE/lib/SpeedBreaker"
+"$OBJCOPY" --strip-debug --add-gnu-debuglink="$SYMBOLS/$DEBUG" "$BIN" "$GAME"
 # A build-time library path (a hand-built SDL3 in ~/deps) has no use in the
 # bundle, which passes the loader its own lib/.
-if readelf -d "$STAGE/SpeedBreaker" | grep -qE '\((RUNPATH|RPATH)\)'; then
+if readelf -d "$GAME" | grep -qE '\((RUNPATH|RPATH)\)'; then
     if command -v patchelf > /dev/null; then
-        patchelf --remove-rpath "$STAGE/SpeedBreaker"
+        patchelf --remove-rpath "$GAME"
     else
-        echo "make_bundle.sh: warning: the binary keeps its build's library path ($(readelf -d "$STAGE/SpeedBreaker" |
+        echo "make_bundle.sh: warning: the binary keeps its build's library path ($(readelf -d "$GAME" |
             sed -n 's/.*(R[UN]*PATH).*\[\(.*\)\]/\1/p')): harmless (the launcher's lib/ comes first), but install patchelf to drop it" >&2
     fi
 fi
 cp "$SCRIPTS/bundle/speedbreaker.sh" "$STAGE/"
 cp "$SCRIPTS/bundle/$README" "$STAGE/README.md"
-chmod 755 "$STAGE/SpeedBreaker" "$STAGE/speedbreaker.sh"
+chmod 755 "$GAME" "$STAGE/speedbreaker.sh"
 echo "SpeedBreaker v$VERSION ($COMMIT, built $(date -u -r "$BIN" +%F)), SteamOS $ARCH" > "$STAGE/VERSION"
 
 # Sorted by soname; `ldd` lists the whole closure. A library the build found
@@ -173,7 +181,7 @@ newest() {  # newest <prefix> <files...>: from each file's needs, not its defini
 }
 provides() { grep -ao "${1}_[0-9.]*[0-9]" "$2" | sort -uV | tail -1; }
 shopt -s nullglob
-elves=("$STAGE/SpeedBreaker" "$STAGE"/lib/*.so* "$STAGE"/lib/cxx/*)
+elves=("$GAME" "$STAGE"/lib/*.so* "$STAGE"/lib/cxx/*)
 shopt -u nullglob
 need_glibc="$(newest GLIBC "${elves[@]}")"
 need_cxx="$(newest GLIBCXX "${elves[@]}")"
@@ -266,11 +274,19 @@ fi
 folders=(-e "$SRC" -e "$BUILD")
 for d in tools ppc; do [ -L "$SRC/$d" ] && folders+=(-e "$(dirname "$(readlink -f "$SRC/$d")")"); done
 [ "${#HOME}" -gt 1 ] && folders+=(-e "$HOME/")
-leaks="$(grep -aoF "${folders[@]}" "$STAGE/SpeedBreaker" | sort | uniq -c || true)"
+leaks="$(grep -aoF "${folders[@]}" "$GAME" | sort | uniq -c || true)"
 if [ -n "$leaks" ]; then
     echo "make_bundle.sh: the binary names the build machine's folders (for a library folder, configure with -DCMAKE_SKIP_BUILD_RPATH=ON):" >&2
     echo "$leaks" >&2
     [ "${SB_ALLOW_PATHS:-0}" = 1 ] || exit 1
+fi
+
+# The top of the folder: the launcher is the only program there (lib/ holds the
+# game), so nothing else can be run by mistake.
+top="$(cd "$STAGE" && find . -mindepth 1 -maxdepth 1 -type f -perm -u+x ! -name speedbreaker.sh | sed 's|^\./||')"
+if [ -n "$top" ]; then
+    echo "make_bundle.sh: programs at the top of $STAGE besides speedbreaker.sh: $top" >&2
+    exit 1
 fi
 
 {

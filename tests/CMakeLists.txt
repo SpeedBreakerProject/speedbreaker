@@ -16,7 +16,15 @@ function(sb_test name)
 endfunction()
 
 sb_test(block_ranges_test)
+# Where guest memory and the upload ring go (gpu/memory_plan.h, header only).
+sb_test(memory_plan_test)
 sb_test(zpd_report_test)
+# The resolve shader's 24-bit depth pack (gpu/depth24_glsl.h), header only;
+# renderer.cpp is read to check its resolve shader uses it.
+sb_test(depth24_pack_test ARGS ${RT}/gpu/renderer.cpp)
+# The police vid-cam's side bars and the fill past the 16:9 band
+# (gpu/edge_bars.h, header only).
+sb_test(edge_bars_test)
 sb_test(picture_fit_test SOURCES ${RT}/video/picture_fit.cpp)
 sb_test(refresh_fit_test SOURCES ${RT}/video/refresh_fit.cpp)
 sb_test(frame_rate_policy_test SOURCES ${RT}/video/frame_rate_policy.cpp)
@@ -31,9 +39,25 @@ if(Python3_FOUND)
         ${CMAKE_CURRENT_BINARY_DIR}/report_zip_out)
     set_tests_properties(report_zip_check PROPERTIES DEPENDS report_zip_test)
 endif()
+# "Choose a folder..." in the installer (install/placement.h): where the game
+# goes in a picked folder and what is refused, on planted facts and in a
+# scratch folder with a sandbox HOME. POSIX only (mkdtemp, chmod, ACLs and
+# links in its disk checks); the screen hides the entry on Windows until
+# placement.cpp is ported there.
+if(NOT WIN32)
+    sb_test(install_folder_test SOURCES ${RT}/install/placement.cpp ${RT}/install/installer.cpp ${RT}/install/locate.cpp
+        ${RT}/install/manifest.cpp ${RT}/install/result.cpp ${RT}/install/disc_source.cpp ${RT}/install/sha256.cpp
+        ARGS ${CMAKE_BINARY_DIR}/install_folder_scratch)  # not beside the test: that's its "own folder", refused
+    if(APPLE AND NOT IOS)
+        target_link_libraries(install_folder_test PRIVATE "-framework CoreFoundation")  # placement.cpp's iCloud check
+    endif()
+endif()
 # The version line in the log, and when the "What's new" note shows
 # (user/version_check.h, header only).
 sb_test(version_check_test)
+# Check for Updates' logic: versions, GitHub's JSON, curl's output and the
+# release notes (update/check.cpp, self-contained).
+sb_test(update_check_test SOURCES ${RT}/update/check.cpp)
 # The write watch around CPU write faults, on physical memory mapped as the
 # runtime maps it.
 sb_test(write_watch_test SOURCES ${RT}/kernel/write_watch.cpp ${RT}/cpu/guest_time.cpp)

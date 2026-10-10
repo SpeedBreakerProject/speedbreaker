@@ -9,10 +9,11 @@
 // and the game's view is changed so the stretch doesn't distort it.
 //   - Wider than 16:9 by more than 1% (an ultrawide, a 19.5:9 iPhone): Hor+,
 //     scaleX = 16:9 / screen aspect.
-//   - Narrower than 16:9 by more than kTallMinStretch (a 4:3 iPad, a 3:2
-//     screen; not yet 16:10): Vert+, scaleY = screen aspect / 16:9, the same
-//     horizontal view with more above and below it. Down to 4:3: a screen
-//     narrower still (5:4, portrait) shows a 4:3 picture, letterboxed.
+//   - Narrower than 16:9 by more than kTallMinStretch, 1% (16:10: the Steam
+//     Deck, 16:10 Macs; a 3:2 screen, a 4:3 iPad): Vert+, scaleY = screen
+//     aspect / 16:9, the same horizontal view with more above and below it.
+//     Down to 4:3: a screen narrower still (5:4, portrait) shows a 4:3
+//     picture, letterboxed.
 // Otherwise (16:9 within those margins, the 16:9 setting, or a ppc/ without
 // the hooks) the 16:9 frame is letterboxed as it always was.
 #pragma once
@@ -23,11 +24,13 @@ namespace video
     // The narrowest picture Vert+ makes: 4:3, at most 4/3 the vertical
     // view's tan of the half-angle.
     constexpr float kTallMinAspect = 4.0f / 3.0f;
-    // Vert+ when 16:9 is wider than the screen by more than this factor:
-    // a 4:3 iPad (1.33) and 3:2 (1.19) fill. 16:10 (1.11: the Steam Deck,
-    // Macs) keeps its bars until a Deck run shows Vert+ costs it nothing and
-    // the 1.11 vertical stretch of its 720 rows reads well; 1.01 fills it.
-    constexpr float kTallMinStretch = 1.12f;
+    // Vert+ when 16:9 is wider than the screen by more than this factor,
+    // the same 1% margin as Hor+: 16:10 (1.11: the Steam Deck's 1280x800,
+    // 16:10 Macs), 3:2 (1.19) and a 4:3 iPad (1.33) fill. 16:9 itself, and
+    // a screen within 1% of it (1360x768), keeps the letterboxed 16:9 frame.
+    // On the Deck, AutoRenderScale keeps 1x1, so the frame's 720 rows are
+    // stretched to 800 (1.11) rather than drawn 1:1 in a 720-row box.
+    constexpr float kTallMinStretch = 1.01f;
 
     struct PictureFit
     {

@@ -35,7 +35,8 @@ for p in "$ROOT"/patches/ffmpeg/*.patch; do patch -s -p1 < "$p"; done
 ./configure --disable-everything --disable-programs --disable-doc --disable-debug \
     --disable-network --disable-autodetect --disable-avdevice --disable-avformat --disable-swscale \
     --disable-swresample --disable-postproc --disable-avfilter \
-    --enable-decoder=xma1,xma2,wmapro --enable-static --disable-shared --enable-pic "$@" > "$WORK/configure.log"
+    --enable-decoder=xma1,xma2,wmapro --enable-static --disable-shared --enable-pic "$@" > "$WORK/configure.log" \
+  || { tail -5 "$WORK/configure.log"; tail -15 ffbuild/config.log; echo "build_ffmpeg_xma.sh: configure failed"; exit 1; } >&2
 make -j"$(sysctl -n hw.ncpu 2>/dev/null || nproc)" > "$WORK/make.log"
 make install DESTDIR="$WORK/stage" > "$WORK/install.log"
 # The default prefix (/usr/local) inside the stage, moved to its place.

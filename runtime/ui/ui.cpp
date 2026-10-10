@@ -739,6 +739,11 @@ namespace ui
         }
     }
 
+    void RequestShot()
+    {
+        s_shots++;
+    }
+
     bool TakeShot()
     {
         if (s_shots == 0)
@@ -916,6 +921,7 @@ namespace ui
             return;
         s_settingsOpen = false;
         UpdateCapture();
+        ForgetUpdateDialog();
         report::NoteMenuClosed();
         XamNotifySystemUi(false);
         if (settings::Dirty() && !settings::Save())

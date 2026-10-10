@@ -81,9 +81,9 @@ namespace settings
     constexpr int32_t kResolutionAuto = 0;
     // Auto: a screen of another shape is filled (video/picture_fit), the HUD
     // kept in a centred 16:9 block: a wider one with a wider view (Hor+), a
-    // narrower one (4:3, 3:2) with a taller view (Vert+, down to 4:3). 16:10
-    // (the Steam Deck, 1280x800 Macs) is too close to 16:9 for that and keeps
-    // thin bars (video::kTallMinStretch). Widescreen: 16:9 with bars.
+    // narrower one (16:10: the Steam Deck, 1280x800 Macs; 3:2, 4:3) with a
+    // taller view (Vert+, down to 4:3). Only a screen within 1% of 16:9 keeps
+    // the 16:9 frame (video::kTallMinStretch). Widescreen: 16:9 with bars.
     enum class AspectMode : int32_t { Auto = 0, Widescreen = 1 };
     // Anisotropy: 1 (off), 2, 4, 8, 16, or one of these.
     constexpr int32_t kAnisotropyAuto = 0;   // 16x on a discrete GPU or an M-series iPad, 4x on other integrated ones

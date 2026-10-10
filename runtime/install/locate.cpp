@@ -1,12 +1,14 @@
 // SpeedBreaker runtime. GPL-3.0-or-later (see COPYING). See locate.h.
 #include "locate.h"
 #include "installer.h"
+#include "placement.h"
 
 #include <user/paths.h>
 
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
+#include <format>
 #include <set>
 
 #include <pwd.h>
@@ -141,8 +143,14 @@ namespace install
             RecoverInterruptedInstall(*recorded, manifest);
             if (std::optional<fs::path> xex = UsableXex(*recorded, true, manifest))
                 return Found(*recorded, *xex, InstallOrigin::User, manifest);
-            fprintf(stderr, "[install] the game was installed in %s, which isn't usable now (drive not inserted?)\n",
-                recorded->c_str());
+            // Why, for the log (the installer screen says it to the player:
+            // DescribeRecordedInstall).
+            std::error_code ec;
+            fs::file_status status = fs::status(*recorded, ec);
+            std::string why = status.type() == fs::file_type::not_found ? "isn't there now (a drive not connected?)"
+                : ec ? std::format("can't be read ({})", ec.message())
+                     : "isn't a current install (files missing, or an older version)";
+            fprintf(stderr, "[install] the game was installed in %s, which %s\n", recorded->string().c_str(), why.c_str());
         }
 
         fs::path user = DefaultInstallPath();
@@ -191,14 +199,21 @@ namespace install
             text.pop_back();
         if (text.empty() || text.front() != '/')
             return std::nullopt;
-        return fs::path(text);
+        // No trailing separator (records before v0.1.1 kept `--dest dir/`'s).
+        fs::path path = fs::path(text).lexically_normal();
+        while (path.has_relative_path() && path.filename().empty())
+            path = path.parent_path();
+        return path;
     }
 
     bool RecordInstallPath(const std::filesystem::path& dir)
     {
         std::error_code ec;
         fs::path file = LocationFile();
-        if (fs::absolute(dir, ec).lexically_normal() == fs::absolute(DefaultInstallPath(), ec).lexically_normal())
+        // As the installer compares folders: absolute, links resolved, no
+        // trailing separator (`--dest dir/` and `dir` are one record).
+        fs::path folder = ResolvedFolder(dir);
+        if (SameFolder(folder, DefaultInstallPath()))
         {
             fs::remove(file, ec);
             return !ec;
@@ -209,7 +224,7 @@ namespace install
         FILE* f = fopen(temp.c_str(), "wb");
         if (!f)
             return false;
-        std::string text = fs::absolute(dir, ec).lexically_normal().string() + "\n";
+        std::string text = folder.string() + "\n";
         bool ok = fwrite(text.data(), 1, text.size(), f) == text.size();
         ok = fflush(f) == 0 && ok;
         fsync(fileno(f));

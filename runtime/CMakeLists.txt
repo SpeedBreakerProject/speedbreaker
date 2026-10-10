@@ -17,6 +17,10 @@ target_compile_options(XenonUtilsLite PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-include
 
 file(GLOB_RECURSE RUNTIME_SOURCES CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/*.cpp)
 list(FILTER RUNTIME_SOURCES EXCLUDE REGEX "/thirdparty/")
+# Nayuki's QR Code generator (thirdparty/qrcodegen, vendored, C): the
+# download page's code in Check for Updates. Part of the runtime itself, not
+# a library of its own, so the iOS app (scripts/ios/build.sh) links it too.
+list(APPEND RUNTIME_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/qrcodegen/qrcodegen.c)
 if(APPLE)
     # Apple's own glue for macOS and iOS (the thermal state) is
     # Objective-C++ on Foundation alone, platform/apple/*.mm. Built with the
@@ -138,9 +142,11 @@ target_link_libraries(SpeedBreaker PRIVATE NfsmwRecompLib XenonUtilsLite o1heap 
 if(TARGET glslang::SPIRV)
     target_link_libraries(SpeedBreaker PRIVATE glslang::SPIRV)
 endif()
-# platform/apple/*.mm (iOS: linked by scripts/ios/build.sh).
+# platform/apple/*.mm (iOS: linked by scripts/ios/build.sh): Foundation, and
+# on macOS AppKit (file_dialog.mm) and CoreFoundation (install/placement.cpp:
+# is a folder in iCloud Drive).
 if(APPLE AND NOT IOS)
-    target_link_libraries(SpeedBreaker PRIVATE "-framework Foundation")
+    target_link_libraries(SpeedBreaker PRIVATE "-framework Foundation" "-framework AppKit" "-framework CoreFoundation")
 endif()
 target_include_directories(SpeedBreaker SYSTEM PRIVATE ${FFMPEG_INCLUDE_DIR} ${XR}/thirdparty/tomlplusplus/include)
 # Assertions stay on in every build type: ported code marks its unhandled
@@ -153,4 +159,29 @@ if(IOS)
     # The CPU level both the iPad Pro (M2) and the iPhone 15 Pro (A17 Pro)
     # have; Apple clang's iOS default is far older.
     target_compile_options(SpeedBreaker PRIVATE -mcpu=apple-a15)
+endif()
+# macOS: the build folder gets MoltenVK's manifest too, next to the game
+# (runtime/vulkan/icd.d/MoltenVK_icd.json), naming the MoltenVK that
+# scripts/macos/make_app.py bundles (MOLTENVK in the environment, else
+# Homebrew's molten-vk; -DSB_MOLTENVK=<libMoltenVK.dylib> to choose). The game
+# points the Vulkan loader at <its folder>/vulkan/icd.d/MoltenVK_icd.json when
+# there is one, as in SpeedBreaker.app (video/presenter.cpp). The loader
+# scripts/macos/build_deps.sh builds searches only the system's folders
+# (/usr/local/etc, /etc, ...), never Homebrew's, where molten-vk keeps its
+# manifest: without this, the game run from the build folder (and
+# scripts/bench.sh, test_suspend.sh, verify_settings.py) finds no Vulkan
+# driver. VK_DRIVER_FILES or VK_ICD_FILENAMES set by hand still win.
+if(APPLE AND NOT IOS)
+    if(DEFINED ENV{MOLTENVK})
+        set(_sb_moltenvk "$ENV{MOLTENVK}")
+    else()
+        set(_sb_moltenvk "/opt/homebrew/opt/molten-vk/lib/libMoltenVK.dylib")
+    endif()
+    set(SB_MOLTENVK "${_sb_moltenvk}" CACHE FILEPATH "The MoltenVK the game in the build folder uses")
+    if(EXISTS "${SB_MOLTENVK}")
+        file(GENERATE OUTPUT "$<TARGET_FILE_DIR:SpeedBreaker>/vulkan/icd.d/MoltenVK_icd.json"
+            CONTENT "{\n    \"file_format_version\": \"1.0.0\",\n    \"ICD\": {\n        \"library_path\": \"${SB_MOLTENVK}\",\n        \"api_version\": \"1.4.0\",\n        \"is_portability_driver\": true\n    }\n}\n")
+    else()
+        message(STATUS "No MoltenVK at ${SB_MOLTENVK}: the game in the build folder takes the Vulkan loader's own drivers (-DSB_MOLTENVK=<libMoltenVK.dylib> names one)")
+    endif()
 endif()

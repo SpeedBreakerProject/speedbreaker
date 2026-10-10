@@ -130,7 +130,7 @@ namespace settings
               .env = "NFSMW_SCALING", .defaultValue = double(ScalingMode::Bicubic), .entries = kScalingEntries },
             { .id = Id::AspectRatio, .category = Category::Display, .type = Type::Enum, .apply = Apply::Live,
               .table = "video", .key = "aspect_ratio", .label = "Aspect Ratio",
-              .description = "Fill other screen shapes: a wider view on an ultrawide, a taller one on a 4:3 iPad, the HUD at 16:9 (the Steam Deck's 16:10 keeps thin bars). Or 16:9 with bars.",
+              .description = "Fill other screen shapes: a wider view on an ultrawide, a taller one on a Steam Deck or a 4:3 iPad, the HUD at 16:9. Or 16:9 with bars.",
               .env = "NFSMW_ASPECT", .defaultValue = double(AspectMode::Auto), .entries = kAspectEntries },
             { .id = Id::Sharpening, .category = Category::Graphics, .type = Type::Float, .apply = Apply::Live,
               .table = "video", .key = "sharpening", .label = "Sharpening",

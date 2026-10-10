@@ -231,12 +231,20 @@ namespace
     // NFSMW_VIRTUAL_PAD="2:LX=0.05,4:LX=0.2,6:RT=0.01": an SDL virtual
     // controller, the only one opened, whose axes move to those values at
     // seconds since launch (sticks LX/LY/RX/RY -1..1, up positive; triggers
-    // LT/RT 0..1) and hold them. NFSMW_INPUT_SCRIPT feeds the game after the
+    // LT/RT 0..1) and hold them. Its buttons too: "5:BACK=1" holds one down,
+    // "5.2:BACK=0" lets it go, "6:DOWN" taps it (0.15 s); A B X Y BACK START
+    // LB RB LS RS and the D-pad's UP DOWN LEFT RIGHT. Being a real SDL
+    // controller, it drives the menus (Back + Start, the D-pad, A, B) as
+    // well as the game. A button changes once a frame at most, so a tap due
+    // whole within one long frame (a capture's stall) still shows a frame
+    // pressed. "12:SHOT" saves the next presented frame (ui::RequestShot), on
+    // the pad's clock. NFSMW_INPUT_SCRIPT feeds the game after the
     // device path; this goes through it, so the deadzones and Vibration
     // reach it as they would a real controller, for tests without one. Each
     // step logs what the game then gets; the rumble the game asks for and
     // the rumble the pad receives are logged.
-    struct PadStep { double time; SDL_GamepadAxis axis; float value; std::string text; };
+    struct PadStep { double time; SDL_GamepadAxis axis; float value; std::string text; int button = -1; bool down = false; };
+    constexpr int kShotStep = -2;  // PadStep::button: a capture, not a button
     std::vector<PadStep> s_padSteps;
     size_t s_padNext = 0;
     SDL_JoystickID s_virtualPadId = 0;
@@ -267,10 +275,47 @@ namespace
             std::string item(rest.substr(0, comma));
             rest = comma == std::string_view::npos ? std::string_view() : rest.substr(comma + 1);
             size_t colon = item.find(':'), equals = item.find('=');
-            if (colon == std::string::npos || equals == std::string::npos || equals < colon)
+            if (colon == std::string::npos || (equals != std::string::npos && equals < colon))
                 continue;
-            std::string name = item.substr(colon + 1, equals - colon - 1);
+            std::string name = item.substr(colon + 1, equals == std::string::npos ? std::string::npos : equals - colon - 1);
+            static const std::pair<const char*, SDL_GamepadButton> buttons[] = {
+                { "A", SDL_GAMEPAD_BUTTON_SOUTH }, { "B", SDL_GAMEPAD_BUTTON_EAST }, { "X", SDL_GAMEPAD_BUTTON_WEST },
+                { "Y", SDL_GAMEPAD_BUTTON_NORTH }, { "BACK", SDL_GAMEPAD_BUTTON_BACK }, { "START", SDL_GAMEPAD_BUTTON_START },
+                { "LB", SDL_GAMEPAD_BUTTON_LEFT_SHOULDER }, { "RB", SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER },
+                { "LS", SDL_GAMEPAD_BUTTON_LEFT_STICK }, { "RS", SDL_GAMEPAD_BUTTON_RIGHT_STICK },
+                { "UP", SDL_GAMEPAD_BUTTON_DPAD_UP }, { "DOWN", SDL_GAMEPAD_BUTTON_DPAD_DOWN },
+                { "LEFT", SDL_GAMEPAD_BUTTON_DPAD_LEFT }, { "RIGHT", SDL_GAMEPAD_BUTTON_DPAD_RIGHT },
+            };
+            if (name == "SHOT")
+            {
+                s_padSteps.push_back({ std::atof(item.c_str()), SDL_GAMEPAD_AXIS_INVALID, 0.0f, name, kShotStep, false });
+                continue;
+            }
             bool found = false;
+            for (auto& [n, button] : buttons)
+                if (name == n)
+                {
+                    const double at = std::atof(item.c_str());
+                    if (equals == std::string::npos)
+                    {
+                        // A tap: down, and up again 0.15 s later.
+                        s_padSteps.push_back({ at, SDL_GAMEPAD_AXIS_INVALID, 0.0f, name + " down", int(button), true });
+                        s_padSteps.push_back({ at + 0.15, SDL_GAMEPAD_AXIS_INVALID, 0.0f, name + " up", int(button), false });
+                    }
+                    else
+                    {
+                        const bool down = std::atof(item.c_str() + equals + 1) != 0.0;
+                        s_padSteps.push_back({ at, SDL_GAMEPAD_AXIS_INVALID, 0.0f, name + (down ? " down" : " up"), int(button), down });
+                    }
+                    found = true;
+                }
+            if (found)
+                continue;
+            if (equals == std::string::npos)
+            {
+                fprintf(stderr, "[input] NFSMW_VIRTUAL_PAD: unknown button in \"%s\"\n", item.c_str());
+                continue;
+            }
             for (auto& [n, axis] : axes)
                 if (name == n)
                 {
@@ -305,9 +350,25 @@ namespace
             return {};
         double t = SecondsSinceLaunch();
         std::string taken;
+        uint32_t changed = 0;  // buttons changed this frame
         for (; s_padNext < s_padSteps.size() && s_padSteps[s_padNext].time <= t; s_padNext++)
         {
             const PadStep& step = s_padSteps[s_padNext];
+            if (step.button == kShotStep)
+            {
+                ui::RequestShot();
+                taken += (taken.empty() ? "" : " ") + step.text;
+                continue;
+            }
+            if (step.button >= 0)
+            {
+                if (changed & (1u << step.button))
+                    break;  // its next change waits a frame (the steps stay in order)
+                changed |= 1u << step.button;
+                SDL_SetJoystickVirtualButton(s_virtualPad, step.button, step.down);
+                taken += (taken.empty() ? "" : " ") + step.text;
+                continue;
+            }
             float value = step.value;
             bool trigger = step.axis == SDL_GAMEPAD_AXIS_LEFT_TRIGGER || step.axis == SDL_GAMEPAD_AXIS_RIGHT_TRIGGER;
             if (step.axis == SDL_GAMEPAD_AXIS_LEFTY || step.axis == SDL_GAMEPAD_AXIS_RIGHTY)

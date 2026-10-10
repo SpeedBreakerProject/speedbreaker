@@ -6,14 +6,17 @@ project(u), not affiliated with, endorsed by or sponsored by Electronic Arts
 or Valve.
 
 This is the x86-64 SteamOS download (the Steam Frame has its own, the arm64
-one). This folder has the game program, the libraries it needs and a
-launcher. It has **no game data**: you need your own disc image of your own
-Xbox 360 disc of the game (an `.iso`), and the game installs itself from it on
-the first run. `VERSION` says which release this is.
+one). This folder has the launcher, `speedbreaker.sh`, and in `lib/` the
+game program and the libraries it needs. **Always start the game with
+`speedbreaker.sh`** (your Steam shortcut does): the program in `lib/` can't
+start on its own, since the launcher picks the libraries it runs with. It has
+**no game data**: you need your own disc image of your own Xbox 360 disc of
+the game (an `.iso`), and the game installs itself from it on the first run.
+`VERSION` says which release this is.
 
 It runs on SteamOS as it is and needs no distrobox or developer tools. Tested
 on a Steam Deck OLED (SteamOS 3.9) and a Steam Machine (SteamOS 3.8). On other
-Linux distributions it hasn't been tried yet.
+Linux distributions it hasn't been tried yet; run `speedbreaker.sh` there too.
 
 ## 1. Unpack
 
@@ -39,8 +42,13 @@ program needs. No `:`, `;` or `$`
 in the names of the folders it's in (not "Need for Speed: Most Wanted"): the
 game can't start from there.
 
-To update later, unpack a newer build over the same folder. Your saves,
-settings and the installed game are kept elsewhere (below).
+To update later, unpack the newer download over the same folder (the same
+command, or Extract archive here, letting it overwrite). Your Steam shortcut
+keeps working, and your saves, settings and the installed game are kept
+(they're elsewhere, below), so no disc image is needed. Over v0.1.0, which
+kept the program at the top of this folder, the first start removes that old
+copy. Settings menu > Advanced > **Check for Updates** says whether a newer
+one is out. Nothing is checked online unless you press Check for Updates.
 
 ## 2. Add it to Steam
 
@@ -69,10 +77,18 @@ images it finds rather than "Browse for image...", whose file browser may not
 show in Game Mode.
 It checks the image first (the right game and version, nothing missing),
 then copies and checks every file: about 7 GB, a few minutes at most. You
-choose where it goes: the internal storage, or the SD card. Afterwards you
-can delete the `.iso`.
+choose where it goes with left and right: the internal storage, the SD card,
+or "Choose a folder...", which opens a folder picker (press A on it). An
+empty folder is used as it is; a folder that already holds files gets a new
+`SpeedBreaker Game` folder inside it (the top of a card or drive gets
+`speedbreaker/game`, like the SD card's own entry). The picker opens in
+Desktop Mode only: in Game Mode the installer says so. Pick a folder on the
+internal storage or on a card or drive formatted by SteamOS, or Game Mode
+won't find the game. Afterwards you can delete the `.iso`.
 
 From a terminal, the same install: `~/Games/SpeedBreaker/speedbreaker.sh --install ~/Downloads/<your image>.iso`
+(add `--dest <folder>` to install into exactly that folder: the game
+remembers it, in Game Mode too).
 
 ## Controls
 
@@ -86,8 +102,10 @@ From a terminal, the same install: `~/Games/SpeedBreaker/speedbreaker.sh --insta
 
 ## Screen
 
-- The Deck's screen is 16:10; the game is 16:9, so it shows with thin bars
-  above and below. That's intended.
+- The Deck's screen is 16:10 and the game is 16:9. By default (Settings >
+  Display > Aspect Ratio: Fill Screen) it fills the screen with a slightly
+  taller view, the HUD kept at 16:9; choose 16:9 there for the console's
+  picture with thin bars above and below.
 - **Steam Deck OLED: set the refresh rate to 60 Hz** (Quick Access menu >
   Performance, the battery icon > Refresh Rate; turn on Advanced View if it
   isn't shown). The game runs at 60 frames a second and times itself to a
@@ -123,12 +141,14 @@ ends with where in the program it was.
 
 ## Where things are
 
-- The installed game, saves and `settings.toml`: `~/.local/share/speedbreaker/`
-  (or the SD card's `speedbreaker/game` if you installed it there).
+- Saves and `settings.toml`: `~/.local/share/speedbreaker/`.
+- The installed game: `game/` in that folder, or the SD card's
+  `speedbreaker/game`, or the folder you chose. The game remembers where it
+  is; if that card or drive isn't there when it starts, it says so.
 - Shader caches (safe to delete): `~/.cache/speedbreaker/`.
 - To uninstall: delete this folder, `~/.local/share/speedbreaker/` (that
-  deletes your saves too) and `~/.cache/speedbreaker/`, and remove the
-  shortcut from Steam.
+  deletes your saves too), `~/.cache/speedbreaker/` and the game's folder
+  if you chose one, and remove the shortcut from Steam.
 
 ## Licenses
 

@@ -21,6 +21,7 @@
 #include <cpu/host_cpu.h>
 #include <install/install_cli.h>
 #include <install/locate.h>
+#include <install/placement.h>
 #include <install/sha256.h>
 #include <report/report.h>
 #include <ui/installer_screen.h>
@@ -279,6 +280,9 @@ int main(int argc, char** argv)
     // Before anything uses the per-user folders: nfsmw-recomp's become
     // SpeedBreaker's (user/paths.h).
     std::string migrated = MigrateUserFolders();
+    // Which folder the game runs from, before anything changes directory:
+    // the installer never puts the game inside it (install/placement.h).
+    install::SetProgramPath(argc > 0 ? argv[0] : nullptr);
     // The name volume mixers and the desktop show (before SDL starts).
     SDL_SetAppMetadata("SpeedBreaker", report::BuildString(), nullptr);
     if (std::optional<int> code = install::RunInstallCommand(argc, argv))

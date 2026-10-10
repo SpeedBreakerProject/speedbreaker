@@ -10,6 +10,8 @@
 
 #include <install/installer.h>
 #include <install/locate.h>
+#include <install/placement.h>
+#include <video/presenter.h>
 
 #include <imgui.h>
 #include <imgui_internal.h>
@@ -23,6 +25,8 @@
 
 #if defined(__APPLE__) && TARGET_OS_IOS
 #include <platform/ios_files.h>
+#elif defined(__APPLE__)
+#include <platform/file_dialog.h>
 #endif
 
 namespace ui
@@ -38,7 +42,14 @@ namespace ui
         std::optional<std::string> s_dialogPick;
         uint64_t s_pickAccess = 0;      // iOS: the Files app's grant to read s_dialogPick (ios_files.h)
         bool s_dialogFailed = false;
+        std::string s_dialogError;      // SDL's word on why, when s_dialogFailed
+        bool s_dialogCancelled = false; // the player closed the dialog without choosing
         std::string s_dialogNotice;     // iOS: the pick isn't on the device yet; what to do instead
+        // What the latest dialog is for: the disc image or folder to install
+        // from (the Choose page), or the folder to install into (Confirm's
+        // "Choose a folder...").
+        enum class DialogFor { Source, Destination };
+        DialogFor s_dialogFor = DialogFor::Source;
 
         // Gives back a grant to read a picked file (iOS; elsewhere there are
         // none, and `access` is 0).
@@ -69,13 +80,19 @@ namespace ui
             else if (!files)
             {
                 s_dialogFailed = true;
-                fprintf(stderr, "[installer] file dialog failed: %s\n", SDL_GetError());
+                s_dialogError = SDL_GetError();
+                fprintf(stderr, "[installer] file dialog failed: %s\n", s_dialogError.c_str());
+            }
+            else
+            {
+                s_dialogCancelled = true;
+                fprintf(stderr, "[installer] file dialog cancelled\n");
             }
         }
 #endif
 
         // Opens a file (or folder) dialog for a new request.
-        void Browse(bool folder)
+        void Browse(bool folder, DialogFor purpose = DialogFor::Source)
         {
             void* request;
             {
@@ -83,7 +100,10 @@ namespace ui
                 request = reinterpret_cast<void*>(++s_dialogRequest);
                 ForgetPick();
                 s_dialogFailed = false;
+                s_dialogError.clear();
+                s_dialogCancelled = false;
                 s_dialogNotice.clear();
+                s_dialogFor = purpose;
             }
 #if defined(__APPLE__) && TARGET_OS_IOS
             // SDL has no file dialog on iOS: the Files app's document picker,
@@ -114,7 +134,25 @@ namespace ui
             }
 #else
             static const SDL_DialogFileFilter filters[] = { { "Xbox 360 disc image", "iso" }, { "All files", "*" } };
-            if (folder)
+            if (purpose == DialogFor::Destination)
+            {
+                // Where to install: titled as such (where the platform shows a
+                // title: the portal's and zenity's windows; macOS's panel shows
+                // the accept label). Not the accept label elsewhere: SDL hands
+                // it to zenity as --ok-label, which zenity 3.44 (SteamOS)
+                // refuses for a file chooser, so no picker would open at all.
+                SDL_PropertiesID props = SDL_CreateProperties();
+                SDL_SetPointerProperty(props, SDL_PROP_FILE_DIALOG_WINDOW_POINTER, GetWindow());
+                if (const char* home = std::getenv("HOME"))
+                    SDL_SetStringProperty(props, SDL_PROP_FILE_DIALOG_LOCATION_STRING, home);
+                SDL_SetStringProperty(props, SDL_PROP_FILE_DIALOG_TITLE_STRING, "Choose where to install the game");
+#ifdef __APPLE__
+                SDL_SetStringProperty(props, SDL_PROP_FILE_DIALOG_ACCEPT_STRING, "Choose");
+#endif
+                SDL_ShowFileDialogWithProperties(SDL_FILEDIALOG_OPENFOLDER, OnDialog, request, props);
+                SDL_DestroyProperties(props);
+            }
+            else if (folder)
                 SDL_ShowOpenFolderDialog(OnDialog, request, GetWindow(), std::getenv("HOME"), false);
             else
                 SDL_ShowOpenFileDialog(OnDialog, request, GetWindow(), filters, 2, std::getenv("HOME"), false);
@@ -127,6 +165,9 @@ namespace ui
             std::lock_guard lock(s_dialogMutex);
             ++s_dialogRequest;
             ForgetPick();
+            s_dialogFailed = false;
+            s_dialogError.clear();
+            s_dialogCancelled = false;
         }
 
         std::string FileName(const std::filesystem::path& path)
@@ -251,6 +292,48 @@ namespace ui
                                 "the keyboard).";
 #endif
 
+#if !(defined(__APPLE__) && TARGET_OS_IOS)
+        // A path to type in a terminal: ~ for home, quoted (and absolute) if
+        // it has a space or another character the shell would split at.
+        std::string ShellPath(const std::filesystem::path& path)
+        {
+            std::string text = path.string();
+            if (text.find_first_of(" \t'\"$`\\;&|<>()*?[]!#") == std::string::npos)
+                return HomeRelative(path);
+            std::string quoted = "'";
+            for (char c : text)
+                quoted += c == '\'' ? std::string("'\\''") : std::string(1, c);
+            return quoted + "'";
+        }
+
+        // The hint when the folder picker can't be shown (install::FolderPickerHint),
+        // with the command for this install: the bundle's launcher or the Mac
+        // app's binary, and the image already chosen. Game Mode is SteamOS's
+        // (on a Mac only NFSMW_TEST_PICK_FOLDER=gamemode gets there): its
+        // words and launcher wherever it shows.
+        // `noPickerApp`: SDL found neither a file chooser portal nor zenity.
+        std::string FolderPickerHint(bool gameMode, const std::filesystem::path& source, bool noPickerApp = false)
+        {
+            std::filesystem::path bundle = install::BundleFolder();
+            std::string image = source.empty() ? std::string("<image>") : ShellPath(source);
+            std::error_code ec;
+            std::string launcher = !bundle.empty() && std::filesystem::exists(bundle / "speedbreaker.sh", ec)
+                ? ShellPath(bundle / "speedbreaker.sh") : std::string("speedbreaker.sh");
+#ifdef __APPLE__
+            if (!gameMode)
+                return install::FolderPickerHint(false, true, false, bundle.extension() == ".app"
+                    ? ShellPath(bundle / "Contents/MacOS/SpeedBreaker") : std::string("SpeedBreaker"), image);
+#endif
+            return install::FolderPickerHint(gameMode, false, noPickerApp, launcher, image);
+        }
+#else
+        // iOS: no "Choose a folder..." (the game stays in the app's storage).
+        std::string FolderPickerHint(bool, const std::filesystem::path&, bool = false)
+        {
+            return {};
+        }
+#endif
+
         const char* StatusText(const install::DiscImageCandidate& c)
         {
             using install::Error;
@@ -365,15 +448,51 @@ namespace ui
         std::filesystem::path destination = install::DefaultInstallPath();
 
         // Where to install: internal storage or a removable drive, each
-        // checked (space, permissions) when the Confirm page opens.
+        // checked (space, permissions) when the Confirm page opens, then
+        // (not on iOS, whose app keeps the game in its own storage, nor yet
+        // on Windows: install/placement.h) a folder the player picks.
         struct Destination
         {
-            install::InstallDestination where;
+            install::InstallDestination where;  // the custom entry's path: where in the picked folder the game goes
             install::Result check;
             install::DestinationInfo info;
+            bool custom = false;                // "Choose a folder..."
+            install::FolderChoice choice;       // custom, once a folder is picked
         };
         std::vector<Destination> destinations;
         size_t chosen = 0;
+
+        // "Choose a folder...": the folder picked (kept across visits to the
+        // Confirm page), or the one recorded last time when it isn't one of
+        // the others (`exact`: offered as it is, no subfolder).
+        std::optional<std::filesystem::path> customFolder;
+        bool customExact = false;
+        bool preferCustom = false;      // the player picked it: keep it chosen
+        enum class Pick { Idle, Waiting, Unavailable };
+        Pick pick = Pick::Idle;         // the folder picker: open, or couldn't be shown (pickHint says why)
+        std::string pickHint;
+        // The system's picker asked for (not the test hook's), and when:
+        // NFSMW_TEST_DIALOG_CANCEL cancels it after that many seconds (macOS).
+        bool pickShown = false;
+        std::chrono::steady_clock::time_point pickStart{};
+
+        Destination CustomDestination()
+        {
+            Destination d;
+            d.custom = true;
+            d.where.label = "Choose a folder...";
+            if (!customFolder)
+            {
+                d.check.error = install::Error::DestinationNotWritable;  // nothing chosen yet (not shown as an error)
+                return d;
+            }
+            d.choice = customExact ? install::CheckExactFolder(*customFolder, false) : install::CheckPickedFolder(*customFolder);
+            d.where.label = customExact ? "Folder chosen last time" : "Chosen folder";
+            d.where.path = d.choice.gameDir;
+            d.check = d.choice.result;
+            d.info = d.choice.info;
+            return d;
+        }
 
         void LoadDestinations()
         {
@@ -384,13 +503,35 @@ namespace ui
                 d.check = install::CheckDestination(where.path, &d.info);
                 destinations.push_back(std::move(d));
             }
-            // The one used last time if it still works, else internal storage,
-            // else the first drive that works.
-            chosen = 0;
             std::optional<std::filesystem::path> recorded = install::RecordedInstallPath();
+#if !(defined(__APPLE__) && TARGET_OS_IOS) && !defined(_WIN32)
+            // A folder chosen last time (not internal storage or a drive's
+            // own folder) comes back as the chosen folder, as it is. The same
+            // folder however it was spelled (`--dest dir/`, or through a link).
+            if (!customFolder && recorded && std::none_of(destinations.begin(), destinations.end(),
+                    [&](const Destination& d) { return install::SameFolder(d.where.path, *recorded); }))
+            {
+                customFolder = *recorded;
+                customExact = true;
+            }
+            destinations.push_back(CustomDestination());
+#endif
+            // The folder the player just picked, else the one used last time,
+            // if it still works; else internal storage, else the first that works.
+            auto preferred = [&](const Destination& d) {
+                if (!d.check.Ok())
+                    return false;
+                if (preferCustom)
+                    return d.custom;
+                return recorded && install::SameFolder(d.where.path, *recorded);
+            };
+            chosen = 0;
             for (size_t i = 0; i < destinations.size(); i++)
-                if (recorded && destinations[i].where.path == *recorded && destinations[i].check.Ok())
+                if (preferred(destinations[i]))
+                {
                     chosen = i;
+                    break;
+                }
             if (!destinations[chosen].check.Ok())
                 for (size_t i = 0; i < destinations.size(); i++)
                     if (destinations[i].check.Ok())
@@ -399,6 +540,104 @@ namespace ui
                         break;
                     }
             destination = destinations[chosen].where.path;
+        }
+
+        // The player picked `folder` for "Choose a folder...": check it and choose it.
+        void PickFolder(const std::filesystem::path& folder)
+        {
+            customFolder = folder;
+            customExact = false;
+            preferCustom = true;
+            pick = Pick::Idle;
+            pickShown = false;
+            for (size_t i = 0; i < destinations.size(); i++)
+                if (destinations[i].custom)
+                {
+                    destinations[i] = CustomDestination();
+                    chosen = i;
+                    const install::FolderChoice& c = destinations[i].choice;
+                    fprintf(stderr, "[installer] folder picked: %s; the game would go to %s%s%s\n", folder.string().c_str(),
+                        c.gameDir.string().c_str(), c.result.Ok() ? "" : ": refused, ", c.result.Ok() ? "" : c.result.message.c_str());
+                }
+            destination = destinations[chosen].where.path;
+            focusPage = true;
+        }
+
+        // "Choose a folder...": the system's folder picker, or the hint when
+        // it can't be shown. Never waits: the answer comes in a later frame.
+        void RequestFolder()
+        {
+#if !(defined(__APPLE__) && TARGET_OS_IOS) && !defined(_WIN32)
+            // The system's picker is already open: A again (a controller
+            // still reaches the page behind a macOS sheet) waits for it. A
+            // second request would make the open one's answer a stale one,
+            // and on the Mac queue a second sheet that never comes.
+            if (pick == Pick::Waiting && pickShown)
+            {
+                fprintf(stderr, "[installer] the folder picker is already open\n");
+                return;
+            }
+            pickShown = false;
+            // NFSMW_TEST_PICK_FOLDER stands in for the picker (automated runs):
+            // a folder (absolute, or ~/...) is the player's pick; "cancel",
+            // "fail" (no dialog could open), "gamemode" (as in Game Mode) and
+            // "wait" (it never answers) are the other ways a picker ends.
+            // Several, split by |, answer one request each (the last repeats).
+            if (const char* test = std::getenv("NFSMW_TEST_PICK_FOLDER"); test && *test)
+            {
+                static size_t answered = 0;
+                std::string_view rest = test;
+                std::string value;
+                for (size_t i = 0; i <= answered && !rest.empty(); i++)
+                {
+                    size_t bar = rest.find('|');
+                    value = std::string(rest.substr(0, bar));
+                    rest = bar == std::string_view::npos ? std::string_view() : rest.substr(bar + 1);
+                }
+                answered++;
+                fprintf(stderr, "[installer] NFSMW_TEST_PICK_FOLDER stands in for the folder picker: %s\n", value.c_str());
+                if (value.starts_with("~/"))
+                    if (const char* home = std::getenv("HOME"))
+                        value = std::string(home) + value.substr(1);
+                if (value == "gamemode" || value == "fail")
+                {
+                    DropDialog();
+                    pick = Pick::Unavailable;
+                    pickHint = FolderPickerHint(value == "gamemode", sourcePath);
+                }
+                else if (value == "cancel")
+                {
+                    DropDialog();
+                    pick = Pick::Idle;
+                }
+                else
+                {
+                    std::lock_guard lock(s_dialogMutex);
+                    ++s_dialogRequest;
+                    ForgetPick();
+                    s_dialogFailed = s_dialogCancelled = false;
+                    s_dialogFor = DialogFor::Destination;
+                    pick = Pick::Waiting;
+                    if (value != "wait")
+                        s_dialogPick = value;
+                }
+                return;
+            }
+            if (video::GameMode())
+            {
+                // Nothing of the desktop shows under gamescope: a portal's
+                // window would open where the player can't see or reach it.
+                DropDialog();
+                pick = Pick::Unavailable;
+                pickHint = FolderPickerHint(true, sourcePath);
+                fprintf(stderr, "[installer] Game Mode: the folder picker isn't tried (%s)\n", pickHint.c_str());
+                return;
+            }
+            pick = Pick::Waiting;
+            pickShown = true;
+            pickStart = std::chrono::steady_clock::now();
+            Browse(true, DialogFor::Destination);
+#endif
         }
 
         // Progress, written by the install thread.
@@ -424,6 +663,25 @@ namespace ui
 
         void Go(Page next)
         {
+            // Off the Confirm page: a folder picker still open answers nothing.
+            // On the Mac it closes (it is a sheet on the game's window, and
+            // would stay over the next page); elsewhere it is a window of its
+            // own that SDL can't close, so the Choose page says so.
+            if (page == Page::Confirm && next != Page::Confirm && pick != Pick::Idle)
+            {
+                const bool shown = pick == Pick::Waiting && pickShown;
+                DropDialog();
+                pick = Pick::Idle;
+                pickShown = false;
+#if defined(__APPLE__) && !TARGET_OS_IOS
+                if (shown)
+                    fprintf(stderr, "[installer] closed %d folder picker(s) on leaving the page\n",
+                        platform::file_dialog::CancelOpenPanels());
+#else
+                if (shown && next == Page::Choose)
+                    notice = "The folder picker is still open: close it. A folder chosen in it now isn't used.";
+#endif
+            }
             page = next;
             focusPage = true;
             if (next == Page::Choose || next == Page::Done || (next == Page::Failed && !source))
@@ -531,10 +789,19 @@ namespace ui
     InstallerScreen::InstallerScreen() : state(std::make_unique<State>())
     {
         state->StartScan();
-        // Installed on a drive that isn't there now (FindGameInstall passed it over).
-        if (std::optional<std::filesystem::path> recorded = install::RecordedInstallPath())
-            state->notice = "The game is installed in " + HomeRelative(*recorded) +
-                ", which isn't available: insert that drive and start the game again, or install it again here.";
+        // Installed in a folder FindGameInstall passed over: a drive that
+        // isn't connected, a folder macOS won't let the game read, or an
+        // install that is incomplete or older. Said at the top of the page,
+        // not left for the player to guess from the installer appearing.
+        install::RecordedInstall recorded = install::CheckRecordedInstall();
+#if defined(__APPLE__) && !TARGET_OS_IOS
+        constexpr bool macOS = true;
+#else
+        constexpr bool macOS = false;
+#endif
+        state->notice = install::DescribeRecordedInstall(recorded, HomeRelative(recorded.path), macOS);
+        if (!state->notice.empty())
+            fprintf(stderr, "[installer] %s\n", state->notice.c_str());
     }
 
     InstallerScreen::~InstallerScreen()
@@ -587,30 +854,81 @@ namespace ui
                 st.Go(Page::Failed);
         }
         {
-            std::optional<std::string> pick;
+            std::optional<std::string> pick, folder;
             uint64_t access = 0;
             {
                 std::lock_guard lock(s_dialogMutex);
-                if (st.page == Page::Choose)
+                if (s_dialogFor == DialogFor::Destination)
                 {
-                    pick = std::move(s_dialogPick);
-                    s_dialogPick.reset();
-                    access = std::exchange(s_pickAccess, 0);
+                    // "Choose a folder..." on the Confirm page (Go drops the
+                    // dialog when the player leaves it).
+                    if (st.page == Page::Confirm)
+                    {
+                        folder = std::move(s_dialogPick);
+                        s_dialogPick.reset();
+                        if (s_dialogFailed)
+                        {
+                            // SDL's word when it found no portal and no zenity
+                            // (SDL_unixdialog.c); any other failure is logged.
+                            st.pick = State::Pick::Unavailable;
+                            st.pickShown = false;
+                            st.pickHint = FolderPickerHint(false, st.sourcePath,
+                                s_dialogError.starts_with("File dialog driver unsupported"));
+                        }
+                        else if (s_dialogCancelled && st.pick == State::Pick::Waiting)
+                        {
+                            st.pick = State::Pick::Idle;
+                            st.pickShown = false;
+                        }
+                    }
+                    s_dialogFailed = s_dialogCancelled = false;
+                    s_dialogError.clear();
                 }
-                if (s_dialogFailed)
+                else
                 {
-                    s_dialogFailed = false;
-                    st.notice = kNoDialog;
-                }
-                if (!s_dialogNotice.empty())
-                {
-                    st.notice = std::move(s_dialogNotice);
-                    s_dialogNotice.clear();
+                    if (st.page == Page::Choose)
+                    {
+                        pick = std::move(s_dialogPick);
+                        s_dialogPick.reset();
+                        access = std::exchange(s_pickAccess, 0);
+                    }
+                    if (s_dialogFailed)
+                    {
+                        s_dialogFailed = false;
+                        st.notice = kNoDialog;
+                    }
+                    s_dialogCancelled = false;
+                    if (!s_dialogNotice.empty())
+                    {
+                        st.notice = std::move(s_dialogNotice);
+                        s_dialogNotice.clear();
+                    }
                 }
             }
             if (pick)
                 st.StartCheck(*pick, access);
+            if (folder)
+                st.PickFolder(*folder);
         }
+#if defined(__APPLE__) && !TARGET_OS_IOS
+        // NFSMW_TEST_DIALOG_CANCEL=<seconds> (automated runs): the system's
+        // folder picker, open that long, is cancelled as its Cancel button
+        // would (its answer then comes as the player's would).
+        if (st.page == Page::Confirm && st.pick == State::Pick::Waiting && st.pickShown)
+        {
+            static const double cancelAfter = [] {
+                const char* v = std::getenv("NFSMW_TEST_DIALOG_CANCEL");
+                return v ? std::atof(v) : 0.0;
+            }();
+            double open = std::chrono::duration<double>(std::chrono::steady_clock::now() - st.pickStart).count();
+            if (cancelAfter > 0 && open >= cancelAfter)
+            {
+                int n = platform::file_dialog::CancelOpenPanels();
+                fprintf(stderr, "[installer] NFSMW_TEST_DIALOG_CANCEL: cancelled %d folder picker(s) open for %.1f s\n", n, open);
+                st.pickShown = false;
+            }
+        }
+#endif
 
         ImGuiViewport* viewport = ImGui::GetMainViewport();
         ImVec2 size(std::min(viewport->WorkSize.x - 2 * kSpaceL * s, 980.0f * s), std::min(viewport->WorkSize.y - 2 * kSpaceL * s, 640.0f * s));
@@ -817,13 +1135,19 @@ namespace ui
             };
             if (st.destinations.size() > 1)
             {
-                // Internal storage or a removable drive: left/right (or the arrows).
+                // Internal storage, a removable drive or a folder of the
+                // player's: left/right (or the arrows).
                 int delta = 0;
                 std::string label = describe(dest);
                 bool focusRow = st.focusPage && !dest.check.Ok();
                 if (focusRow)
                     ImGui::SetKeyboardFocusHere();
-                ImGui::Selectable(("##dest"), false, ImGuiSelectableFlags_AllowOverlap, ImVec2(0, ImGui::GetFrameHeight()));
+                // A (or Return, or a click) on "Choose a folder..." opens the
+                // folder picker; moving onto it doesn't (a controller passes
+                // through it on the way round).
+                bool activated = ImGui::Selectable(("##dest"), false, ImGuiSelectableFlags_AllowOverlap, ImVec2(0, ImGui::GetFrameHeight()));
+                if (activated && dest.custom)
+                    st.RequestFolder();
                 if (focusRow)
                     st.focusPage = false;
                 bool focused = ImGui::IsItemFocused();
@@ -865,9 +1189,30 @@ namespace ui
             else
                 ImGui::TextUnformatted(describe(dest).c_str());
             const State::Destination& d = st.destinations[st.chosen];
-            ImGui::TextDisabled("%s", HomeRelative(d.where.path).c_str());
+            // "Choose a folder..." before a folder is picked (or after one
+            // was, the picker open again): its own lines, not an error.
+            const bool unpicked = d.custom && !st.customFolder;
+            // The exact folder the game goes to, wrapped (not cut off) when long.
+            ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+            if (unpicked)
+                ImGui::TextWrapped("Any folder: the game goes in it, or in a new folder inside it if it holds other files.");
+            else
+                ImGui::TextWrapped("%s", HomeRelative(d.where.path).c_str());
+            ImGui::PopStyleColor();
             ImGui::Spacing();
-            if (!d.check.Ok())
+            if (d.custom && st.pick == State::Pick::Waiting)
+                ImGui::TextDisabled("Waiting for the folder picker...");
+            else if (d.custom && st.pick == State::Pick::Unavailable)
+            {
+                PushAccentText();
+                ImGui::TextWrapped("%s", st.pickHint.c_str());
+                PopAccentText();
+            }
+            else if (unpicked)
+            {
+                // Nothing chosen yet: the line above says what happens.
+            }
+            else if (!d.check.Ok())
             {
                 PushAccentText();
                 ImGui::TextWrapped("%s", d.check.message.c_str());
@@ -875,19 +1220,34 @@ namespace ui
             }
             else
             {
+                if (d.custom)
+                {
+                    if (std::string why = install::SubfolderExplanation(d.choice); !why.empty())
+                        ImGui::TextWrapped("%s", why.c_str());
+                    for (const std::string& note : d.choice.notes)
+                        ImGui::TextWrapped("%s", note.c_str());
+                }
                 ImGui::TextDisabled("%s needed", install::FormatSize(d.info.required).c_str());
                 if (d.info.replacing)
                     ImGui::TextWrapped("Replaces the game already there. DLC and other files you added to it are kept.");
                 ImGui::TextWrapped("This takes a few minutes. Every file is checked against the known-good disc as it is copied.");
             }
             ButtonRowAtBottom();
+            // The cursor: Install when it can, else "Choose a folder..." on
+            // that entry, else Back (nowhere to install).
             ImGui::BeginDisabled(!d.check.Ok());
             if (d.check.Ok() ? mainButton("Install") : ImGui::Button("Install"))
                 st.StartInstall();
             ImGui::EndDisabled();
+            if (d.custom)
+            {
+                ImGui::SameLine();
+                const char* label = st.customFolder ? "Choose another folder..." : "Choose a folder...";
+                if (d.check.Ok() ? ImGui::Button(label) : mainButton(label))
+                    st.RequestFolder();
+            }
             ImGui::SameLine();
-            // Nowhere to install: the cursor goes to Back.
-            if (d.check.Ok() ? ImGui::Button("Back") : mainButton("Back"))
+            if (d.check.Ok() || d.custom ? ImGui::Button("Back") : mainButton("Back"))
                 st.Go(Page::Choose);
             break;
         }
@@ -936,6 +1296,22 @@ namespace ui
             ImGui::BeginDisabled(st.cancel.load());
             if (ImGui::Button(st.cancel ? "Cancelling..." : "Cancel"))
                 st.cancel = true;
+            // But any direction lands on it. (ImGui's own navigation starts
+            // from where the Confirm page's Install was, so only Right
+            // reached it: a controller pressing down, the natural way to a
+            // button at the bottom, couldn't cancel at all.)
+            if (!st.cancel && !ImGui::IsItemFocused())
+            {
+                static constexpr ImGuiKey kDirections[] = { ImGuiKey_GamepadDpadUp, ImGuiKey_GamepadDpadDown,
+                    ImGuiKey_GamepadDpadLeft, ImGuiKey_GamepadDpadRight, ImGuiKey_GamepadLStickUp, ImGuiKey_GamepadLStickDown,
+                    ImGuiKey_GamepadLStickLeft, ImGuiKey_GamepadLStickRight, ImGuiKey_UpArrow, ImGuiKey_DownArrow,
+                    ImGuiKey_LeftArrow, ImGuiKey_RightArrow, ImGuiKey_Tab };
+                if (std::any_of(std::begin(kDirections), std::end(kDirections), [](ImGuiKey key) { return ImGui::IsKeyPressed(key, false); }))
+                {
+                    ImGui::SetFocusID(ImGui::GetItemID(), ImGui::GetCurrentWindow());
+                    ImGui::SetNavCursorVisible(true);
+                }
+            }
             ImGui::EndDisabled();
             break;
         }
