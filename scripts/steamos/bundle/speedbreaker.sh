@@ -128,6 +128,15 @@ say "C library: $([ "$use_glibc" = 1 ] && echo bundled || echo "the system's") (
 # Resolution). SDL uses X11 (gamescope's Xwayland), which is how gamescope
 # matches the game's window to the Steam shortcut that launched it; the same
 # in Desktop Mode, as the distrobox launcher (scripts/steamos/speedbreaker.sh) does.
+# Hybrid graphics on Linux PCs (e.g. Intel/AMD CPU with an NVIDIA GPU):
+# route Vulkan to the discrete NVIDIA GPU so the game runs on the dedicated
+# graphics card and avoids Intel Mesa shared-memory crashes.
+if [ -d /proc/driver/nvidia ] && [ -e /usr/share/vulkan/icd.d/nvidia_icd.json ]; then
+    export __NV_PRIME_RENDER_OFFLOAD="${__NV_PRIME_RENDER_OFFLOAD:-1}"
+    export __GLX_VENDOR_LIBRARY_NAME="${__GLX_VENDOR_LIBRARY_NAME:-nvidia}"
+    export VK_DRIVER_FILES="${VK_DRIVER_FILES:-/usr/share/vulkan/icd.d/nvidia_icd.json}"
+fi
+
 GAME_MODE=0
 if [ -n "$GAMESCOPE_WAYLAND_DISPLAY" ] || [ "$XDG_CURRENT_DESKTOP" = gamescope ]; then GAME_MODE=1; fi
 export NFSMW_GAME_MODE="${NFSMW_GAME_MODE:-$GAME_MODE}"
