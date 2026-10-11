@@ -10,7 +10,8 @@
 //     (NFSMW_TRIGGER_DEADZONE, default 0.02).
 //   - Keyboard: arrows = D-pad + left stick, W/S = gas/brake (RT/LT), A/D =
 //     steer, Space = A, Backspace = B, Left Shift = X, Left Ctrl = Y,
-//     Q/E = LB/RB, Enter = START, Esc = BACK, C = right stick click.
+//     Q/E = LB/RB, Enter = START, Esc = BACK, O/L and K/; = right stick
+//     (up/down, left/right), C = right stick click.
 //   - NFSMW_INPUT_SCRIPT="12:START,15.5:A,30-90/4:DOWN,100~160:RT": taps
 //     (150 ms) at seconds since launch, taps every `step` seconds over a
 //     range, or inputs held over a range; RT/LT (triggers) and LL/LR/LU/LD

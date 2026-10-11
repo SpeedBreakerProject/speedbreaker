@@ -351,7 +351,8 @@ is B, Square is X and Triangle is Y.
 | D-pad | D-pad | Arrow keys |
 | Start | Start / Menu / Options | Enter |
 | Back | Back / View / Create | Esc |
-| Right stick, stick clicks | Same on the controller | C (right stick click) |
+| Right stick | Right stick | O / L up and down, K / ; left and right |
+| Stick clicks | Press a stick in | C (right) |
 
 - One player, one controller: the first one connected is used, and you can plug one in at any
   time. The keyboard always works as well.

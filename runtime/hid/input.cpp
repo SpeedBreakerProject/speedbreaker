@@ -634,6 +634,13 @@ namespace hid
                 rt = 1.0f;
             if (k[SDL_SCANCODE_S])
                 lt = 1.0f;
+            // The right stick (the game shifts gears with it: drag races
+            // need it). While either key of an axis is held the keyboard
+            // has that axis; both keys centre it.
+            if (k[SDL_SCANCODE_O] || k[SDL_SCANCODE_L])
+                ry = float(k[SDL_SCANCODE_O]) - float(k[SDL_SCANCODE_L]);
+            if (k[SDL_SCANCODE_K] || k[SDL_SCANCODE_SEMICOLON])
+                rx = float(k[SDL_SCANCODE_SEMICOLON]) - float(k[SDL_SCANCODE_K]);
         }
         p.lx = ToShort(lx);
         p.ly = ToShort(ly);

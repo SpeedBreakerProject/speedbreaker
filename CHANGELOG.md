@@ -4,6 +4,13 @@ What changed in each SpeedBreaker release, newest first. Each release's notes on
 its entry here, and the game shows the entry once, the first time a new version starts (offline:
 it's built into the game).
 
+## Unreleased
+
+### What's new
+
+- The right stick has keys: O / L push it up and down, K / ; left and right. The game shifts
+  gears with the right stick, so drag races can now be driven from the keyboard.
+
 ## v0.1.3
 
 ### What's new
