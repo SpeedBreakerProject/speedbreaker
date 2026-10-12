@@ -137,6 +137,18 @@ sb_test(memory_status_test SOURCES ${RT}/kernel/memory_status.cpp ${RT}/platform
 # The version line in the log, and when the "What's new" note shows
 # (user/version_check.h, header only).
 sb_test(version_check_test)
+# The keys a Controls row can hold and their names in settings.toml
+# (user/key_names.h, header only), each row against SDL's scancode name.
+find_package(SDL3 REQUIRED CONFIG)
+sb_test(key_names_test)
+target_link_libraries(key_names_test PRIVATE SDL3::SDL3)
+# The Key options (Settings > Controls): the table, the [keys] names in the
+# file, and what Set accepts (user/settings.cpp and the toml++ XenonRecomp
+# vendors; no SDL).
+sb_test(settings_keys_test SOURCES ${RT}/user/settings.cpp)
+target_include_directories(settings_keys_test SYSTEM PRIVATE ${ROOT}/tools/XenonRecomp/thirdparty/tomlplusplus/include)
+# The keyboard's controls and how held keys become a pad (hid/key_map.h), header only.
+sb_test(key_map_test)
 # Check for Updates' logic: versions, GitHub's JSON, curl's output and the
 # release notes (update/check.cpp, self-contained).
 sb_test(update_check_test SOURCES ${RT}/update/check.cpp)

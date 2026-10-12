@@ -1,12 +1,29 @@
 // SpeedBreaker runtime. GPL-3.0-or-later (see COPYING). See input.h.
 #include <stdafx.h>
 #include "input.h"
+#include "key_map.h"
 #include <cpu/guest_time.h>
 #include <kernel/function.h>
 #include <ui/ui.h>
 #include <user/settings.h>
+#include <user/key_names.h>
 
 #include <SDL3/SDL.h>
+
+// key_map.h names XInput's bits as literals (it has no kernel header): keep
+// them the bits the game reads.
+static_assert(hid::keymap::button::DpadUp == XAMINPUT_GAMEPAD_DPAD_UP && hid::keymap::button::DpadDown == XAMINPUT_GAMEPAD_DPAD_DOWN &&
+    hid::keymap::button::DpadLeft == XAMINPUT_GAMEPAD_DPAD_LEFT && hid::keymap::button::DpadRight == XAMINPUT_GAMEPAD_DPAD_RIGHT &&
+    hid::keymap::button::Start == XAMINPUT_GAMEPAD_START && hid::keymap::button::Back == XAMINPUT_GAMEPAD_BACK &&
+    hid::keymap::button::LeftThumb == XAMINPUT_GAMEPAD_LEFT_THUMB && hid::keymap::button::RightThumb == XAMINPUT_GAMEPAD_RIGHT_THUMB &&
+    hid::keymap::button::LeftShoulder == XAMINPUT_GAMEPAD_LEFT_SHOULDER && hid::keymap::button::RightShoulder == XAMINPUT_GAMEPAD_RIGHT_SHOULDER &&
+    hid::keymap::button::A == XAMINPUT_GAMEPAD_A && hid::keymap::button::B == XAMINPUT_GAMEPAD_B &&
+    hid::keymap::button::X == XAMINPUT_GAMEPAD_X && hid::keymap::button::Y == XAMINPUT_GAMEPAD_Y,
+    "key_map.h's button bits are XInput's");
+// The key codes of user/key_names.h are SDL's scancodes (USB HID usages);
+// tests/key_names_test.cpp checks every row, this pins a few.
+static_assert(settings::keynames::Code("a") == SDL_SCANCODE_A && settings::keynames::Code("keypad_1") == SDL_SCANCODE_KP_1 &&
+              settings::keynames::Code("right_alt") == SDL_SCANCODE_RALT && settings::keynames::Code("escape") == SDL_SCANCODE_ESCAPE);
 
 namespace
 {
@@ -608,39 +625,30 @@ namespace hid
         }
         const float rawLt = lt, rawRt = rt;
 
-        // Keyboard (digital; overrides the analog values it touches).
-        const bool* k = SDL_GetKeyboardState(nullptr);
-        if (k)
+        // Keyboard (digital; replaces the controller's value for what it
+        // touches): each control's key is Settings > Controls (the Key
+        // options), resolved by key_map.h. A key is a scancode SDL's state
+        // array is indexed by; an out-of-range value (a hand edit beat
+        // Load's checks) counts as not held.
+        if (const bool* k = SDL_GetKeyboardState(nullptr))
         {
-            static const std::pair<SDL_Scancode, uint16_t> keys[] = {
-                { SDL_SCANCODE_UP, XAMINPUT_GAMEPAD_DPAD_UP }, { SDL_SCANCODE_DOWN, XAMINPUT_GAMEPAD_DPAD_DOWN },
-                { SDL_SCANCODE_LEFT, XAMINPUT_GAMEPAD_DPAD_LEFT }, { SDL_SCANCODE_RIGHT, XAMINPUT_GAMEPAD_DPAD_RIGHT },
-                { SDL_SCANCODE_SPACE, XAMINPUT_GAMEPAD_A }, { SDL_SCANCODE_BACKSPACE, XAMINPUT_GAMEPAD_B },
-                { SDL_SCANCODE_LSHIFT, XAMINPUT_GAMEPAD_X }, { SDL_SCANCODE_LCTRL, XAMINPUT_GAMEPAD_Y },
-                { SDL_SCANCODE_Q, XAMINPUT_GAMEPAD_LEFT_SHOULDER }, { SDL_SCANCODE_E, XAMINPUT_GAMEPAD_RIGHT_SHOULDER },
-                { SDL_SCANCODE_RETURN, XAMINPUT_GAMEPAD_START }, { SDL_SCANCODE_ESCAPE, XAMINPUT_GAMEPAD_BACK },
-                { SDL_SCANCODE_C, XAMINPUT_GAMEPAD_RIGHT_THUMB },
+            bool pressed[keymap::kControls] = {};
+            auto down = [&](settings::Id id) {
+                int code = settings::GetInt(id);  // 0: no key
+                return code > 0 && code < SDL_SCANCODE_COUNT && k[code];
             };
-            for (auto& [key, bit] : keys)
-                if (k[key])
-                    p.buttons |= bit;
-            float kx = float(k[SDL_SCANCODE_RIGHT] || k[SDL_SCANCODE_D]) - float(k[SDL_SCANCODE_LEFT] || k[SDL_SCANCODE_A]);
-            float ky = float(k[SDL_SCANCODE_UP]) - float(k[SDL_SCANCODE_DOWN]);
-            if (kx != 0.0f)
-                lx = kx;
-            if (ky != 0.0f)
-                ly = ky;
-            if (k[SDL_SCANCODE_W])
+            for (size_t i = 0; i < keymap::kControls; i++)
+                pressed[i] = down(keymap::kEntries[i].id) || down(keymap::kEntries[i].id2);
+            keymap::Resolved r = keymap::Resolve(pressed);
+            p.buttons |= r.buttons;
+            if (r.rightTrigger)
                 rt = 1.0f;
-            if (k[SDL_SCANCODE_S])
+            if (r.leftTrigger)
                 lt = 1.0f;
-            // The right stick (the game shifts gears with it: drag races
-            // need it). While either key of an axis is held the keyboard
-            // has that axis; both keys centre it.
-            if (k[SDL_SCANCODE_O] || k[SDL_SCANCODE_L])
-                ry = float(k[SDL_SCANCODE_O]) - float(k[SDL_SCANCODE_L]);
-            if (k[SDL_SCANCODE_K] || k[SDL_SCANCODE_SEMICOLON])
-                rx = float(k[SDL_SCANCODE_SEMICOLON]) - float(k[SDL_SCANCODE_K]);
+            float* axes[size_t(keymap::Axis::Count)] = { &lx, &ly, &rx, &ry };  // Axis order: LX, LY, RX, RY
+            for (size_t a = 0; a < size_t(keymap::Axis::Count); a++)
+                if (r.axisSet[a])
+                    *axes[a] = r.axis[a];
         }
         p.lx = ToShort(lx);
         p.ly = ToShort(ly);
