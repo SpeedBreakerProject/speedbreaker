@@ -638,8 +638,14 @@ namespace ui
                 s_settingsOpen ? CloseSettings() : OpenSettings();
                 return;
             }
+            if (s_settingsOpen && SettingsMenuTakesKey(e.key))
+                return;  // a Controls row took it: ImGui doesn't act on it too
             break;
         }
+        case SDL_EVENT_KEY_UP:
+            if (s_settingsOpen && SettingsMenuTakesKey(e.key))
+                return;  // the release of a key a Controls row took
+            break;
         case SDL_EVENT_GAMEPAD_BUTTON_DOWN:
         case SDL_EVENT_GAMEPAD_BUTTON_UP:
         {
@@ -723,6 +729,10 @@ namespace ui
 
         // NFSMW_UI_KEYS="3:F1,4:Down,4.5:Right": key presses (SDL key names)
         // at seconds since launch, for testing the menus without a person.
+        // A key is pressed and released at once; "Hold Return" only presses
+        // it, "Repeat Return" is the OS's auto-repeat of a held key (a
+        // key-down marked repeat) and "Release Return" lets it go, for a key
+        // held across other keys.
         // FocusLost and FocusGained send the window those events instead (as
         // switching to another window would: Mute in Background). Shot saves
         // the next presented frame as build/ui_shot_<n>.ppm: on the keys'
@@ -735,7 +745,8 @@ namespace ui
         // motion a mouse moving there makes is posted.
         constexpr SDL_Keycode kFocusLost = SDLK_EXTENDED_MASK | 0x7F01, kFocusGained = SDLK_EXTENDED_MASK | 0x7F02,
                               kShot = SDLK_EXTENDED_MASK | 0x7F03, kMouseMove = SDLK_EXTENDED_MASK | 0x7F04;
-        struct Key { double time; SDL_Keycode key; };
+        enum class Press : uint8_t { Tap, Hold, Repeat, Release };
+        struct Key { double time; SDL_Keycode key; Press press = Press::Tap; };
         static const auto start = std::chrono::steady_clock::now();
         static std::vector<Key> keys = [] {
             std::vector<Key> parsed;
@@ -749,12 +760,20 @@ namespace ui
                     if (colon == std::string::npos)
                         continue;
                     std::string name = item.substr(colon + 1);
+                    Press press = Press::Tap;
+                    for (auto [prefix, kind] : { std::pair{ "Hold ", Press::Hold }, std::pair{ "Repeat ", Press::Repeat },
+                             std::pair{ "Release ", Press::Release } })
+                        if (name.starts_with(prefix))
+                        {
+                            press = kind;
+                            name = name.substr(strlen(prefix));
+                        }
                     SDL_Keycode key = name == "FocusLost" ? kFocusLost : name == "FocusGained" ? kFocusGained
                         : name == "Shot"                                                         ? kShot
                         : name == "MouseMove"                                                    ? kMouseMove
                                                                                                  : SDL_GetKeyFromName(name.c_str());
                     if (key != SDLK_UNKNOWN)
-                        parsed.push_back({ std::atof(item.c_str()), key });
+                        parsed.push_back({ std::atof(item.c_str()), key, press });
                     else
                         fprintf(stderr, "[ui] NFSMW_UI_KEYS: unknown key %s\n", item.c_str() + colon + 1);
                 }
@@ -821,8 +840,11 @@ namespace ui
                 fprintf(stderr, "[ui] NFSMW_UI_KEYS: window focus %s\n", keys[next].key == kFocusLost ? "lost" : "gained");
                 continue;
             }
+            const Press press = keys[next].press;
             for (bool down : { true, false })
             {
+                if ((down && press == Press::Release) || (!down && (press == Press::Hold || press == Press::Repeat)))
+                    continue;
                 SDL_Event e{};
                 e.type = down ? SDL_EVENT_KEY_DOWN : SDL_EVENT_KEY_UP;
                 e.key.timestamp = SDL_GetTicksNS();
@@ -830,6 +852,7 @@ namespace ui
                 e.key.key = keys[next].key;
                 e.key.scancode = SDL_GetScancodeFromKey(keys[next].key, nullptr);
                 e.key.down = down;
+                e.key.repeat = press == Press::Repeat;
                 SDL_PushEvent(&e);
             }
         }

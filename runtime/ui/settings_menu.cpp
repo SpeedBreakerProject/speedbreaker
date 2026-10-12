@@ -15,11 +15,14 @@
 
 #include <report/report.h>
 #include <user/settings.h>
+#include <hid/key_map.h>     // the Controls page: one row per control, two keys each
+#include <user/key_names.h>  // a key's name in the file, when SDL has none
 #include <video/frame_rate.h>
 #include <video/presenter.h>
 
 #include <imgui.h>
 #include <imgui_internal.h>  // ClosePopupToLevel: a dialog left open when the menu closed
+#include <SDL3/SDL_keyboard.h>  // a key row's label on this layout
 
 #include <SDL3/SDL_error.h>
 #include <SDL3/SDL_events.h>
@@ -39,6 +42,22 @@ namespace ui
         bool s_describedBugReport = false;  // ...or Save Bug Report's
         bool s_describedUpdate = false;     // ...or Check for Updates'
         bool s_opened = true;        // just opened: take focus
+        // The Controls page (KeyRow). A row's two keys are cells; the chosen
+        // cell is the focused row's, and a wait is for one option of one
+        // row (SettingsMenuTakesKey takes the press before ImGui sees it).
+        Id s_waiting = Id::Count;    // the Key option a row waits for; Count: no wait
+        SDL_Scancode s_refused = SDL_SCANCODE_UNKNOWN;  // a press the wait wouldn't take; the help line says so
+        SDL_Scancode s_takenKey = SDL_SCANCODE_UNKNOWN;  // the key a wait took or refused, until its release
+        Id s_slotRow = Id::Count;    // the row whose chosen cell s_slot is
+        int s_slot = 0;              // 0: the row's first key, 1: its second
+        constexpr const char* kPressAKey = "Press a key";
+        constexpr const char* kNoKey = "none";
+
+        void EndWait()
+        {
+            s_waiting = Id::Count;
+            s_refused = SDL_SCANCODE_UNKNOWN;
+        }
 
         constexpr int kCategories = int(Category::Count);
 
@@ -62,6 +81,80 @@ namespace ui
             return delta;
         }
 
+        // iPhone and iPad: the Controls page only while a keyboard is
+        // connected (nothing to bind without one).
+        bool PageShown(Category c)
+        {
+#if defined(__APPLE__) && TARGET_OS_IOS
+            if (c == Category::Controls)
+                return SDL_HasKeyboard();
+#endif
+            return true;
+        }
+
+        // A key's name for a cell: on this keyboard's layout ("Z" on a
+        // French Mac for the position the file calls "w"), else SDL's name
+        // of the position (the platform's: "Left Option" on a Mac), else the
+        // file's. "none" for no key. Main thread.
+        std::string KeyLabel(double stored)
+        {
+            if (stored == double(settings::keynames::kNone))
+                return kNoKey;
+            if (!(stored >= 1 && stored < double(SDL_SCANCODE_COUNT)))
+                return "?";
+            SDL_Scancode sc = SDL_Scancode(int(stored));
+            const char* name = SDL_GetKeyName(SDL_GetKeyFromScancode(sc, SDL_KMOD_NONE, false));
+            if (!name || !name[0])
+                name = SDL_GetScancodeName(sc);
+            if (!name || !name[0])
+                name = settings::keynames::Token(uint16_t(stored));
+            return name && name[0] ? name : "?";
+        }
+
+        // A key the wait refused, for the help line.
+        std::string RefusedName(SDL_Scancode sc)
+        {
+            std::string name = KeyLabel(double(sc));
+            return name == "?" || name == kNoKey ? "That key" : name;
+        }
+
+        // The other controls that have any of this row's keys ("D-pad
+        // Left"), in page order, each once; "" when none.
+        std::string SharedWith(const hid::keymap::Entry& e)
+        {
+            const double mine[2] = { settings::GetStoredValue(e.id), settings::GetStoredValue(e.id2) };
+            std::string text;
+            for (const auto& other : hid::keymap::kEntries)
+            {
+                if (other.control == e.control)
+                    continue;
+                const double theirs[2] = { settings::GetStoredValue(other.id), settings::GetStoredValue(other.id2) };
+                bool shared = false;
+                for (double m : mine)
+                    for (double th : theirs)
+                        shared |= m != double(settings::keynames::kNone) && m == th;
+                if (shared)
+                    text += (text.empty() ? "" : ", ") + std::string(settings::Info(other.id).label);
+            }
+            return text;
+        }
+
+        // A key cell is as wide as the widest name among the 48 keys, "Press
+        // a key" or "none"; a row has two and a gap.
+        float KeyCellWidth()
+        {
+            float width = std::max(ImGui::CalcTextSize(kPressAKey).x, ImGui::CalcTextSize(kNoKey).x);
+            for (const auto& o : settings::Options())
+                if (o.type == settings::Type::Key)
+                    width = std::max(width, ImGui::CalcTextSize(KeyLabel(settings::GetStoredValue(o.id)).c_str()).x);
+            return width;
+        }
+
+        float KeyCellGap()
+        {
+            return kSpaceM * Scale();
+        }
+
         // Widest value this option can show, for the value column.
         float ValueWidth(const settings::Option& o)
         {
@@ -76,6 +169,9 @@ namespace ui
             case settings::Type::Enum:
                 for (const auto& e : o.entries)
                     measure(e.value);
+                break;
+            case settings::Type::Key:
+                width = 2 * KeyCellWidth() + KeyCellGap();
                 break;
             default:
                 measure(o.min);
@@ -247,6 +343,110 @@ namespace ui
 
             if (delta && !locked)
                 Change(o, stored, delta, wrap);
+            ImGui::PopID();
+        }
+
+        // A Controls row: the two keys that drive the control, as two cells.
+        // Left and Right choose a cell (the focused row's choice; another
+        // row starts on its first); A or Enter waits for a key for it, which
+        // SettingsMenuTakesKey takes from the event loop before ImGui sees
+        // it; Y or Backspace empties it; X or Delete puts both keys back to
+        // their defaults. A click or tap only selects the row, and the cell
+        // under the pointer, as on the other pages. The wait follows the
+        // focus (the D-pad moving on ends it) and B ends it (below, in
+        // DrawSettings, where B would otherwise close the menu).
+        void KeyRow(const hid::keymap::Entry& e, float valueWidth, bool focus)
+        {
+            const float s = Scale();
+            const float rowHeight = RowHeight();
+            const settings::Option& o = settings::Info(e.id);
+            const Id ids[2] = { e.id, e.id2 };
+            ImGui::PushID(int(e.id));
+            ImGui::TableNextRow(ImGuiTableRowFlags_None, rowHeight);
+            ImGui::TableNextColumn();
+            if (focus)
+                ImGui::SetKeyboardFocusHere();
+            ImGui::SetCursorPosX(ImGui::GetCursorPosX() + LabelInset());
+            ImVec2 labelPos = ImGui::GetCursorScreenPos();
+            bool activated = ImGui::Selectable("##row", false,
+                ImGuiSelectableFlags_SpanAllColumns | ImGuiSelectableFlags_AllowOverlap, ImVec2(0, rowHeight));
+            bool focused = ImGui::IsItemFocused();
+            if (focused || (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenOverlappedByItem) && s_described == Id::Count))
+                s_described = e.id;
+            const float mid = RowLabel(labelPos, o.label);
+
+            if (focused && s_slotRow != e.id)
+            {
+                s_slotRow = e.id;
+                s_slot = 0;
+            }
+            const bool waiting = s_waiting == e.id || s_waiting == e.id2;
+            if (waiting && !focused)
+                EndWait();
+
+            // The cells, where other pages put their value (the arrows'
+            // room kept so the columns line up from page to page).
+            ImGui::TableNextColumn();
+            const float arrow = ImGui::GetFrameHeight();
+            ImGui::SetCursorPosY(ImGui::GetCursorPosY() + (rowHeight - arrow) * 0.5f);
+            const ImVec2 min = ImGui::GetCursorScreenPos();
+            ImGui::Dummy(ImVec2(valueWidth + arrow * 2, arrow));
+            const float gap = KeyCellGap(), cell = (valueWidth - gap) * 0.5f;
+            const float cellX[2] = { min.x + arrow, min.x + arrow + cell + gap };
+
+            const bool byPointer = ImGui::IsMouseReleased(ImGuiMouseButton_Left);
+            if (activated && byPointer)
+            {
+                const float x = ImGui::GetMousePos().x;
+                for (int i = 0; i < 2; i++)
+                    if (x >= cellX[i] && x < cellX[i] + cell)
+                        s_slot = i;
+            }
+            else if (activated)
+            {
+                s_waiting = ids[s_slot];
+                s_refused = SDL_SCANCODE_UNKNOWN;
+            }
+            else if (focused && s_waiting == Id::Count)
+            {
+                if (Pressed(ImGuiKey_GamepadDpadLeft) || Pressed(ImGuiKey_GamepadLStickLeft) || Pressed(ImGuiKey_LeftArrow))
+                    s_slot = 0;
+                if (Pressed(ImGuiKey_GamepadDpadRight) || Pressed(ImGuiKey_GamepadLStickRight) || Pressed(ImGuiKey_RightArrow))
+                    s_slot = 1;
+                if (ImGui::IsKeyPressed(ImGuiKey_GamepadFaceUp, false) || ImGui::IsKeyPressed(ImGuiKey_Backspace, false))
+                {
+                    const settings::Option& slot = settings::Info(ids[s_slot]);
+                    LogChange(slot, settings::GetStoredValue(slot.id), settings::Set(slot.id, settings::keynames::kNone));
+                }
+                if (ImGui::IsKeyPressed(ImGuiKey_GamepadFaceLeft, false) || ImGui::IsKeyPressed(ImGuiKey_Delete, false))
+                    for (Id id : ids)
+                        LogChange(settings::Info(id), settings::GetStoredValue(id), settings::Reset(id));
+            }
+
+            ImDrawList* draw = ImGui::GetWindowDrawList();
+            for (int i = 0; i < 2; i++)
+            {
+                const bool waitingHere = s_waiting == ids[i];
+                const bool chosen = focused && s_slot == i;
+                const double stored = settings::GetStoredValue(ids[i]);
+                const std::string text = waitingHere ? kPressAKey : KeyLabel(stored);
+                const ImVec2 size = ImGui::CalcTextSize(text.c_str());
+                ImU32 color;
+                if (waitingHere)
+                {
+                    PushAccentText();
+                    color = ImGui::GetColorU32(ImGuiCol_Text);
+                    PopAccentText();
+                }
+                else if (chosen)
+                    color = ImGui::GetColorU32(ImGuiCol_PlotLines);
+                else
+                    color = ImGui::GetColorU32(stored == double(settings::keynames::kNone) ? ImGuiCol_TextDisabled : ImGuiCol_Text);
+                const ImVec2 at(cellX[i] + (cell - size.x) * 0.5f, CentredTextTop(mid));
+                draw->AddText(at, color, text.c_str());
+                if (chosen)  // underlined too, so an empty cell shows which it is
+                    draw->AddLine(ImVec2(at.x, at.y + size.y + 2.0f * s), ImVec2(at.x + size.x, at.y + size.y + 2.0f * s), color, 1.0f * s);
+            }
             ImGui::PopID();
         }
 
@@ -427,7 +627,30 @@ namespace ui
                 return;
             }
             const settings::Option& o = settings::Info(s_described);
-            ImGui::TextWrapped("%s", o.description);
+            if (o.type == settings::Type::Key)
+            {
+                const hid::keymap::Entry& e = hid::keymap::EntryOf(o.id);
+                if (s_waiting == e.id || s_waiting == e.id2)
+                {
+                    PushAccentText();
+                    if (s_refused != SDL_SCANCODE_UNKNOWN)
+                        ImGui::Text("%s can't be a key. Press another; Esc or B cancels.", RefusedName(s_refused).c_str());
+                    else
+                        ImGui::Text("Press the key for %s. Esc or B cancels.", o.label);
+                    PopAccentText();
+                    ImGui::TextDisabled(" ");
+                    return;
+                }
+                ImGui::TextWrapped("%s", o.description);
+                // The keyboard's keys for what the legend names in
+                // controller terms (Y, X); and a key on several controls is
+                // fine (the defaults share the arrows), but say which, in
+                // case it wasn't meant.
+                std::string also = SharedWith(e);
+                ImGui::TextDisabled("Backspace clears the key, Delete restores the row.%s%s%s",
+                    also.empty() ? "" : "  Also: ", also.c_str(), also.empty() ? "" : ".");
+                return;
+            }
             if (o.id == Id::Fullscreen && video::FullscreenLocked())
             {
                 ImGui::TextDisabled("Always on in Game Mode: Steam sets the resolution (Properties > Game Resolution).");
@@ -500,18 +723,43 @@ namespace ui
         const bool dialog = ImGui::IsPopupOpen("reset") || UpdateDialogOpen() || QuitPromptOpen();
         if (int delta = dialog ? 0 : PageDelta())
         {
-            s_category = Category((int(s_category) + delta + kCategories) % kCategories);
+            Category next = s_category;
+            do
+                next = Category((int(next) + delta + kCategories) % kCategories);
+            while (!PageShown(next));
+            s_category = next;
             s_tabPending = true;
             s_focusFirstRow = true;
         }
+        if (!PageShown(s_category))  // the keyboard went away while on Controls
+        {
+            s_category = Category::Input;
+            s_tabPending = true;
+            s_focusFirstRow = true;
+        }
+        // X on the Controls page is the rows' (KeyRow: the row's default
+        // keys). To ImGui it is also the window-switching key: a press
+        // starts the toggle and the release moves the cursor to the root
+        // window. Owning the key while the page shows keeps that off; the
+        // rows' IsKeyPressed, which accepts any owner, still sees it.
+        if (s_category == Category::Controls)
+            ImGui::SetKeyOwner(ImGuiKey_GamepadFaceLeft, ImHashStr("controls-x"));
         s_described = Id::Count;
         s_describedBugReport = false;
         s_describedUpdate = false;
+        if (s_waiting != Id::Count && settings::Info(s_waiting).category != s_category)
+            EndWait();
+        // For the B check at the end: B's nav cancel (in ImGui's NewFrame,
+        // before this) takes the waiting row's focus, and KeyRow then ends
+        // the wait before that check could see it.
+        const bool wasWaiting = s_waiting != Id::Count;
         if (ImGui::BeginTabBar("pages", ImGuiTabBarFlags_NoTooltip))
         {
             for (int c = 0; c < kCategories; c++)
             {
                 Category category = Category(c);
+                if (!PageShown(category))
+                    continue;
                 ImGuiTabItemFlags tabFlags = (s_tabPending && category == s_category) ? ImGuiTabItemFlags_SetSelected : 0;
                 ImGui::PushItemFlag(ImGuiItemFlags_NoNav, true);
                 bool open = ImGui::BeginTabItem(settings::CategoryName(category), nullptr, tabFlags);
@@ -547,9 +795,12 @@ namespace ui
                 if (rows)
                 {
                     float valueWidth = 0.0f;
-                    for (const auto& o : settings::Options())
-                        if (o.category == category && !o.hidden)
-                            valueWidth = std::max(valueWidth, ValueWidth(o));
+                    if (category == Category::Controls)
+                        valueWidth = 2 * KeyCellWidth() + KeyCellGap();
+                    else
+                        for (const auto& o : settings::Options())
+                            if (o.category == category && !o.hidden)
+                                valueWidth = std::max(valueWidth, ValueWidth(o));
                     if (category == Category::Advanced)
                         for (const char* text : { "Saving...", "Checking...", UpdateRowValue() })
                             valueWidth = std::max(valueWidth, ImGui::CalcTextSize(text).x);
@@ -560,12 +811,19 @@ namespace ui
                     {
                         ImGui::TableSetupColumn("label", ImGuiTableColumnFlags_WidthStretch);
                         ImGui::TableSetupColumn("value", ImGuiTableColumnFlags_WidthFixed, valueWidth + arrow * 2 + ValueInset());
-                        for (const auto& o : settings::Options())
-                            if (o.category == category && !o.hidden)
+                        if (category == Category::Controls)
+                            for (const auto& e : hid::keymap::kEntries)
                             {
-                                OptionRow(o, valueWidth, focusFirst);
+                                KeyRow(e, valueWidth, focusFirst);
                                 focusFirst = false;
                             }
+                        else
+                            for (const auto& o : settings::Options())
+                                if (o.category == category && !o.hidden)
+                                {
+                                    OptionRow(o, valueWidth, focusFirst);
+                                    focusFirst = false;
+                                }
                         if (category == Category::Advanced)
                         {
                             BugReportRow(valueWidth);
@@ -627,7 +885,8 @@ namespace ui
 #endif
         ImGui::SameLine();
         {
-            const char* legend = "D-pad: choose, change   LB RB: page   B: close";
+            const char* legend = s_category == Category::Controls ? "D-pad: choose   A: set key   Y: clear   X: default   LB RB: page   B: close"
+                                                                 : "D-pad: choose, change   LB RB: page   B: close";
             float w = ImGui::CalcTextSize(legend).x;
             ImGui::SetCursorPosX(std::max(ImGui::GetCursorPosX(), ImGui::GetWindowContentRegionMax().x - w));
             ImGui::TextDisabled("%s", legend);
@@ -661,20 +920,76 @@ namespace ui
         if (DrawQuitPrompt())
             popup = true;
 #endif
+        // B (or Esc) closes the menu; while a Controls row was waiting for
+        // a key at the top of this frame it ends the wait instead (the
+        // cursor goes with it, as after the Reset dialog: the next D-pad
+        // press brings it back). The Esc key itself never gets here then:
+        // SettingsMenuTakesKey took its press.
         if (!popup && ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows) && !ImGui::IsAnyItemActive() &&
             (ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false) || ImGui::IsKeyPressed(ImGuiKey_Escape, false)))
-            CloseSettings();
+        {
+            if (wasWaiting)
+                EndWait();
+            else
+                CloseSettings();
+        }
         ImGui::End();
     }
 
     void ResetSettingsMenu()
     {
         s_opened = true;
+        EndWait();  // a wait the menu was closed under is over
+        s_takenKey = SDL_SCANCODE_UNKNOWN;
+        s_slotRow = Id::Count;
+        s_slot = 0;
         // A dialog the menu was closed under (Start or Back alone closes it
         // from anywhere) doesn't come back with it.
         if (ImGuiContext* g = ImGui::GetCurrentContext(); g && g->OpenPopupStack.Size > 0)
             ImGui::ClosePopupToLevel(0, false);
         ForgetUpdateDialog();
+    }
+
+    bool SettingsMenuTakesKey(const SDL_KeyboardEvent& key)
+    {
+        // The key a wait took or refused stays down a moment longer. ImGui never saw
+        // it go down, so its OS repeats would read as fresh presses (Enter
+        // would start a new wait, an arrow would move the cursor): they and
+        // its release stay out of ImGui too.
+        if (s_takenKey != SDL_SCANCODE_UNKNOWN && key.scancode == s_takenKey)
+        {
+            if (!key.down)
+                s_takenKey = SDL_SCANCODE_UNKNOWN;
+            if (!key.down || key.repeat)
+                return true;
+            s_takenKey = SDL_SCANCODE_UNKNOWN;  // pressed anew: its release went by unseen
+        }
+        if (s_waiting == Id::Count || !key.down || key.repeat)
+            return false;
+        const settings::Option& o = settings::Info(s_waiting);
+        s_takenKey = key.scancode;
+        if (key.scancode == SDL_SCANCODE_ESCAPE)
+        {
+            fprintf(stderr, "[settings] menu: %s.%s: no new key (Esc)\n", o.table, o.key);
+            EndWait();
+            return true;
+        }
+        // Not a key of the table (Cmd / Windows, F1, the media keys), or a
+        // key pressed with Cmd / Windows held: the wait goes on and the help
+        // line says so. (Cmd+, still closes the menu on a Mac: ProcessEvent's
+        // toggle sees the comma before this does; the Cmd press before it
+        // lands here and is refused.) Its repeats and release stay out of
+        // ImGui like a taken key's: s_takenKey is already set.
+        if (key.scancode == SDL_SCANCODE_UNKNOWN || !settings::keynames::Known(uint16_t(key.scancode)) || (key.mod & SDL_KMOD_GUI))
+        {
+            s_refused = key.scancode;
+            fprintf(stderr, "[settings] menu: %s.%s: %s can't be a key\n", o.table, o.key, RefusedName(key.scancode).c_str());
+            return true;
+        }
+        double from = settings::GetStoredValue(o.id);
+        LogChange(o, from, settings::Set(o.id, double(key.scancode)));
+        EndWait();
+        return true;
     }
 
     void ForgetQuitPrompt()
