@@ -14,7 +14,8 @@
 //     that runs before main() calls Load(), so it would miss the file (it
 //     gets the environment and defaults, with a warning in the log).
 //   - An environment variable (NFSMW_AA=0, ...) wins over the file for that
-//     run and is never written back; EnvOverride() tells the menu.
+//     run and is never written back; EnvOverride() tells the menu. Key
+//     options have none.
 //   - A Restart option keeps its launch value for the whole run. Its
 //     consumers read it once (the window's size), so a change mid-run would
 //     reach only part of them. The menu edits the stored value and shows
@@ -62,6 +63,34 @@ namespace settings
         StickDeadzone,
         TriggerDeadzone,
         Vibration,
+        // Controls (the [keys] table): the two keyboard keys that drive
+        // each Xbox 360 control, as key codes (user/key_names.h); the
+        // second of a pair is always the first's id + 1 (hid/key_map.h
+        // pairs them). Page order.
+        KeyRightTrigger, KeyRightTrigger2,
+        KeyLeftTrigger, KeyLeftTrigger2,
+        KeyLeftStickLeft, KeyLeftStickLeft2,
+        KeyLeftStickRight, KeyLeftStickRight2,
+        KeyLeftStickUp, KeyLeftStickUp2,
+        KeyLeftStickDown, KeyLeftStickDown2,
+        KeyA, KeyA2,
+        KeyB, KeyB2,
+        KeyX, KeyX2,
+        KeyY, KeyY2,
+        KeyLB, KeyLB2,
+        KeyRB, KeyRB2,
+        KeyDpadUp, KeyDpadUp2,
+        KeyDpadDown, KeyDpadDown2,
+        KeyDpadLeft, KeyDpadLeft2,
+        KeyDpadRight, KeyDpadRight2,
+        KeyStart, KeyStart2,
+        KeyBack, KeyBack2,
+        KeyRightStickUp, KeyRightStickUp2,
+        KeyRightStickDown, KeyRightStickDown2,
+        KeyRightStickLeft, KeyRightStickLeft2,
+        KeyRightStickRight, KeyRightStickRight2,
+        KeyLeftStickClick, KeyLeftStickClick2,
+        KeyRightStickClick, KeyRightStickClick2,
         // Advanced
         AsyncShaders,
         PerformanceOverlay,
@@ -69,8 +98,10 @@ namespace settings
     };
     constexpr size_t kCount = size_t(Id::Count);
 
-    enum class Type : uint8_t { Bool, Int, Float, Enum };
-    enum class Category : uint8_t { Display, Graphics, Audio, Input, Advanced, Count };
+    // Key: a key code of user/key_names.h (0: no key), saved by its name
+    // there ("w", "left_shift", "none"); the menu takes it from a key press.
+    enum class Type : uint8_t { Bool, Int, Float, Enum, Key };
+    enum class Category : uint8_t { Display, Graphics, Audio, Input, Controls, Advanced, Count };
     enum class Apply : uint8_t { Live, Restart };
 
     // Values of the enum options (GetInt returns them).
@@ -111,7 +142,7 @@ namespace settings
         const char* key;          // key in that table, e.g. "anti_aliasing"
         const char* label;        // menu label
         const char* description;  // one-line menu help
-        const char* env;          // the environment variable that overrides it
+        const char* env;          // the environment variable that overrides it; nullptr: none (Key options)
         int envField = 0;         // 0: the whole variable; n: its n-th 'x'-separated field (NFSMW_WINDOW=WxH)
         double defaultValue;      // Bool: 0 or 1; Enum: an entry's value
         // Int and Float: the range and the menu's step. Enum: the range a

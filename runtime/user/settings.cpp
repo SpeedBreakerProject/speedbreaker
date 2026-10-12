@@ -27,6 +27,8 @@
 #include <TargetConditionals.h>  // TARGET_OS_IOS: __APPLE__ alone means macOS or iOS
 #endif
 
+#include "key_names.h"  // the Key options: the keys and their names in the file
+
 // toml++ (header-only), as vendored by XenonRecomp. The fallback path keeps
 // this file building before runtime/CMakeLists.txt adds the include
 // directory (the runtime globs every .cpp under runtime/).
@@ -103,6 +105,31 @@ namespace settings
             { 16, "16x", "16x" },
             { kAnisotropyGame, "game", "Original" },
         };
+
+        // A Controls row's key: the key (user/key_names.h, by its name
+        // there) that drives one Xbox 360 control. Two per control, the
+        // second named <key>_2 with the same label. No environment
+        // variable: 48 of them would clutter the file's comments for nobody.
+        constexpr Option KeyOption(Id id, const char* key, const char* label, const char* description, const char* token)
+        {
+            return { .id = id, .category = Category::Controls, .type = Type::Key, .apply = Apply::Live,
+                     .table = "keys", .key = key, .label = label, .description = description, .env = nullptr,
+                     .defaultValue = double(keynames::Code(token)) };
+        }
+
+        constexpr Option KeyOption2(Id id, const char* key, const char* label, const char* token)
+        {
+            return KeyOption(id, key, label, "A second key for the same control, or none.", token);
+        }
+
+        // A stored or offered value as a key code: kUnknown unless it's a
+        // whole number the key table knows (none included).
+        constexpr uint16_t KeyCode(double v)
+        {
+            if (!(v >= 0 && v < double(keynames::kUnknown)) || v != uint16_t(v))
+                return keynames::kUnknown;
+            return keynames::Known(uint16_t(v)) ? uint16_t(v) : keynames::kUnknown;
+        }
 
         // Defaults are what the runtime did before settings existed, so an
         // empty settings.toml changes nothing.
@@ -195,6 +222,57 @@ namespace settings
               .table = "input", .key = "vibration", .label = "Vibration",
               .description = "Controller rumble.",
               .env = "NFSMW_VIBRATION", .defaultValue = 1 },
+            // Controls (Settings > Controls; hid/key_map.h reads them). The
+            // defaults are v0.1.2's keys: the arrows steer as well as A
+            // and D, and are the D-pad.
+            KeyOption(Id::KeyRightTrigger, "right_trigger", "Right Trigger", "Gas in the game's default layout.", "w"),
+            KeyOption2(Id::KeyRightTrigger2, "right_trigger_2", "Right Trigger", "none"),
+            KeyOption(Id::KeyLeftTrigger, "left_trigger", "Left Trigger", "Brake and reverse in the game's default layout.", "s"),
+            KeyOption2(Id::KeyLeftTrigger2, "left_trigger_2", "Left Trigger", "none"),
+            KeyOption(Id::KeyLeftStickLeft, "left_stick_left", "Left Stick Left", "Steer left.", "a"),
+            KeyOption2(Id::KeyLeftStickLeft2, "left_stick_left_2", "Left Stick Left", "left"),
+            KeyOption(Id::KeyLeftStickRight, "left_stick_right", "Left Stick Right", "Steer right.", "d"),
+            KeyOption2(Id::KeyLeftStickRight2, "left_stick_right_2", "Left Stick Right", "right"),
+            KeyOption(Id::KeyLeftStickUp, "left_stick_up", "Left Stick Up", "The left stick pushed up (menus; the camera in some views).", "up"),
+            KeyOption2(Id::KeyLeftStickUp2, "left_stick_up_2", "Left Stick Up", "none"),
+            KeyOption(Id::KeyLeftStickDown, "left_stick_down", "Left Stick Down", "The left stick pulled down.", "down"),
+            KeyOption2(Id::KeyLeftStickDown2, "left_stick_down_2", "Left Stick Down", "none"),
+            KeyOption(Id::KeyA, "a", "A", "The A button.", "space"),
+            KeyOption2(Id::KeyA2, "a_2", "A", "none"),
+            KeyOption(Id::KeyB, "b", "B", "The B button.", "backspace"),
+            KeyOption2(Id::KeyB2, "b_2", "B", "none"),
+            KeyOption(Id::KeyX, "x", "X", "The X button.", "left_shift"),
+            KeyOption2(Id::KeyX2, "x_2", "X", "none"),
+            KeyOption(Id::KeyY, "y", "Y", "The Y button.", "left_ctrl"),
+            KeyOption2(Id::KeyY2, "y_2", "Y", "none"),
+            KeyOption(Id::KeyLB, "lb", "LB", "The left shoulder button.", "q"),
+            KeyOption2(Id::KeyLB2, "lb_2", "LB", "none"),
+            KeyOption(Id::KeyRB, "rb", "RB", "The right shoulder button.", "e"),
+            KeyOption2(Id::KeyRB2, "rb_2", "RB", "none"),
+            KeyOption(Id::KeyDpadUp, "dpad_up", "D-pad Up", "The D-pad, up.", "up"),
+            KeyOption2(Id::KeyDpadUp2, "dpad_up_2", "D-pad Up", "none"),
+            KeyOption(Id::KeyDpadDown, "dpad_down", "D-pad Down", "The D-pad, down.", "down"),
+            KeyOption2(Id::KeyDpadDown2, "dpad_down_2", "D-pad Down", "none"),
+            KeyOption(Id::KeyDpadLeft, "dpad_left", "D-pad Left", "The D-pad, left.", "left"),
+            KeyOption2(Id::KeyDpadLeft2, "dpad_left_2", "D-pad Left", "none"),
+            KeyOption(Id::KeyDpadRight, "dpad_right", "D-pad Right", "The D-pad, right.", "right"),
+            KeyOption2(Id::KeyDpadRight2, "dpad_right_2", "D-pad Right", "none"),
+            KeyOption(Id::KeyStart, "start", "Start", "Start: pause.", "return"),
+            KeyOption2(Id::KeyStart2, "start_2", "Start", "none"),
+            KeyOption(Id::KeyBack, "back", "Back", "Back.", "escape"),
+            KeyOption2(Id::KeyBack2, "back_2", "Back", "none"),
+            KeyOption(Id::KeyRightStickUp, "right_stick_up", "Right Stick Up", "The right stick pushed up.", "o"),
+            KeyOption2(Id::KeyRightStickUp2, "right_stick_up_2", "Right Stick Up", "none"),
+            KeyOption(Id::KeyRightStickDown, "right_stick_down", "Right Stick Down", "The right stick pulled down.", "l"),
+            KeyOption2(Id::KeyRightStickDown2, "right_stick_down_2", "Right Stick Down", "none"),
+            KeyOption(Id::KeyRightStickLeft, "right_stick_left", "Right Stick Left", "The right stick pushed left.", "k"),
+            KeyOption2(Id::KeyRightStickLeft2, "right_stick_left_2", "Right Stick Left", "none"),
+            KeyOption(Id::KeyRightStickRight, "right_stick_right", "Right Stick Right", "The right stick pushed right.", "semicolon"),
+            KeyOption2(Id::KeyRightStickRight2, "right_stick_right_2", "Right Stick Right", "none"),
+            KeyOption(Id::KeyLeftStickClick, "left_stick_click", "Left Stick Click", "Pressing the left stick in.", "z"),
+            KeyOption2(Id::KeyLeftStickClick2, "left_stick_click_2", "Left Stick Click", "none"),
+            KeyOption(Id::KeyRightStickClick, "right_stick_click", "Right Stick Click", "Pressing the right stick in.", "c"),
+            KeyOption2(Id::KeyRightStickClick2, "right_stick_click_2", "Right Stick Click", "none"),
             // Advanced
             { .id = Id::AsyncShaders, .category = Category::Advanced, .type = Type::Bool, .apply = Apply::Live,
               .table = "advanced", .key = "async_shaders", .label = "Asynchronous Shaders",
@@ -232,7 +310,10 @@ namespace settings
                     if (!found)
                         return false;
                 }
-                if (o.env == nullptr || o.label == nullptr || o.description == nullptr)
+                if (o.type == Type::Key && !(KeyCode(o.defaultValue) != keynames::kUnknown && o.min == 0 && o.max == 0 &&
+                                             o.step == 0 && o.entries.empty() && !o.hidden))
+                    return false;
+                if ((o.env == nullptr) != (o.type == Type::Key) || o.label == nullptr || o.description == nullptr)
                     return false;
             }
             return true;
@@ -429,6 +510,11 @@ namespace settings
                 if (const EnumEntry* e = FindEntry(o, v))
                     return double(e->value);
                 return {};
+            case Type::Key:
+                // No key, or a key of the table: the file holds its name.
+                if (KeyCode(v) == keynames::kUnknown)
+                    return {};
+                return v;
             }
             return {};
         }
@@ -453,6 +539,8 @@ namespace settings
                     text += std::format(", or a number from {} to {}", o.min, o.max);
                 return text;
             }
+            case Type::Key:
+                return "a key name such as \"w\", \"left_shift\" or \"keypad_1\", or \"none\" (user/key_names.h lists them)";
             }
             return "";
         }
@@ -475,6 +563,10 @@ namespace settings
                     return double(e->value);
                 if (auto n = ParseNumber(text))
                     return EnumFromNumber(o, *n);
+                return {};
+            case Type::Key:
+                if (uint16_t code = keynames::Code(text); code != keynames::kUnknown)
+                    return double(code);
                 return {};
             }
             return {};
@@ -504,6 +596,8 @@ namespace settings
                 return n;
             case Type::Enum:
                 return EnumFromNumber(o, *n);
+            case Type::Key:
+                return {};  // names only
             }
             return {};
         }
@@ -569,6 +663,8 @@ namespace settings
         {
             const Option& o = kOptions[i];
             s_envSet[i].store(false, std::memory_order_relaxed);
+            if (!o.env)
+                return;  // a Key option: the file alone
             const char* v = std::getenv(o.env);
             if (!v)
                 return;
@@ -718,6 +814,13 @@ namespace settings
                 if (const EnumEntry* e = FindEntry(o, Default(size_t(o.id))))
                     return std::format("\"{}\"", e->token);
                 return std::format("\"{}\"", FindEntry(o, o.defaultValue)->token);
+            case Type::Key:
+            {
+                uint16_t code = KeyCode(v);
+                if (code == keynames::kUnknown)
+                    code = KeyCode(o.defaultValue);
+                return std::format("\"{}\"", keynames::Token(code));  // [a-z0-9_]+: nothing to escape
+            }
             }
             return "";
         }
@@ -727,8 +830,8 @@ namespace settings
             std::string out =
                 "# SpeedBreaker settings, written by the game's settings menu. Hand edits\n"
                 "# are fine while the game is closed; unknown keys are dropped on the next\n"
-                "# save. The environment variable after each option overrides it for one\n"
-                "# run without changing this file.\n";
+                "# save. The environment variable after an option overrides it for one run\n"
+                "# without changing this file.\n";
             const char* table = "";
             for (size_t i = 0; i < kCount; i++)
             {
@@ -742,8 +845,8 @@ namespace settings
                     out += "\n";
                 std::string range = RangeText(o);
                 range[0] = char(std::toupper(uint8_t(range[0])));
-                out += std::format("# {}: {}\n# {}. ({}{})\n", o.label, o.description, range, o.env,
-                    o.apply == Apply::Restart ? "; applies at the next launch" : "");
+                std::string override = o.env ? std::format(" ({}{})", o.env, o.apply == Apply::Restart ? "; applies at the next launch" : "") : "";
+                out += std::format("# {}: {}\n# {}.{}\n", o.label, o.description, range, override);
                 out += std::format("{} = {}\n", o.key, TomlValue(o, values[i]));
             }
             std::string lastVersion;
@@ -932,6 +1035,7 @@ namespace settings
         case Category::Graphics: return "Graphics";
         case Category::Audio: return "Audio";
         case Category::Input: return "Input";
+        case Category::Controls: return "Controls";
         case Category::Advanced: return "Advanced";
         default: return "";
         }
@@ -1069,6 +1173,8 @@ namespace settings
             double index = delta > 0 ? std::floor(position) + delta : delta < 0 ? std::ceil(position) + delta : position;
             return *Normalize(o, o.min + index * o.step);  // not NaN: v and step are finite
         }
+        case Type::Key:
+            return value;  // a key has no neighbour: the menu takes a key press instead
         }
         return value;
     }
@@ -1085,6 +1191,11 @@ namespace settings
             if (const EnumEntry* e = FindEntry(o, value))
                 return e->label;
             return "?";
+        case Type::Key:
+        {
+            uint16_t code = KeyCode(value);
+            return code == keynames::kUnknown ? "?" : keynames::Token(code);
+        }
         case Type::Int:
         case Type::Float:
             break;
