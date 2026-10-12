@@ -22,6 +22,9 @@ from you.
   buttons on either side of the screen).
 - The D-pad picks a row, left/right changes it, A selects, LB/RB switch
   pages, B closes. The game pauses while the menu is open.
+- The **Controls** page: choose a row, Left or Right for its first or second key, press A (or
+  Enter), then the key you want; Esc or B cancels. Y (Backspace) clears a key, X (Delete) restores
+  the row, *Reset page* the whole table.
 
 ## When something goes wrong
 

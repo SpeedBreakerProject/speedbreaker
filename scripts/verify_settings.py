@@ -100,7 +100,7 @@ MAC = platform.system() == 'Darwin'
 RACE = '8-26/2:START,30-130/4:DOWN,31-131/4:A,32.5-132.5/4:START,145:A'
 
 # The menu's pages and rows (runtime/user/settings.cpp, hidden rows left out).
-PAGES = ['Display', 'Graphics', 'Audio', 'Input', 'Advanced']
+PAGES = ['Display', 'Graphics', 'Audio', 'Input', 'Controls', 'Advanced']
 ROWS = {
     'Display': ['video.fullscreen', 'video.vsync', 'video.frame_rate', 'video.aspect_ratio', 'video.brightness',
                 'video.xbox_display_gamma'],

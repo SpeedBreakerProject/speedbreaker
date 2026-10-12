@@ -76,7 +76,7 @@ and a settings menu you can open mid-race.
 - **A guided installer.** It finds your disc image, checks that it is the right game, and
   verifies all 49 files as it copies them. An interrupted install never leaves a broken game.
 - **Your controller, or the keyboard.** Controllers work as an Xbox 360 pad, with hot-plugging
-  and rumble support.
+  and rumble support. Every keyboard key can be reassigned in the settings.
 - **A settings menu that pauses the game.** Open it with F1, Back + Start, or a three-finger
   tap. Every change applies at once, and *Quit Game* leaves the game from a controller too.
 - **Suspend and resume on iPhone and iPad.** Switch away and the game freezes; come back and it
@@ -346,7 +346,7 @@ is B, Square is X and Triangle is Y.
 
 | Xbox 360 control | Controller | Keyboard |
 |---|---|---|
-| Left stick | Left stick | A / D steer (the arrow keys also move it) |
+| Left stick | Left stick | A / D or Left / Right steer; Up / Down push it up and down |
 | Right trigger | Right trigger | W |
 | Left trigger | Left trigger | S |
 | A / B / X / Y | Bottom / right / left / top face button | Space / Backspace / Left Shift / Left Ctrl |
@@ -355,7 +355,7 @@ is B, Square is X and Triangle is Y.
 | Start | Start / Menu / Options | Enter |
 | Back | Back / View / Create | Esc |
 | Right stick | Right stick | O / L up and down, K / ; left and right |
-| Stick clicks | Press a stick in | C (right) |
+| Stick clicks | Press a stick in | Z (left), C (right) |
 
 - One player, one controller: the first one connected is used, and you can plug one in at any
   time. The keyboard always works as well.
@@ -363,7 +363,11 @@ is B, Square is X and Triangle is Y.
   you let go, a hold after a quarter of a second.
 - The game shifts gears with the right stick, so from the keyboard you shift with O and L.
   Holding both keys of a pair centres the stick.
-- There is no button remapping and no mouse control in game.
+- Every key can be changed: **Settings > Controls** (F1). Each control has two keys: choose a row,
+  Left or Right for its first or second key, press A or Enter, then the key you want (Esc or B
+  cancels). Y or Backspace clears a key, X or Delete puts the row's defaults back, and *Reset
+  page* restores this whole table. A key may drive several controls, as the arrows do. There is
+  no mouse control in game.
 
 **To open the settings:**
 
@@ -419,6 +423,10 @@ game while its window isn't in front.
 
 **Input:** Stick Deadzone (8%; raise it if the car steers by itself), Trigger Deadzone (2%), and
 Vibration (On).
+
+**Controls:** the keyboard keys for each Xbox 360 control, two per control, as in the table under
+[Controls](#controls). The keys are saved by name in `settings.toml`'s `[keys]` table (`w`,
+`left_shift`, `keypad_1`, or `none`; `runtime/user/key_names.h` lists them).
 
 **Advanced:** Asynchronous Shaders (On: an object is skipped for a frame or two while its shader
 compiles, instead of the game stuttering), Performance Overlay (Off: fps, frame times, and CPU

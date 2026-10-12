@@ -4,6 +4,17 @@ What changed in each SpeedBreaker release, newest first. Each release's notes on
 its entry here, and the game shows the entry once, the first time a new version starts (offline:
 it's built into the game).
 
+## Unreleased
+
+### What's new
+
+- Settings > Controls: every keyboard key can be reassigned, and each control has two keys. Choose
+  a row, Left or Right for its first or second key, press A or Enter, then the new key; Y clears a
+  key, X puts a row's defaults back, *Reset page* the whole table. The default keys are unchanged
+  (the arrows steer as well as A and D). The keys are saved by name in settings.toml's `[keys]`
+  table (`w`, `left_shift`, `none`).
+- The left stick click has a key: Z.
+
 ## v0.1.4
 
 ### What's new
