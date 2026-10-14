@@ -38,6 +38,10 @@
 #include <utility>
 #include <vulkan/vulkan.h>
 
+#if defined(__APPLE__) && !TARGET_OS_IOS
+#include "../platform/apple/macos_window.h"
+#endif
+
 namespace video
 {
     namespace
@@ -1759,6 +1763,10 @@ void main()
             fprintf(stderr, "[video] SDL_CreateWindow: %s\n", SDL_GetError());
             return false;
         }
+#if defined(__APPLE__) && !TARGET_OS_IOS
+        platform::macos::ConfigureWindow(s_window);
+#endif
+
 #if defined(__APPLE__) && TARGET_OS_IOS
         platform::ios::WatchKeyboards(s_window);
 #endif
