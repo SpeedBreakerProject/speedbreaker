@@ -2330,6 +2330,22 @@ void main()
             case SDL_EVENT_DID_ENTER_FOREGROUND:
                 ResumeGame();
                 break;
+#if defined(__APPLE__) && !TARGET_OS_IOS
+            case SDL_EVENT_WINDOW_LEAVE_FULLSCREEN:
+                if (s_window)
+                    platform::macos::ConfigureWindow(s_window);
+                break;
+
+            case SDL_EVENT_WINDOW_MOUSE_ENTER:
+                if (s_window)
+                    platform::macos::SetTrafficLightsVisible(s_window, true);
+                break;
+
+            case SDL_EVENT_WINDOW_MOUSE_LEAVE:
+                if (s_window)
+                    platform::macos::SetTrafficLightsVisible(s_window, false);
+                break;
+#endif
             default:
                 // SDL_EVENT_WILL_ENTER_FOREGROUND among them: the app is
                 // still inactive then.
