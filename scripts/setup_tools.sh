@@ -10,7 +10,10 @@
 #
 # Needs: git, cmake, ninja, clang 18+ (Homebrew LLVM on macOS, the system
 # clang elsewhere; override with LLVM=<bin dir>), lld, make, curl; gh for the
-# instruction tests (skipped without it, or when it isn't logged in).
+# instruction tests (skipped without it, or when it isn't logged in). That
+# floor is this script's own: the tools here build with any clang from 18 up.
+# The game itself needs clang 19 to 22 (README, Dependencies): 18 has no
+# std::atomic_ref in libc++, and on macOS 23 and newer don't link.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TOOLS="$ROOT/tools"

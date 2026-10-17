@@ -683,12 +683,16 @@ The supported executable is 3,936,256 bytes, with SHA-256
 
 #### 1. Dependencies
 
-- **Mac:** Xcode's command-line tools, and from Homebrew: `brew install llvm lld cmake ninja
-  molten-vk`. The libraries the app bundles (SDL3, the Vulkan loader, glslang, SPIRV-Tools and
-  FFmpeg's XMA decoder) are built from their own source releases by
-  `scripts/macos/build_deps.sh`, for macOS 15 like the release (step 3). Homebrew's bottles of
-  them (`brew install sdl3 vulkan-loader vulkan-headers glslang spirv-tools`) also work, for an
-  app that runs only on the macOS you build on (step 3).
+- **Mac:** Xcode's command-line tools, and from Homebrew: `brew install llvm@19 lld cmake ninja
+  molten-vk`. Clang 19 to 22, and ask for the version: plain `brew install llvm` gives the newest,
+  which is past that. Clang 18 and older have no `std::atomic_ref` in libc++, which
+  `runtime/game/movie_pacing.cpp` uses; 23 and newer emit Objective-C message-send stubs that the
+  linker of Xcode's command-line tools can't resolve, so the app compiles but never links. The
+  libraries the app bundles (SDL3, the Vulkan loader, glslang, SPIRV-Tools and FFmpeg's XMA
+  decoder) are built from their own source releases by `scripts/macos/build_deps.sh`, for macOS 15
+  like the release (step 3). Homebrew's bottles of them (`brew install sdl3 vulkan-loader
+  vulkan-headers glslang spirv-tools`) also work, for an app that runs only on the macOS you build
+  on (step 3).
 - **SteamOS:** build inside an Arch Linux distrobox (podman and distrobox ship with SteamOS). The
   development launcher, `scripts/steamos/speedbreaker.sh`, expects the container to be called
   `nfsmw-build`:
@@ -702,7 +706,8 @@ The supported executable is 3,936,256 bytes, with SHA-256
   ```
 
 - **Other Linux distributions:** your distribution's equivalents of the package list above
-  (Clang 18 or newer). Untested so far. The GPU needs Vulkan 1.2 and BC (DXT) texture support.
+  (Clang 19 or newer, for libc++'s `std::atomic_ref`). Untested so far. The GPU needs Vulkan 1.2
+  and BC (DXT) texture support.
 - `gh`, logged in, is optional: it fetches Xenia's instruction tests.
 
 #### 2. Toolchain, your game files, recompilation
@@ -734,8 +739,8 @@ cmake -S . -B build/main -G Ninja -DCMAKE_BUILD_TYPE=Release \
 # their source archives and checks each one's SHA-256), then the game against them
 scripts/macos/build_deps.sh build/deps
 cmake -S . -B build/main -G Ninja -DCMAKE_BUILD_TYPE=Release \
-  -DCMAKE_C_COMPILER=/opt/homebrew/opt/llvm/bin/clang \
-  -DCMAKE_CXX_COMPILER=/opt/homebrew/opt/llvm/bin/clang++ \
+  -DCMAKE_C_COMPILER=/opt/homebrew/opt/llvm@19/bin/clang \
+  -DCMAKE_CXX_COMPILER=/opt/homebrew/opt/llvm@19/bin/clang++ \
   -DCMAKE_PREFIX_PATH="$PWD/build/deps" -DFFMPEG_XMA="$PWD/build/deps/ffmpeg-xma"
 # (or, with Homebrew's libraries instead of build_deps.sh, an app for your own macOS only: the
 #  same cmake line with -DCMAKE_OSX_DEPLOYMENT_TARGET=<your macOS, e.g. 26.0> instead of the last
