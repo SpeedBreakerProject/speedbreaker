@@ -393,12 +393,10 @@ other wheel SDL sees is used as best we can work it out.
 
 - **Settings > Wheel** has Steering Range (how much of the wheel's turn reaches full lock; 540
   degrees of a G29's 900 by default), Invert Steering, Steering Deadzone, Steering Response
-  (gentler or sharper near the centre), Force Feedback, Centering Force, **Tell the Game**, and
-  **Calibrate**.
+  (gentler or sharper near the centre), Force Feedback, Centering Force, and **Calibrate**.
 - The Xbox 360 version supports racing wheels and asks what is plugged in, so a wheel says it is
-  a wheel rather than a pad (**Tell the Game**). Whether the game then shows and handles it as one
-  is the game's own business: *Wheel Only* reports a real wheel's limits too, which it may want
-  before it believes you.
+  a racing wheel rather than a pad. The game still shows a controller either way: it decides that
+  from something else, which reporting a real wheel's narrower abilities didn't change either.
 - **Force feedback works**, and needs nothing installed: on a Mac through Apple's own Force
   Feedback framework (measured on a G29 over USB - the autocentre pull, the spring and the rumble
   all move the wheel), and on SteamOS and other Linux systems through the kernel's driver. Where a
@@ -488,7 +486,6 @@ Vibration (On).
 | Steering Response | 0.50 to 2.00 | 1.00, in step with the wheel. Higher is gentler near the centre and sharper near full lock. |
 | Force Feedback | 0% to 100% | 100%. How strongly the knocks the game asks for reach the wheel. Needs a wheel whose motors this system can drive, and Vibration (Input) turns it off too. |
 | Centering Force | 0% to 100% | 50%. How hard the wheel pulls back to straight ahead. Needs the motors too. |
-| Tell the Game | Controller / Wheel / Wheel Only | Wheel. The Xbox 360 game supports racing wheels and asks what is plugged in. Wheel says a racing wheel (XInput's wheel subtype) while still claiming every control a pad has. Wheel Only also reports a real wheel's own limits - force feedback, and no sticks but the wheel itself - which may stop the paddles changing gear, since the game is then told there is no right stick. Controller: it sees a pad, as before. The game may only ask as it starts, so a change can want a restart. |
 | Pedals | Assign | Which axis each pedal is. Worked out from the wheel; press A only if they come out wrong. |
 
 **Controls:** the keyboard keys for each Xbox 360 control, two per control, as in the table under

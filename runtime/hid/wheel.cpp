@@ -17,6 +17,7 @@
 
 #include <SDL3/SDL_haptic.h>
 #include <SDL3/SDL_joystick.h>
+#include <SDL3/SDL_timer.h>
 
 // wheel_map.h names XInput's bits as literals (it has no kernel header), as
 // key_map.h does; input.cpp checks key_map.h's against the bits the game
@@ -81,6 +82,7 @@ namespace hid::wheel
         bool s_onlyOneEffect = false;  // a rumble would stop the centring: the centring wins
         SDL_HapticEffectID s_spring = -1;
         int s_centering = -1;          // the level the wheel is holding; -1: none yet
+        Uint64 s_centeringSaid = 0;    // when it was last told (SDL ticks)
         float s_rumble = 0.0f;         // what it was last told to play
 
         const bool s_log = std::getenv("NFSMW_WHEEL_LOG") != nullptr;
@@ -318,12 +320,17 @@ namespace hid::wheel
 
         // Settings > Wheel > Centering Force: an autocentre level where the
         // wheel takes one, else a spring effect that pulls it to the middle.
-        void ApplyCentering()
+        // `again`: say it even if it has been said before. A wheel does its
+        // own power-on sweep and needn't have been listening when it was
+        // first told, and a one-shot call that misses leaves the player's
+        // centring force doing nothing until they nudge the row - which is
+        // just how that looks from the outside.
+        void ApplyCentering(bool again = false)
         {
             if (!s_haptic)
                 return;
             const int percent = std::clamp(settings::GetInt(settings::Id::CenteringForce), 0, 100);
-            if (percent == s_centering)
+            if (percent == s_centering && !again)
                 return;
             s_centering = percent;
             if (s_canAutocentre)
@@ -622,6 +629,16 @@ namespace hid::wheel
     void Initialize()
     {
         s_started = true;
+        // Every Wheel setting as it is read, so a run says for itself what
+        // it is playing by: a value here that differs from settings.toml
+        // means the file didn't reach the game.
+        fprintf(stderr, "[wheel] settings: wheel %s, range %s, invert %s, deadzone %.2f, response %.2f, "
+                        "force feedback %d%%, centring %d%%\n",
+            settings::GetBool(settings::Id::Wheel) ? "on" : "off",
+            settings::FormatValue(settings::Id::SteeringRange, settings::GetValue(settings::Id::SteeringRange)).c_str(),
+            settings::GetBool(settings::Id::InvertSteering) ? "yes" : "no",
+            double(settings::GetFloat(settings::Id::SteeringDeadzone)), double(settings::GetFloat(settings::Id::SteeringResponse)),
+            settings::GetInt(settings::Id::ForceFeedback), settings::GetInt(settings::Id::CenteringForce));
         Open();
     }
 
@@ -635,6 +652,9 @@ namespace hid::wheel
             if (a >= 0 && size_t(a) < s_axisSeen.size() && !s_axisSeen[size_t(a)])
             {
                 s_axisSeen[size_t(a)] = true;
+                // It is certainly awake now, whatever it was doing when it
+                // was first told what to hold.
+                s_centering = -1;
                 // A pedal on this axis that had no resting place to work
                 // from takes the value it was at as it started to move,
                 // which is near enough where it rests. A wheel we know
@@ -773,8 +793,19 @@ namespace hid::wheel
 
     void Update()
     {
-        if (s_joystick)
-            ApplyCentering();
+        if (!s_joystick)
+            return;
+        // An autocentre level is one cheap call, so it is said again every
+        // second: whenever the wheel became ready, it ends up holding what
+        // the setting says. A spring effect is not re-made that way - that
+        // would mean tearing one down and building another every second -
+        // so it is only (re)made when the setting itself changes, or when
+        // the device first speaks (HandleEvent).
+        const Uint64 now = SDL_GetTicks();
+        const bool again = s_canAutocentre && now - s_centeringSaid >= 1000;
+        if (again)
+            s_centeringSaid = now;
+        ApplyCentering(again);
     }
 
     void Suspend()

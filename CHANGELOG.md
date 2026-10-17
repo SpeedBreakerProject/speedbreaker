@@ -21,11 +21,11 @@ it's built into the game).
   Force, and Calibrate.
 - **The game is told a wheel is a wheel.** The Xbox 360 version supports racing wheels and asks
   what is connected (it does ask: the log says so); it was being told a controller whatever was
-  plugged in. Settings > Wheel > Tell the Game now chooses: Wheel reports XInput's wheel subtype
-  while still claiming every control a pad has, Wheel Only reports a real wheel's own limits as
-  well (force feedback, and no sticks but the wheel), and Controller is the old behaviour. Wheel
-  Only may stop the paddles changing gear, since the game is then told there is no right stick.
-  The game may only ask as it starts, so a change can want a restart.
+  plugged in, and now a wheel reports XInput's wheel subtype. The game still shows a controller,
+  so it decides that some other way - reporting a real wheel's narrower abilities instead
+  (no sticks but the wheel, the force-feedback flag) changed nothing either, and was dropped
+  rather than kept for the sake of it, since the paddles reach the game as the right stick that
+  such a wheel hasn't got.
 - **Force feedback works, with nothing to install:** on a Mac through Apple's own Force Feedback
   framework, and on SteamOS and other Linux systems through the kernel's driver. The wheel pulls
   back to centre as hard as Centering Force says, and passes on the knocks the game asks for.
@@ -64,7 +64,12 @@ it's built into the game).
   +32767 to -32768 that 0 is halfway, so both triggers used to sit at half pressed until each
   pedal had been touched once.
 - The clutch is read and shown on the page; the game has no use for it.
-- The log says which wheel was found, what its force feedback can do and which axis is which.
+- The centring force is said again every second rather than once at the start: a wheel does its
+  own power-on sweep and needn't be listening when it is first told, and a call that missed left
+  the setting doing nothing until it was nudged.
+- The log says which wheel was found, what its force feedback can do, which axis is which, and
+  every Wheel setting as the run read it - so a setting that didn't reach the game shows up
+  without having to guess.
   `NFSMW_WHEEL_LOG=1` adds every button press (`[wheel] button 7 down`) and what the axes read,
   for a wheel whose buttons come out wrong; `NFSMW_WHEEL_BUTTONS="0=B,2=A,8=BACK,9=START"` sets
   them for that run. Every row of the page has its own variable too (`NFSMW_WHEEL`,
