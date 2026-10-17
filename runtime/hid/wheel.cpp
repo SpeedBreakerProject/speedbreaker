@@ -60,6 +60,7 @@ namespace hid::wheel
         const wheelmap::Model* s_model = nullptr;
         std::vector<Binding> s_bindings;
         Axes s_axes;
+        wheelmap::Steering s_steering;  // the wheel's two ends, measured or assumed
         wheelmap::Pedal s_pedals[3];  // in Step order: Throttle, Brake, Clutch
         int s_fullTurn = 0;           // degrees lock to lock, 0: unknown
         // The axes' resting places are read again on the first frame after
@@ -84,19 +85,18 @@ namespace hid::wheel
 
         const bool s_log = std::getenv("NFSMW_WHEEL_LOG") != nullptr;
 
-        // A pedal step's place in s_pedals (Steer has none).
-        int Slot(Step step) { return int(step) - 1; }
+        // A pedal step's place in s_pedals.
+        int Slot(Step step) { return int(step) - int(Step::Throttle); }
 
         settings::Id AxisOption(Step step)
         {
             switch (step)
             {
-            case Step::Steer: return settings::Id::WheelSteerAxis;
             case Step::Throttle: return settings::Id::WheelThrottleAxis;
             case Step::Brake: return settings::Id::WheelBrakeAxis;
             case Step::Clutch: return settings::Id::WheelClutchAxis;
+            default: return settings::Id::WheelSteerAxis;
             }
-            return settings::Id::WheelSteerAxis;
         }
 
         settings::Id RestOption(Step step)
@@ -119,28 +119,33 @@ namespace hid::wheel
             }
         }
 
-        const char* StepName(Step step)
+        // The setting holding the button given to a pad control; they run in
+        // Control order from ButtonA, as the static_assert below checks.
+        settings::Id ButtonOption(wheelmap::Control control)
         {
-            switch (step)
-            {
-            case Step::Steer: return "steering";
-            case Step::Throttle: return "throttle";
-            case Step::Brake: return "brake";
-            case Step::Clutch: return "clutch";
-            }
-            return "?";
+            return settings::Id(size_t(settings::Id::ButtonA) + size_t(control));
         }
+        static_assert(size_t(settings::Id::ButtonShiftDown) - size_t(settings::Id::ButtonA) + 1 == wheelmap::kControlCount,
+            "one Button option per wheel_map.h Control, in Control order");
 
         int AxisOf(Step step)
         {
             switch (step)
             {
-            case Step::Steer: return s_axes.steer;
             case Step::Throttle: return s_axes.throttle;
             case Step::Brake: return s_axes.brake;
             case Step::Clutch: return s_axes.clutch;
+            default: return s_axes.steer;
             }
-            return -1;
+        }
+
+        // What Calibrate recorded for each control, in Control order.
+        std::array<int, wheelmap::kControlCount> StoredButtons()
+        {
+            std::array<int, wheelmap::kControlCount> out{};
+            for (size_t i = 0; i < wheelmap::kControlCount; i++)
+                out[i] = settings::GetInt(ButtonOption(wheelmap::Control(i)));
+            return out;
         }
 
         int16_t AxisNow(int axis)
@@ -202,6 +207,15 @@ namespace hid::wheel
             if (stored.throttle >= 0) s_axes.throttle = stored.throttle;
             if (stored.brake >= 0) s_axes.brake = stored.brake;
             if (stored.clutch >= 0) s_axes.clutch = stored.clutch;
+            // The wheel's two ends: both as Calibrate measured them, else
+            // the axis as it comes. Both have to be there - one alone would
+            // put the centre halfway to nowhere.
+            const int16_t left = int16_t(settings::GetInt(settings::Id::SteerLeft));
+            const int16_t right = int16_t(settings::GetInt(settings::Id::SteerRight));
+            if (left != right && left != 0 && right != 0)
+                s_steering.Start(left, right);
+            else
+                s_steering.Start(-wheelmap::kAxisMax, wheelmap::kAxisMax);
             // Each pedal's axis and the span it runs over: what Calibrate
             // measured, else what this wheel's model says its pedals do,
             // else the axis itself once it has reported (its far end being
@@ -424,12 +438,14 @@ namespace hid::wheel
         // wheel's buttons do, for one whose numbering the model has wrong.
         void TakeBindings()
         {
-            s_bindings.assign(s_model->buttons.begin(), s_model->buttons.end());
+            // The model's buttons, with whatever Calibrate recorded on top.
+            const std::array<int, wheelmap::kControlCount> assigned = StoredButtons();
+            s_bindings = wheelmap::WithAssigned(s_model->buttons, assigned);
             const char* text = std::getenv("NFSMW_WHEEL_BUTTONS");
             if (!text || !*text)
                 return;
             std::string error;
-            s_bindings = wheelmap::ParseBindings(text, s_model->buttons, error);
+            s_bindings = wheelmap::ParseBindings(text, s_bindings, error);
             if (!error.empty())
                 fprintf(stderr, "[wheel] NFSMW_WHEEL_BUTTONS: can't read \"%s\"\n", error.c_str());
             std::string shown;
@@ -494,7 +510,7 @@ namespace hid::wheel
         // doesn't lose the reading and the biggest mover wins however long
         // the player takes.
         bool s_assigning = false;
-        Step s_assignStep = Step::Steer;
+        Step s_assignStep = Step::SteerLeft;
         std::vector<int16_t> s_assignFrom;
         // Per axis, the range it has covered since the step began, and
         // whether it has been worth tracking at all: an axis SDL has not
@@ -503,6 +519,10 @@ namespace hid::wheel
         // time out of another step's reckoning.
         std::vector<int32_t> s_assignLo, s_assignHi;
         std::vector<bool> s_assignTracked;
+        // A button step takes a button that goes down during the step, not
+        // one already held: the A that confirmed the step before is still
+        // down as the next one begins.
+        std::array<bool, kMaxButtons> s_assignButtonsFrom{};
 
         // NFSMW_WHEEL_LOG=1: every button as it is pressed (which is how to
         // find a wheel's numbering), and the axes once a second.
@@ -543,12 +563,60 @@ namespace hid::wheel
             return SDL_GetJoystickHat(s_joystick, 0);
         }
 
+        // How far a pedal is down, or nothing at all while its axis has yet
+        // to report: SDL gives an axis only when it moves, and the 0 it
+        // reads until then is not where the pedal is. On a wheel whose
+        // pedals run +32767 to -32768 that 0 is halfway, so without this a
+        // resting pedal reads half pressed.
+        float PedalValue(Step step)
+        {
+            const int axis = AxisOf(step);
+            if (axis < 0 || size_t(axis) >= s_axisSeen.size() || !s_axisSeen[size_t(axis)])
+                return 0.0f;
+            return s_pedals[Slot(step)].Value(AxisNow(axis));
+        }
+
         bool InPlay()
         {
             return s_joystick != nullptr && settings::GetBool(settings::Id::Wheel);
         }
 
         Reading s_last;  // what Sample last read (Last)
+    }
+
+    bool StepIsButton(Step step)
+    {
+        return step >= Step::ButtonA && step < Step::Count;
+    }
+
+    const char* StepName(Step step)
+    {
+        switch (step)
+        {
+        case Step::SteerLeft: return "Full left";
+        case Step::SteerRight: return "Full right";
+        case Step::Throttle: return "Throttle";
+        case Step::Brake: return "Brake";
+        case Step::Clutch: return "Clutch";
+        default: break;
+        }
+        if (StepIsButton(step))
+            return wheelmap::kControls[size_t(step) - size_t(Step::ButtonA)].name;
+        return "?";
+    }
+
+    const char* StepAsk(Step step)
+    {
+        switch (step)
+        {
+        case Step::SteerLeft: return "Turn the wheel fully left";
+        case Step::SteerRight: return "Turn the wheel fully right";
+        case Step::Throttle: return "Press the throttle to the floor";
+        case Step::Brake: return "Press the brake to the floor";
+        case Step::Clutch: return "Press the clutch to the floor";
+        default: break;
+        }
+        return StepIsButton(step) ? "Press the button you want for this" : "?";
     }
 
     void Initialize()
@@ -639,18 +707,15 @@ namespace hid::wheel
         r.start = (pressed.buttons & wheelmap::button::Start) != 0;
         if (s_axes.steer >= 0)
         {
-            int16_t raw = AxisNow(s_axes.steer);
+            float turn = s_steering.Fraction(AxisNow(s_axes.steer));
             if (settings::GetBool(settings::Id::InvertSteering))
-                raw = wheelmap::Flip(raw);
-            r.steer = wheelmap::Steer(raw, settings::GetInt(settings::Id::SteeringRange), s_fullTurn,
+                turn = -turn;
+            r.steer = wheelmap::Steer(turn, settings::GetInt(settings::Id::SteeringRange), s_fullTurn,
                 settings::GetFloat(settings::Id::SteeringDeadzone), settings::GetFloat(settings::Id::SteeringResponse));
         }
-        if (s_axes.throttle >= 0)
-            r.throttle = s_pedals[Slot(Step::Throttle)].Value(AxisNow(s_axes.throttle));
-        if (s_axes.brake >= 0)
-            r.brake = s_pedals[Slot(Step::Brake)].Value(AxisNow(s_axes.brake));
-        if (s_axes.clutch >= 0)
-            r.clutch = s_pedals[Slot(Step::Clutch)].Value(AxisNow(s_axes.clutch));
+        r.throttle = PedalValue(Step::Throttle);
+        r.brake = PedalValue(Step::Brake);
+        r.clutch = PedalValue(Step::Clutch);
         LogSample(held, r);
         s_last = r;
         // Switched off, the wheel plays nothing - but it was still read, so
@@ -733,12 +798,26 @@ namespace hid::wheel
         s_assignLo.assign(s_assignFrom.size(), 0);
         s_assignHi.assign(s_assignFrom.size(), 0);
         s_assignTracked.assign(s_assignFrom.size(), false);
+        s_assignButtonsFrom = ButtonsNow();
     }
 
     Candidate Watch()
     {
         if (!s_assigning || !s_joystick)
             return {};
+        if (StepIsButton(s_assignStep))
+        {
+            // Whatever has gone down since the step began.
+            const std::array<bool, kMaxButtons> held = ButtonsNow();
+            Candidate c;
+            for (int b = 0; b < kMaxButtons; b++)
+                if (held[size_t(b)] && !s_assignButtonsFrom[size_t(b)])
+                {
+                    c.found = true;
+                    c.button = b;
+                }
+            return c;
+        }
         // Fold in where everything is now, keeping the range each axis has
         // covered. An axis that has never reported is left alone.
         for (size_t a = 0; a < s_assignFrom.size(); a++)
@@ -783,9 +862,8 @@ namespace hid::wheel
         c.rest = int16_t(std::clamp(far, -32768, 32767));
         const float span = wheelmap::RestsCentred(c.rest) ? float(wheelmap::kAxisMax) : float(2 * wheelmap::kAxisMax);
         c.moved = std::clamp(float(widest) / span, 0.0f, 1.0f);
-        // Turning left reads negative on the pad, so a wheel that went the
-        // other way wants inverting.
-        c.invert = s_assignStep == Step::Steer && held > far;
+        // Which way round the wheel is needs no deciding here: the two ends
+        // say it between them (wheel_map.h's Steering).
         return c;
     }
 
@@ -795,20 +873,39 @@ namespace hid::wheel
             return false;
         const Candidate c = Watch();
         if (!c.found)
-            return false;  // nothing has moved yet: the step goes on
+            return false;  // nothing done yet: the step goes on
         s_assigning = false;
-        fprintf(stderr, "[wheel] %s: axis %d (it moved %.0f%% of its travel%s)\n", StepName(s_assignStep), c.axis,
-            double(c.moved) * 100.0, c.invert ? ", the other way: inverted" : "");
-        settings::Set(AxisOption(s_assignStep), double(c.axis));
-        if (s_assignStep == Step::Steer)
-            settings::Set(settings::Id::InvertSteering, c.invert ? 1.0 : 0.0);
-        else
+        if (StepIsButton(s_assignStep))
         {
+            const wheelmap::Control control = wheelmap::Control(size_t(s_assignStep) - size_t(Step::ButtonA));
+            settings::Set(ButtonOption(control), double(c.button));
+            TakeBindings();
+            fprintf(stderr, "[wheel] %s: button %d\n", StepName(s_assignStep), c.button);
+            return true;
+        }
+        fprintf(stderr, "[wheel] %s: axis %d, held at %+d (it moved %.0f%% of its travel)\n", StepName(s_assignStep), c.axis,
+            int(c.full), double(c.moved) * 100.0);
+        switch (s_assignStep)
+        {
+        case Step::SteerLeft:
+            settings::Set(settings::Id::WheelSteerAxis, double(c.axis));
+            settings::Set(settings::Id::SteerLeft, double(c.full));
+            // The ends carry which way round the wheel is, so the manual
+            // flip starts clear: whoever wants it can still set it.
+            settings::Set(settings::Id::InvertSteering, 0.0);
+            break;
+        case Step::SteerRight:
+            settings::Set(settings::Id::WheelSteerAxis, double(c.axis));
+            settings::Set(settings::Id::SteerRight, double(c.full));
+            break;
+        default:
             // Both ends, kept for the next run too: a pedal that stops
             // short of its axis still reads as floored, and one sharing an
             // axis with another keeps to its own half.
+            settings::Set(AxisOption(s_assignStep), double(c.axis));
             settings::Set(RestOption(s_assignStep), double(c.rest));
             settings::Set(FullOption(s_assignStep), double(c.full));
+            break;
         }
         Calibrate(false);
         return true;
@@ -840,7 +937,14 @@ namespace hid::wheel
         for (settings::Id id : { settings::Id::WheelSteerAxis, settings::Id::WheelThrottleAxis, settings::Id::WheelBrakeAxis,
                                  settings::Id::WheelClutchAxis })
             settings::Set(id, -1);
-        settings::Reset(settings::Id::InvertSteering);
+        for (settings::Id id : { settings::Id::InvertSteering, settings::Id::ThrottleRest, settings::Id::ThrottleFull,
+                                 settings::Id::BrakeRest, settings::Id::BrakeFull, settings::Id::ClutchRest,
+                                 settings::Id::ClutchFull, settings::Id::SteerLeft, settings::Id::SteerRight })
+            settings::Reset(id);
+        for (size_t i = 0; i < wheelmap::kControlCount; i++)
+            settings::Reset(ButtonOption(wheelmap::Control(i)));
+        if (s_joystick)
+            TakeBindings();
         if (s_joystick)
             Calibrate(false);
     }

@@ -101,7 +101,25 @@ namespace hid::wheel
     // this took the first axis past a third of its travel and went straight
     // on to the next step, so one long pedal press was handed to every
     // remaining step before the foot came up.
-    enum class Step : uint8_t { Steer, Throttle, Brake, Clutch };
+    // In the order Calibrate asks for them: the wheel's two ends, the
+    // pedals, then a button per pad control (hid/wheel_map.h's Control
+    // order). The D-pad is not among them - it comes from the hat, whose
+    // four bits mean the same on every joystick SDL reports.
+    enum class Step : uint8_t
+    {
+        SteerLeft, SteerRight, Throttle, Brake, Clutch,
+        ButtonA, ButtonB, ButtonX, ButtonY, ButtonLB, ButtonRB,
+        ButtonBack, ButtonStart, ButtonLS, ButtonRS, ShiftUp, ShiftDown,
+        Count
+    };
+    constexpr size_t kStepCount = size_t(Step::Count);
+    // Main thread: what the step asks the player to do ("Turn the wheel
+    // fully left", "Press the throttle", "Press the button for A"), and a
+    // short name for the row ("Full left", "Throttle", "A").
+    const char* StepAsk(Step step);
+    const char* StepName(Step step);
+    // Is it a button the step is after, rather than an axis?
+    bool StepIsButton(Step step);
     // Main thread: start watching for `step`. Where the axes rest now is
     // remembered, so whatever is already held doesn't read as a movement.
     void BeginAssign(Step step);
@@ -111,12 +129,13 @@ namespace hid::wheel
         bool found = false;   // something has moved far enough to mean it
         int axis = -1;
         float moved = 0.0f;   // how far it went, as a share of its travel
-        bool invert = false;  // Steer: it ran the other way (left read positive)
-        // Both ends of what it did: where it was held when confirmed, and
-        // the far end of the range it crossed getting there, which is where
-        // it had been resting. Measuring both is what lets a pedal that
-        // doesn't reach the end of its axis still read as floored, and two
-        // pedals sharing one axis each read only their own half.
+        int button = -1;      // a button step: which button was pressed
+        // An axis step: where it was held when confirmed, and the far end
+        // of the range it crossed getting there, which is where it had been
+        // resting. Measuring both is what lets a pedal that doesn't reach
+        // the end of its axis still read as floored, two pedals sharing one
+        // axis each read their own half, and the wheel's centre and its
+        // reach each way be known rather than assumed.
         int16_t rest = 0, full = 0;
     };
     // Main thread, once a frame while a step is running: what A would store.

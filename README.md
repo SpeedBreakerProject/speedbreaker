@@ -399,11 +399,18 @@ other wheel SDL sees is used as best we can work it out.
   all move the wheel), and on SteamOS and other Linux systems through the kernel's driver. Where a
   system can't drive a particular wheel, the log says so and the two force-feedback rows say so,
   and steering, the pedals and the buttons all work regardless.
-- If anything comes out in the wrong place (a wheel we don't know), choose **Calibrate**: it asks
-  for one thing at a time - turn the wheel left, then each pedal - shows you what it saw, and
-  waits for **A** before it keeps it, so one long pedal press can't run through the lot. **B**
-  gives up on a step. The help line under the rows shows every axis as it moves, so you can check
-  the wheel over without leaving the page, and *Reset page* puts it all back to the device's own.
+- If anything comes out in the wrong place (a wheel we don't know), choose **Calibrate**. It
+  teaches the game your wheel one thing at a time: **both ends of its turn** (full left, then full
+  right), **each pedal** pressed to the floor, and then **a button for every control** - A, B, X,
+  Y, LB, RB, Back, Start, the two stick clicks and the two paddles. Each step shows what it saw
+  and waits for **A** before keeping it, so one long pedal press can't run through the lot, and
+  **B** stops there, keeping everything already set. The value column counts the steps off.
+- Measuring both ends of everything is what makes it exact: the wheel's centre and how far it
+  turns each way (it needn't be symmetrical, or reach the ends of its axis), which way round it
+  is, and how far each pedal really travels. It also means two pedals can share one axis, one
+  taking it positive and the other negative, as some wheels report them.
+- The help line under the rows shows every axis as it moves, so you can check the wheel over
+  without leaving the page, and *Reset page* puts it all back to the device's own.
 - The clutch is read and shown, but the game has no use for it.
 - A wheel whose buttons come out wrong: start the game with `NFSMW_WHEEL_LOG=1` to see each button
   as you press it (`[wheel] button 7 down`), then set them with, for example,

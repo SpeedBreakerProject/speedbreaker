@@ -318,6 +318,101 @@ namespace hid::wheelmap
         }
     };
 
+    // The wheel's own axis, as the two places it reads at full lock. Like a
+    // pedal, both ends are measured rather than assumed, which gives three
+    // things at once: the centre (halfway between them), how far it turns
+    // each way (a wheel needn't be symmetrical, or reach the ends of its
+    // axis), and which way round it is - a wheel whose axis runs backwards
+    // has its ends the other way about, and needs nothing else said.
+    struct Steering
+    {
+        int16_t left = -kAxisMax, right = kAxisMax;
+        bool ready = false;
+
+        constexpr void Start(int16_t fullLeft, int16_t fullRight)
+        {
+            left = fullLeft;
+            right = fullRight;
+            ready = fullLeft != fullRight;
+        }
+
+        // -1 (full left) to 1, before Steering Range, the deadzone and the
+        // response curve. Each side is measured against its own end, so an
+        // off-centre or lopsided wheel still reaches full lock both ways.
+        constexpr float Fraction(int16_t raw) const
+        {
+            const float centre = (float(left) + float(right)) * 0.5f;
+            const float toRight = float(right) - centre;
+            const float toLeft = float(left) - centre;
+            if (toRight == 0.0f || toLeft == 0.0f)
+                return 0.0f;
+            const float v = float(raw) - centre;
+            // Whichever side of centre the reading is on, against that side's end.
+            const float t = (v * toRight >= 0.0f) ? v / toRight : -(v / toLeft);
+            return std::clamp(t, -1.0f, 1.0f);
+        }
+    };
+
+    // The controls Calibrate can learn a button for, in the order it asks
+    // for them. The D-pad is left out: it comes from the hat, whose four
+    // bits mean the same on every joystick SDL reports.
+    enum class Control : uint8_t { A, B, X, Y, LB, RB, Back, Start, LS, RS, ShiftUp, ShiftDown, Count };
+    constexpr size_t kControlCount = size_t(Control::Count);
+
+    struct ControlInfo
+    {
+        Control control;
+        uint16_t button;   // Role::Button: which pad button it is
+        Role role;
+        const char* name;  // what Calibrate calls it
+    };
+
+    inline constexpr ControlInfo kControls[kControlCount] = {
+        { Control::A, button::A, Role::Button, "A" },
+        { Control::B, button::B, Role::Button, "B" },
+        { Control::X, button::X, Role::Button, "X" },
+        { Control::Y, button::Y, Role::Button, "Y" },
+        { Control::LB, button::LeftShoulder, Role::Button, "LB" },
+        { Control::RB, button::RightShoulder, Role::Button, "RB" },
+        { Control::Back, button::Back, Role::Button, "Back" },
+        { Control::Start, button::Start, Role::Button, "Start" },
+        { Control::LS, button::LeftThumb, Role::Button, "Left stick click" },
+        { Control::RS, button::RightThumb, Role::Button, "Right stick click" },
+        { Control::ShiftUp, 0, Role::ShiftUp, "Shift up" },
+        { Control::ShiftDown, 0, Role::ShiftDown, "Shift down" },
+    };
+
+    consteval bool ControlsInOrder()
+    {
+        for (size_t i = 0; i < kControlCount; i++)
+            if (size_t(kControls[i].control) != i)
+                return false;
+        return true;
+    }
+    static_assert(ControlsInOrder(), "one row per Control, in Control order");
+
+    // The model's buttons with the player's own on top: `assigned[i]` is the
+    // joystick button Calibrate recorded for Control(i), or -1 for none of
+    // its doing. A button the player gives to one control is taken off
+    // whatever else had it, so no press can mean two things.
+    inline std::vector<Binding> WithAssigned(std::span<const Binding> from, std::span<const int> assigned)
+    {
+        std::vector<Binding> out(from.begin(), from.end());
+        for (size_t i = 0; i < assigned.size() && i < kControlCount; i++)
+        {
+            const int index = assigned[i];
+            if (index < 0)
+                continue;
+            const ControlInfo& c = kControls[i];
+            std::erase_if(out, [&](const Binding& b) {
+                return b.index == index || (b.role == c.role && (c.role != Role::Button || b.button == c.button));
+            });
+            out.push_back({ index, c.button, c.role });
+        }
+        std::stable_sort(out.begin(), out.end(), [](const Binding& a, const Binding& b) { return a.index < b.index; });
+        return out;
+    }
+
     // An axis read the other way round (Settings > Wheel > Invert
     // Steering, or a wheel whose axis runs the opposite way): -32768 has no
     // positive twin, so it clamps to the end of the other side instead of
@@ -327,7 +422,8 @@ namespace hid::wheelmap
         return int16_t(-std::clamp(int(raw), -kAxisMax, kAxisMax));
     }
 
-    // The wheel's axis as the game's left stick, -1 (full left) to 1.
+    // The wheel as the game's left stick, -1 (full left) to 1, from the
+    // turn as a fraction of full lock (Steering::Fraction).
     //
     //   - `range` degrees of the wheel's turn reach full lock, out of the
     //     `full` degrees it turns altogether (either 0: all of it). We can't
@@ -339,9 +435,9 @@ namespace hid::wheelmap
     //   - `response` bends what's left: 1 is straight through, above 1 is
     //     gentler near the centre and sharper near full lock, below 1 the
     //     other way round.
-    inline float Steer(int16_t raw, int range, int full, float deadzone, float response)
+    inline float Steer(float turn, int range, int full, float deadzone, float response)
     {
-        float x = std::clamp(float(raw) / float(kAxisMax), -1.0f, 1.0f);
+        float x = std::clamp(turn, -1.0f, 1.0f);
         const float sign = x < 0 ? -1.0f : 1.0f;
         float m = std::abs(x);
         deadzone = std::clamp(deadzone, 0.0f, 0.95f);

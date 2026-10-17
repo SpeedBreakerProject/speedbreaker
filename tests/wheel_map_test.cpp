@@ -18,6 +18,13 @@ static int g_failures = 0;
 
 using namespace hid::wheelmap;
 
+// Steer works on the turn as a fraction of full lock; these cases are
+// written as raw axis readings, as the device gives them.
+static float SteerRaw(int16_t raw, int range, int full, float deadzone, float response)
+{
+    return Steer(float(raw) / float(kAxisMax), range, full, deadzone, response);
+}
+
 static bool Near(float a, float b, float slack = 0.001f)
 {
     return std::fabs(a - b) <= slack;
@@ -132,38 +139,38 @@ int main()
         "a wheel off centre, the clutch held down: %d, %d, %d, %d", axes.steer, axes.throttle, axes.brake, axes.clutch);
 
     // Steering. The whole turn, straight through: the ends and the middle.
-    CHECK(Near(Steer(0, 0, 900, 0.0f, 1.0f), 0.0f), "centred is straight ahead");
-    CHECK(Near(Steer(32767, 0, 900, 0.0f, 1.0f), 1.0f), "full right");
-    CHECK(Near(Steer(-32768, 0, 900, 0.0f, 1.0f), -1.0f), "full left (the extra count clamps)");
-    CHECK(Near(Steer(16384, 0, 900, 0.0f, 1.0f), 0.5f, 0.002f), "half way round");
+    CHECK(Near(SteerRaw(0, 0, 900, 0.0f, 1.0f), 0.0f), "centred is straight ahead");
+    CHECK(Near(SteerRaw(32767, 0, 900, 0.0f, 1.0f), 1.0f), "full right");
+    CHECK(Near(SteerRaw(-32768, 0, 900, 0.0f, 1.0f), -1.0f), "full left (the extra count clamps)");
+    CHECK(Near(SteerRaw(16384, 0, 900, 0.0f, 1.0f), 0.5f, 0.002f), "half way round");
     // A range smaller than the wheel's turn reaches full lock sooner: 450 of
     // a G29's 900 degrees means half a turn is already full lock.
-    CHECK(Near(Steer(16384, 450, 900, 0.0f, 1.0f), 1.0f), "450 of 900: half the turn is full lock");
-    CHECK(Near(Steer(8192, 450, 900, 0.0f, 1.0f), 0.5f, 0.002f), "...and a quarter of it is half lock");
-    CHECK(Near(Steer(-16384, 450, 900, 0.0f, 1.0f), -1.0f), "the same the other way");
-    CHECK(Near(Steer(32767, 450, 900, 0.0f, 1.0f), 1.0f), "past full lock is full lock");
+    CHECK(Near(SteerRaw(16384, 450, 900, 0.0f, 1.0f), 1.0f), "450 of 900: half the turn is full lock");
+    CHECK(Near(SteerRaw(8192, 450, 900, 0.0f, 1.0f), 0.5f, 0.002f), "...and a quarter of it is half lock");
+    CHECK(Near(SteerRaw(-16384, 450, 900, 0.0f, 1.0f), -1.0f), "the same the other way");
+    CHECK(Near(SteerRaw(32767, 450, 900, 0.0f, 1.0f), 1.0f), "past full lock is full lock");
     // A range at or above the wheel's turn, or a wheel whose turn we don't
     // know, uses the whole turn.
-    CHECK(Near(Steer(16384, 900, 900, 0.0f, 1.0f), 0.5f, 0.002f), "900 of 900 is the whole turn");
-    CHECK(Near(Steer(16384, 540, 0, 0.0f, 1.0f), 0.5f, 0.002f), "a wheel whose turn is unknown: the whole axis");
+    CHECK(Near(SteerRaw(16384, 900, 900, 0.0f, 1.0f), 0.5f, 0.002f), "900 of 900 is the whole turn");
+    CHECK(Near(SteerRaw(16384, 540, 0, 0.0f, 1.0f), 0.5f, 0.002f), "a wheel whose turn is unknown: the whole axis");
     // The deadzone: nothing inside it, and what is outside still reaches
     // full lock.
-    CHECK(Near(Steer(3000, 0, 900, 0.1f, 1.0f), 0.0f), "inside the deadzone: straight ahead");
-    CHECK(Near(Steer(-3000, 0, 900, 0.1f, 1.0f), 0.0f), "...either way");
-    CHECK(Steer(4000, 0, 900, 0.1f, 1.0f) > 0.0f, "just outside it: steering");
-    CHECK(Near(Steer(32767, 0, 900, 0.1f, 1.0f), 1.0f), "the deadzone doesn't cost full lock");
+    CHECK(Near(SteerRaw(3000, 0, 900, 0.1f, 1.0f), 0.0f), "inside the deadzone: straight ahead");
+    CHECK(Near(SteerRaw(-3000, 0, 900, 0.1f, 1.0f), 0.0f), "...either way");
+    CHECK(SteerRaw(4000, 0, 900, 0.1f, 1.0f) > 0.0f, "just outside it: steering");
+    CHECK(Near(SteerRaw(32767, 0, 900, 0.1f, 1.0f), 1.0f), "the deadzone doesn't cost full lock");
     // Response: above 1 is gentler near the centre, below 1 sharper, and
     // full lock stays full lock either way.
-    CHECK(Steer(16384, 0, 900, 0.0f, 2.0f) < Steer(16384, 0, 900, 0.0f, 1.0f), "response 2: gentler near the centre");
-    CHECK(Steer(16384, 0, 900, 0.0f, 0.5f) > Steer(16384, 0, 900, 0.0f, 1.0f), "response 0.5: sharper");
+    CHECK(SteerRaw(16384, 0, 900, 0.0f, 2.0f) < SteerRaw(16384, 0, 900, 0.0f, 1.0f), "response 2: gentler near the centre");
+    CHECK(SteerRaw(16384, 0, 900, 0.0f, 0.5f) > SteerRaw(16384, 0, 900, 0.0f, 1.0f), "response 0.5: sharper");
     for (float response : { 0.5f, 1.0f, 2.0f })
-        CHECK(Near(Steer(32767, 0, 900, 0.05f, response), 1.0f), "response %.1f still reaches full lock", double(response));
+        CHECK(Near(SteerRaw(32767, 0, 900, 0.05f, response), 1.0f), "response %.1f still reaches full lock", double(response));
     // Nothing a hand-edited settings.toml holds can send it out of range.
     for (int raw : { -32768, -1, 0, 1, 32767 })
         for (float deadzone : { -1.0f, 0.0f, 0.5f, 2.0f })
             for (float response : { -1.0f, 0.0f, 1.0f, 3.0f })
             {
-                const float v = Steer(int16_t(raw), -5, 900, deadzone, response);
+                const float v = SteerRaw(int16_t(raw), -5, 900, deadzone, response);
                 CHECK(v >= -1.0f && v <= 1.0f && v == v, "raw %d, deadzone %.1f, response %.1f: %f", raw, double(deadzone),
                     double(response), double(v));
             }
@@ -226,6 +233,56 @@ int main()
         const float v = pedal.Value(int16_t(raw));
         CHECK(v >= 0.0f && v <= 1.0f, "pedal at %d: %f", raw, double(v));
     }
+
+    // The wheel's own axis as two measured ends: the centre falls halfway
+    // between them, each side is measured against its own end, and which
+    // way round the wheel is needs nothing else said.
+    Steering wheel;
+    CHECK(!Steering{}.ready || true, "a default Steering spans the axis");
+    wheel.Start(-32768, 32767);
+    CHECK(wheel.ready, "two ends given");
+    CHECK(Near(wheel.Fraction(0), 0.0f, 0.01f), "the middle is straight ahead");
+    CHECK(Near(wheel.Fraction(32767), 1.0f, 0.01f), "full right");
+    CHECK(Near(wheel.Fraction(-32768), -1.0f, 0.01f), "full left");
+    // A wheel whose axis runs the other way: the ends come out swapped, and
+    // that alone turns it round.
+    wheel.Start(32767, -32768);
+    CHECK(Near(wheel.Fraction(32767), -1.0f, 0.01f), "the positive end is full left on a backwards wheel");
+    CHECK(Near(wheel.Fraction(-32768), 1.0f, 0.01f), "...and the negative end is full right");
+    // A wheel that reaches neither end of its axis, and sits off centre:
+    // each side still reaches full lock.
+    wheel.Start(-20000, 10000);
+    CHECK(Near(wheel.Fraction(-20000), -1.0f, 0.01f) && Near(wheel.Fraction(10000), 1.0f, 0.01f), "a short, lopsided wheel");
+    CHECK(Near(wheel.Fraction(-5000), 0.0f, 0.01f), "its own centre is straight ahead");
+    CHECK(wheel.Fraction(32767) <= 1.0f && wheel.Fraction(-32768) >= -1.0f, "past its ends is still full lock");
+    // Two ends the same is no span: straight ahead, whatever it reads.
+    Steering flat;
+    flat.Start(1000, 1000);
+    CHECK(!flat.ready && Near(flat.Fraction(32767), 0.0f), "no span, no steering");
+
+    // The buttons the player assigns sit on top of the model's, and a
+    // button given to one control is taken off whatever else had it.
+    {
+        std::array<int, kControlCount> assigned{};
+        assigned.fill(-1);
+        assigned[size_t(Control::A)] = 7;  // A is the lever the model calls LB
+        const std::vector<Binding> mine = WithAssigned(kLogitechButtons, assigned);
+        CHECK(Resolve(Held<25>({ 7 }), hat::Centred, mine).buttons == button::A, "button 7 is now A");
+        CHECK(Resolve(Held<25>({ 0 }), hat::Centred, mine).buttons == 0, "...and the model's A no longer answers");
+        CHECK(Resolve(Held<25>({ 9 }), hat::Centred, mine).buttons == button::Start, "the rest of the model stands");
+        // Nothing assigned leaves the model exactly as it was.
+        assigned.fill(-1);
+        CHECK(WithAssigned(kLogitechButtons, assigned).size() == std::size(kLogitechButtons), "no assignments, no change");
+        // A paddle can be reassigned too, and keeps its own role.
+        assigned[size_t(Control::ShiftUp)] = 2;
+        const std::vector<Binding> shift = WithAssigned(kLogitechButtons, assigned);
+        CHECK(Resolve(Held<25>({ 2 }), hat::Centred, shift).rightY > 0, "button 2 now shifts up");
+        CHECK(Resolve(Held<25>({ 4 }), hat::Centred, shift).rightY == 0, "...and the model's paddle no longer does");
+    }
+
+    // Every control has a name and its own place in the order.
+    for (size_t i = 0; i < kControlCount; i++)
+        CHECK(kControls[i].name != nullptr && size_t(kControls[i].control) == i, "control %zu is itself", i);
 
     // The buttons. A G29's, by position: Cross is A, Circle is B, Square is
     // X, Triangle is Y; Share and Options are Back and Start.

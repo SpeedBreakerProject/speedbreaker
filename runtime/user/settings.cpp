@@ -156,6 +156,16 @@ namespace settings
                      .env = env, .defaultValue = 0, .min = -32768, .max = 32767, .step = 1 };
         }
 
+        // The joystick button Settings > Wheel > Calibrate gave a pad
+        // control (hidden). -1: none, and the wheel's model decides.
+        constexpr Option WheelButton(Id id, const char* key, const char* label, const char* env)
+        {
+            return { .id = id, .category = Category::Wheel, .type = Type::Int, .apply = Apply::Live, .hidden = true,
+                     .table = "wheel", .key = key, .label = label,
+                     .description = "Which of the wheel's buttons this control is, as Calibrate recorded it.",
+                     .env = env, .defaultValue = -1, .min = -1, .max = 255, .step = 1 };
+        }
+
         // A Controls row's key: the key (user/key_names.h, by its name
         // there) that drives one Xbox 360 control. Two per control, the
         // second named <key>_2 with the same label. No environment
@@ -319,6 +329,20 @@ namespace settings
             WheelPoint(Id::BrakeFull, "brake_full", "Brake Pressed", "NFSMW_WHEEL_BRAKE_FULL"),
             WheelPoint(Id::ClutchRest, "clutch_rest", "Clutch at Rest", "NFSMW_WHEEL_CLUTCH_REST"),
             WheelPoint(Id::ClutchFull, "clutch_full", "Clutch Pressed", "NFSMW_WHEEL_CLUTCH_FULL"),
+            WheelPoint(Id::SteerLeft, "steer_left", "Steering Full Left", "NFSMW_WHEEL_STEER_LEFT"),
+            WheelPoint(Id::SteerRight, "steer_right", "Steering Full Right", "NFSMW_WHEEL_STEER_RIGHT"),
+            WheelButton(Id::ButtonA, "button_a", "A Button", "NFSMW_WHEEL_BUTTON_A"),
+            WheelButton(Id::ButtonB, "button_b", "B Button", "NFSMW_WHEEL_BUTTON_B"),
+            WheelButton(Id::ButtonX, "button_x", "X Button", "NFSMW_WHEEL_BUTTON_X"),
+            WheelButton(Id::ButtonY, "button_y", "Y Button", "NFSMW_WHEEL_BUTTON_Y"),
+            WheelButton(Id::ButtonLB, "button_lb", "LB Button", "NFSMW_WHEEL_BUTTON_LB"),
+            WheelButton(Id::ButtonRB, "button_rb", "RB Button", "NFSMW_WHEEL_BUTTON_RB"),
+            WheelButton(Id::ButtonBack, "button_back", "Back Button", "NFSMW_WHEEL_BUTTON_BACK"),
+            WheelButton(Id::ButtonStart, "button_start", "Start Button", "NFSMW_WHEEL_BUTTON_START"),
+            WheelButton(Id::ButtonLS, "button_ls", "Left Stick Click", "NFSMW_WHEEL_BUTTON_LS"),
+            WheelButton(Id::ButtonRS, "button_rs", "Right Stick Click", "NFSMW_WHEEL_BUTTON_RS"),
+            WheelButton(Id::ButtonShiftUp, "button_shift_up", "Shift Up", "NFSMW_WHEEL_BUTTON_SHIFT_UP"),
+            WheelButton(Id::ButtonShiftDown, "button_shift_down", "Shift Down", "NFSMW_WHEEL_BUTTON_SHIFT_DOWN"),
             // Controls (Settings > Controls; hid/key_map.h reads them). The
             // defaults are v0.1.4's keys: the arrows steer as well as A
             // and D, and are the D-pad; O/L/K/; are the right stick.

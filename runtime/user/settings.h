@@ -85,6 +85,17 @@ namespace settings
         ThrottleRest, ThrottleFull,
         BrakeRest, BrakeFull,
         ClutchRest, ClutchFull,
+        // The wheel's own two ends, as Calibrate measured them at full lock
+        // each way (hidden; equal values: not measured). Between them they
+        // give the centre, how far it turns each way, and which way round
+        // it is.
+        SteerLeft, SteerRight,
+        // The joystick button Calibrate gave each pad control, in
+        // hid/wheel_map.h's Control order (hidden; -1: none of the
+        // player's doing, so the wheel's model decides).
+        ButtonA, ButtonB, ButtonX, ButtonY,
+        ButtonLB, ButtonRB, ButtonBack, ButtonStart,
+        ButtonLS, ButtonRS, ButtonShiftUp, ButtonShiftDown,
         // Controls (the [keys] table): the two keyboard keys that drive
         // each Xbox 360 control, as key codes (user/key_names.h); the
         // second of a pair is always the first's id + 1 (hid/key_map.h

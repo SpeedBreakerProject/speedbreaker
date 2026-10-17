@@ -24,10 +24,16 @@ it's built into the game).
   back to centre as hard as Centering Force says, and passes on the knocks the game asks for.
   Where a system can't drive a particular wheel, the log says so and the two rows that need the
   motors say so, and steering, the pedals and the buttons work regardless.
-- **Calibrate** asks for one thing at a time - turn the wheel left, then each pedal - shows what
-  it saw, and waits for A before keeping it. The axis that moves furthest wins rather than the
-  first one to twitch, so a wheel whose pedals come out in the wrong places is put right in a few
-  presses, and one long pedal press can't be taken for every pedal at once.
+- **Calibrate** teaches the game your wheel, one thing at a time: both ends of its turn, each
+  pedal pressed to the floor, then a button for every control. Each step shows what it saw and
+  waits for A before keeping it, and B stops there keeping what is already set. The axis that
+  moves furthest wins rather than the first one to twitch, so one long pedal press can't be taken
+  for every pedal at once.
+- Measuring both ends of everything is what makes it exact: the wheel's centre and how far it
+  turns each way (it needn't be symmetrical, or reach the ends of its axis), which way round it
+  is, and how far each pedal really travels - so a pedal that stops short still reads as floored.
+  Two pedals can even share one axis, one taking it positive and the other negative, as some
+  wheels report them. What Calibrate measures is kept for the next run.
 
 ### More about it
 
@@ -44,8 +50,12 @@ it's built into the game).
   reports an axis only when it moves, so a pedal nobody has touched reads 0 whatever it is really
   sitting at. A pedal whose resting place is not known yet reads nothing at all until its axis
   speaks for itself, rather than reading as floored.
-- A wheel that turns the other way is put right by Calibrate's first step, or by Invert Steering
-  by hand.
+- A wheel that turns the other way needs nothing said: its two ends come out swapped, which is
+  all the direction there is. Invert Steering is still there to flip it by hand.
+- Nothing reads as pressed before the device has said anything. SDL reports an axis only when it
+  moves, and the 0 it reads until then is not where the pedal is: on a wheel whose pedals run
+  +32767 to -32768 that 0 is halfway, so both triggers used to sit at half pressed until each
+  pedal had been touched once.
 - The clutch is read and shown on the page; the game has no use for it.
 - The log says which wheel was found, what its force feedback can do and which axis is which.
   `NFSMW_WHEEL_LOG=1` adds every button press (`[wheel] button 7 down`) and what the axes read,
