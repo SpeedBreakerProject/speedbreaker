@@ -94,6 +94,8 @@ namespace settings
         // Advanced
         AsyncShaders,
         PerformanceOverlay,
+        // Game (the [game] table)
+        GameLanguage,  // game/language.cpp: the disc's language (a PAL disc's data)
         Count
     };
     constexpr size_t kCount = size_t(Id::Count);
@@ -126,6 +128,16 @@ namespace settings
     // Anisotropy: 1 (off), 2, 4, 8, 16, or one of these.
     constexpr int32_t kAnisotropyAuto = 0;   // 16x on a discrete GPU or an M-series iPad, 4x on other integrated ones
     constexpr int32_t kAnisotropyGame = -1;  // each texture's own setting, as on the 360
+
+    // Game Language: the game's own language index (its LANGUAGES\ table),
+    // which the Xbox 360 executable fixes per SKU at boot: the USA disc's is
+    // English (0), Spain's is Spanish (4). Anything but English also takes
+    // the PAL movies (_pal.wmv). See game/language.cpp.
+    enum class GameLanguage : int32_t
+    {
+        English = 0, French = 1, German = 2, Italian = 3, Spanish = 4,
+        Dutch = 5, Swedish = 6, Danish = 7, Polish = 12, Finnish = 13,
+    };
 
     struct EnumEntry
     {

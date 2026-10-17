@@ -94,6 +94,21 @@ namespace settings
         // to the screen); elsewhere the window's size is the player's.
         constexpr bool kPresentScaleHidden = !kFullscreenHidden;
 
+        // A language other than English needs that language's data: the
+        // NFS folder (and, for its movies, the Movies folder) of a PAL disc.
+        constexpr EnumEntry kLanguageEntries[] = {
+            { int32_t(GameLanguage::English), "english", "English (USA disc)" },
+            { int32_t(GameLanguage::French), "french", "French (PAL data)" },
+            { int32_t(GameLanguage::German), "german", "German (PAL data)" },
+            { int32_t(GameLanguage::Italian), "italian", "Italian (PAL data)" },
+            { int32_t(GameLanguage::Spanish), "spanish", "Spanish (PAL data)" },
+            { int32_t(GameLanguage::Dutch), "dutch", "Dutch (PAL data)" },
+            { int32_t(GameLanguage::Swedish), "swedish", "Swedish (PAL data)" },
+            { int32_t(GameLanguage::Danish), "danish", "Danish (PAL data)" },
+            { int32_t(GameLanguage::Polish), "polish", "Polish (PAL data)" },
+            { int32_t(GameLanguage::Finnish), "finnish", "Finnish (PAL data)" },
+        };
+
         constexpr EnumEntry kAspectEntries[] = {
             { int32_t(AspectMode::Auto), "auto", "Fill Screen" },
             { int32_t(AspectMode::Widescreen), "16:9", "16:9" },
@@ -300,6 +315,11 @@ namespace settings
               .table = "advanced", .key = "performance_overlay", .label = "Performance Overlay",
               .description = "Show the frame rate and frame time in a corner of the screen.",
               .env = "NFSMW_PERF_OVERLAY", .defaultValue = 0 },
+            // Game
+            { .id = Id::GameLanguage, .category = Category::Advanced, .type = Type::Enum, .apply = Apply::Restart,
+              .table = "game", .key = "language", .label = "Game Language",
+              .description = "The language of the game's text, speech and movies. Anything but English needs that language's files from a PAL disc in the game's NFS and Movies folders. Applies at the next launch.",
+              .env = "NFSMW_LANGUAGE", .defaultValue = double(GameLanguage::English), .entries = kLanguageEntries },
         };
         static_assert(std::size(kOptions) == kCount, "one row per settings::Id");
 
