@@ -197,6 +197,11 @@ sb_test(settings_keys_test SOURCES ${RT}/user/settings.cpp)
 target_include_directories(settings_keys_test SYSTEM PRIVATE ${ROOT}/tools/XenonRecomp/thirdparty/tomlplusplus/include)
 # The keyboard's controls and how held keys become a pad (hid/key_map.h), header only.
 sb_test(key_map_test)
+# A USB steering wheel as the pad (hid/wheel_map.h, header only): which
+# joystick is a wheel, which of its axes is the wheel and which are its
+# pedals, the steering curve, the pedals' travel, the buttons and paddles,
+# NFSMW_WHEEL_BUTTONS, and the force-feedback levels.
+sb_test(wheel_map_test)
 # Check for Updates' logic: versions, GitHub's JSON, curl's output and the
 # release notes (update/check.cpp, self-contained).
 sb_test(update_check_test SOURCES ${RT}/update/check.cpp)

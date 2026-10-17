@@ -4,6 +4,46 @@ What changed in each SpeedBreaker release, newest first. Each release's notes on
 its entry here, and the game shows the entry once, the first time a new version starts (offline:
 it's built into the game).
 
+## v0.1.7
+
+### What's new
+
+- **USB steering wheels.** Plug one in and it plays the game: the wheel steers, the pedals are
+  the triggers, the paddles shift gears (the game shifts with the right stick), and Share +
+  Options opens the settings, as Back + Start does on a controller. The Logitech G29 is the wheel
+  this was written for; its family (G920, G923, G27, G25, Driving Force GT and Pro) is known by
+  name too, and any other wheel SDL sees is used as best the game can work it out. A wheel is used
+  instead of a controller while both are plugged in, and one can be plugged in or taken away at
+  any time.
+- **Settings > Wheel**, which appears while a wheel is plugged in: Steering Wheel (on or off),
+  Steering Range (how much of the wheel's turn reaches full lock, 540 degrees of a G29's 900 by
+  default), Steering Deadzone, Steering Response, Force Feedback, Centering Force, and Pedals.
+- Force feedback goes to the wheel where the system can drive its motors: on SteamOS and other
+  Linux systems the wheel pushes back and centres itself, with the knocks the game asks for. A
+  Mac has no driver for these wheels, so a wheel stays slack there - steering, the pedals and the
+  buttons all work, and the page says as much on the two rows that need the motors.
+
+### More about it
+
+- The wheel brings its own steering curve, so Settings > Input's stick deadzone is not applied to
+  it: a wheel is precise around the centre, and nothing of that is thrown away. Settings > Wheel >
+  Steering Deadzone is there for a worn wheel, and starts at 0.
+- Which axis is the wheel and which are the pedals comes from the wheel itself: the axis resting
+  centred is the wheel, and the ones their springs hold at one end are the pedals, which is enough
+  for a wheel nobody has heard of. Where that puts the pedals in the wrong places, Settings >
+  Wheel > Pedals asks you to press each one, and remembers. The help line under the rows shows
+  every axis as it moves.
+- A pedal's travel is read from where it rests when the game starts, so a wheel that reports its
+  pedals the other way round works without being told.
+- The clutch is read and shown on the page; the game has no use for it.
+- The log says which wheel was found, what it can do and which axis is which.
+  `NFSMW_WHEEL_LOG=1` adds every button press (`[wheel] button 7 down`) and what the axes read,
+  for a wheel whose buttons come out wrong; `NFSMW_WHEEL_BUTTONS="0=B,2=A,8=BACK,9=START"` sets
+  them for that run. Every row of the page has its own variable too (`NFSMW_WHEEL`,
+  `NFSMW_STEERING_RANGE`, `NFSMW_FORCE_FEEDBACK`, and so on).
+- A wheel drives the settings menu as a controller does (its D-pad, A, B, and the shoulder
+  buttons for pages), which ImGui takes only from gamepads: the game feeds them to it itself.
+
 ## v0.1.6
 
 ### What's new

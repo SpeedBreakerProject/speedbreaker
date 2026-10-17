@@ -3,6 +3,8 @@
 #include "ui.h"
 #include "cursor_idle.h"
 
+#include <hid/wheel.h>       // the settings chord and the menus from a steering wheel
+#include <hid/wheel_map.h>   // ...which buttons those are
 #include <kernel/xam.h>
 #include <report/report.h>
 #include <user/settings.h>
@@ -121,6 +123,64 @@ namespace ui
             bool back = false, start = false, fired = false;
         };
         std::unordered_map<SDL_JoystickID, Chord> s_chords;
+
+        // One of `which`'s two chord buttons went down or up. True when
+        // that opened or closed the menu, so the event is spent. A steering
+        // wheel comes through here too (it is a joystick, not a gamepad:
+        // hid/wheel.h), on the same state as a controller's.
+        bool ChordButton(SDL_JoystickID which, bool back, bool down)
+        {
+            Chord& chord = s_chords[which];
+            if (back)
+                chord.back = down;
+            else
+                chord.start = down;
+            if (!chord.back && !chord.start)
+                chord.fired = false;
+            if (s_modal)
+                return false;
+            if (chord.back && chord.start && !chord.fired)
+            {
+                chord.fired = true;
+                s_settingsOpen ? CloseSettings() : OpenSettings();
+                return true;
+            }
+            // In the menu, Start or Back alone closes it (and counts as the
+            // chord, so the other button of a Back + Start press can't reopen it).
+            if (down && s_settingsOpen && !chord.fired)
+            {
+                chord.fired = true;
+                CloseSettings();
+                return true;
+            }
+            return false;
+        }
+
+        // A steering wheel's buttons as the menus' navigation, which ImGui
+        // takes from gamepads alone: fed after the backend's own frame, so
+        // an idle controller beside the wheel can't cancel them. Only what
+        // the menus use, and only on a change.
+        void FeedWheelNav()
+        {
+            using namespace hid::wheelmap::button;
+            static const std::pair<uint16_t, ImGuiKey> keys[] = {
+                { DpadUp, ImGuiKey_GamepadDpadUp }, { DpadDown, ImGuiKey_GamepadDpadDown },
+                { DpadLeft, ImGuiKey_GamepadDpadLeft }, { DpadRight, ImGuiKey_GamepadDpadRight },
+                { A, ImGuiKey_GamepadFaceDown }, { B, ImGuiKey_GamepadFaceRight },
+                { X, ImGuiKey_GamepadFaceLeft }, { Y, ImGuiKey_GamepadFaceUp },
+                { LeftShoulder, ImGuiKey_GamepadL1 }, { RightShoulder, ImGuiKey_GamepadR1 },
+                { Start, ImGuiKey_GamepadStart }, { Back, ImGuiKey_GamepadBack },
+            };
+            static uint16_t was = 0;
+            const uint16_t held = hid::wheel::HeldButtons();
+            if (held == was)
+                return;
+            ImGuiIO& io = ImGui::GetIO();
+            for (const auto& [bit, key] : keys)
+                if ((held & bit) != (was & bit))
+                    io.AddKeyEvent(key, (held & bit) != 0);
+            was = held;
+        }
 
         // A three-finger tap on a touchscreen (an iPhone's or iPad's, the
         // Steam Deck's) opens and closes the settings menu, as F1 does: the
@@ -682,38 +742,34 @@ namespace ui
         case SDL_EVENT_GAMEPAD_BUTTON_DOWN:
         case SDL_EVENT_GAMEPAD_BUTTON_UP:
         {
-            bool down = e.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN;
-            Chord& chord = s_chords[e.gbutton.which];
-            if (e.gbutton.button == SDL_GAMEPAD_BUTTON_BACK)
-                chord.back = down;
-            else if (e.gbutton.button == SDL_GAMEPAD_BUTTON_START)
-                chord.start = down;
-            else
+            if (e.gbutton.button != SDL_GAMEPAD_BUTTON_BACK && e.gbutton.button != SDL_GAMEPAD_BUTTON_START)
                 break;
-            if (!chord.back && !chord.start)
-                chord.fired = false;
-            if (s_modal)
+            if (ChordButton(e.gbutton.which, e.gbutton.button == SDL_GAMEPAD_BUTTON_BACK,
+                    e.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN))
+                return;
+            break;
+        }
+        case SDL_EVENT_JOYSTICK_BUTTON_DOWN:
+        case SDL_EVENT_JOYSTICK_BUTTON_UP:
+        {
+            // A steering wheel's own Back and Start (hid/wheel.h). Every
+            // other joystick's buttons, and a gamepad's (which arrive as
+            // gamepad events as well), get nothing from ButtonFor.
+            const uint16_t bit = hid::wheel::ButtonFor(e.jbutton.which, e.jbutton.button);
+            if (bit != hid::wheelmap::button::Back && bit != hid::wheelmap::button::Start)
                 break;
-            if (chord.back && chord.start && !chord.fired)
-            {
-                chord.fired = true;
-                s_settingsOpen ? CloseSettings() : OpenSettings();
+            if (ChordButton(e.jbutton.which, bit == hid::wheelmap::button::Back,
+                    e.type == SDL_EVENT_JOYSTICK_BUTTON_DOWN))
                 return;
-            }
-            // In the menu, Start or Back alone closes it (and counts as the
-            // chord, so the other button of a Back + Start press can't reopen it).
-            if (down && s_settingsOpen && !chord.fired)
-            {
-                chord.fired = true;
-                CloseSettings();
-                return;
-            }
             break;
         }
         case SDL_EVENT_GAMEPAD_ADDED:
         case SDL_EVENT_GAMEPAD_REMOVED:
             s_chords.erase(e.gdevice.which);
             forward = true;  // the backend re-opens its controllers
+            break;
+        case SDL_EVENT_JOYSTICK_REMOVED:
+            s_chords.erase(e.jdevice.which);
             break;
         case SDL_EVENT_FINGER_DOWN:
         case SDL_EVENT_FINGER_MOTION:
@@ -979,6 +1035,7 @@ namespace ui
             return false;
         ImGui_ImplVulkan_NewFrame();
         ImGui_ImplSDL3_NewFrame();
+        FeedWheelNav();  // after the backend's gamepads, so the wheel has the last word
         // SDL gave the window's size and pixels; the UI is drawn into the
         // swapchain, which can be smaller (iOS's present scale) and, for a
         // moment, another shape (a view SDL turned portrait while it is

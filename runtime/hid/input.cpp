@@ -1,7 +1,9 @@
 // SpeedBreaker runtime. GPL-3.0-or-later (see COPYING). See input.h.
+// A steering wheel's own side of this is hid/wheel.cpp.
 #include <stdafx.h>
 #include "input.h"
 #include "key_map.h"
+#include "wheel.h"
 #include <cpu/guest_time.h>
 #include <kernel/function.h>
 #include <ui/ui.h>
@@ -414,9 +416,15 @@ namespace
         }
         int count = 0;
         SDL_JoystickID* ids = SDL_GetGamepads(&count);
-        if (ids && count > 0)
+        // A wheel SDL happens to have a gamepad mapping for belongs to the
+        // wheel, not to this path: one device, one owner (hid/wheel.h).
+        SDL_JoystickID pick = 0;
+        for (int i = 0; ids && i < count && !pick; i++)
+            if (!wheel::Owns(ids[i]))
+                pick = ids[i];
+        if (pick)
         {
-            s_gamepad = SDL_OpenGamepad(ids[0]);
+            s_gamepad = SDL_OpenGamepad(pick);
             if (s_gamepad)
             {
                 // What it can do: a pad without motors takes rumble and ignores it.
@@ -457,7 +465,7 @@ namespace
             return;
         s_noControllerAt = 0;
         // (NFSMW_INPUT_SCRIPT is the controller of an automated run.)
-        if (s_gamepad || SDL_HasKeyboard() || !s_script.empty())
+        if (s_gamepad || wheel::Playing() || SDL_HasKeyboard() || !s_script.empty())
             return;
         fprintf(stderr, "[input] no controller: %s\n", s_noControllerText);
         ui::Toast(s_noControllerText, 10.0);
@@ -510,6 +518,10 @@ namespace hid
         fprintf(stderr, "[input] stick deadzone %.2f, trigger deadzone %.2f\n", settings::GetFloat(settings::Id::StickDeadzone),
             settings::GetFloat(settings::Id::TriggerDeadzone));
         AttachVirtualPad();
+        // A steering wheel (hid/wheel.h), unless this run has the test's
+        // own controller: then that is the only device.
+        if (!s_virtualPad)
+            wheel::Initialize();
         OpenFirstGamepad();
         std::lock_guard lock(s_mutex);
         s_deviceConnected = true;  // the keyboard always counts as controller 0
@@ -524,11 +536,12 @@ namespace hid
 
     void HandleEvent(const SDL_Event& e)
     {
+        wheel::HandleEvent(e);  // a wheel coming or going
         if (e.type == SDL_EVENT_GAMEPAD_ADDED)
         {
             OpenFirstGamepad();
 #if defined(__APPLE__) && TARGET_OS_IOS
-            if (s_gamepad)
+            if (s_gamepad || wheel::Playing())
                 WithdrawNoControllerNotice();
 #endif
         }
@@ -539,7 +552,7 @@ namespace hid
             fprintf(stderr, "[input] gamepad removed\n");
             OpenFirstGamepad();
 #if defined(__APPLE__) && TARGET_OS_IOS
-            if (!s_gamepad)
+            if (!s_gamepad && !wheel::Playing())
                 NoControllerNoticeIn(1'000'000'000, kControllerGone);
 #endif
         }
@@ -551,6 +564,7 @@ namespace hid
 
     void Shutdown()
     {
+        wheel::Shutdown();
         if (s_gamepad)
         {
             SDL_RumbleGamepad(s_gamepad, 0, 0, 0);
@@ -565,6 +579,7 @@ namespace hid
         // stop it now rather than buzz on for a game that stands still.
         if (s_gamepad)
             SDL_RumbleGamepad(s_gamepad, 0, 0, 0);
+        wheel::Suspend();
     }
 
     void Resume()
@@ -592,7 +607,27 @@ namespace hid
         const std::string padSteps = StepVirtualPad();
         const float deadzone = settings::GetFloat(settings::Id::StickDeadzone);
         const float triggerDeadzone = settings::GetFloat(settings::Id::TriggerDeadzone);
-        if (s_gamepad)
+        // A steering wheel first, while one is plugged in and Settings >
+        // Wheel has it on: it brings its own steering curve and its pedals
+        // their own calibration (hid/wheel_map.h), so the stick's radial
+        // deadzone has nothing to do here. Its paddles push the right stick
+        // up and down, which is how the game shifts gears.
+        wheel::Reading wheelRead;
+        const bool onWheel = wheel::Sample(wheelRead);
+        if (onWheel)
+        {
+            p.buttons = uint16_t(wheelRead.buttons & ~uint16_t(XAMINPUT_GAMEPAD_BACK));
+            padBack = wheelRead.back;
+            if (PadBackForGame(padBack, wheelRead.start))
+                p.buttons |= XAMINPUT_GAMEPAD_BACK;
+            lx = wheelRead.steer;
+            ry = float(wheelRead.rightY) / 32767.0f;
+            lt = wheelRead.brake;
+            rt = wheelRead.throttle;
+            rawX = lx;
+            rawY = ly;
+        }
+        else if (s_gamepad)
         {
             static const std::pair<SDL_GamepadButton, uint16_t> map[] = {
                 { SDL_GAMEPAD_BUTTON_SOUTH, XAMINPUT_GAMEPAD_A }, { SDL_GAMEPAD_BUTTON_EAST, XAMINPUT_GAMEPAD_B },
@@ -656,7 +691,7 @@ namespace hid
         p.ry = ToShort(ry);
         p.leftTrigger = Trigger(lt, triggerDeadzone);
         p.rightTrigger = Trigger(rt, triggerDeadzone);
-        if (s_gamepad)
+        if (s_gamepad || onWheel)
             LogStick(rawX, rawY, lx, ly, rawLt, rawRt, p.leftTrigger, p.rightTrigger);
         if (!padSteps.empty())
             fprintf(stderr, "[input] virtual pad %s: left stick raw (%+.4f, %+.4f) -> game (%d, %d), right (%d, %d); "
@@ -717,6 +752,11 @@ namespace hid
             low = high = 0;
         if (rumble && s_gamepad)
             SDL_RumbleGamepad(s_gamepad, low, high, low || high ? 5000 : 0);
+        // The wheel's own force feedback: every frame, since Settings >
+        // Wheel > Force Feedback and Centering Force can change under it
+        // without the game asking for anything new.
+        wheel::Rumble(low, high, vibration);
+        wheel::Update();
     }
 }
 

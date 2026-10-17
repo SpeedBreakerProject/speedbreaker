@@ -75,8 +75,10 @@ and a settings menu you can open mid-race.
   FSR 1 upscaling, a Brightness setting and up to 16x anisotropic filtering are also available.
 - **A guided installer.** It finds your disc image, checks that it is the right game, and
   verifies all 49 files as it copies them. An interrupted install never leaves a broken game.
-- **Your controller, or the keyboard.** Controllers work as an Xbox 360 pad, with hot-plugging
-  and rumble support. Every keyboard control can be reassigned in the settings.
+- **Your controller, the keyboard, or a steering wheel.** Controllers work as an Xbox 360 pad,
+  with hot-plugging and rumble support. A USB wheel steers and brakes as a wheel should, with its
+  own steering range and its paddles shifting gears (the Logitech G29 and its family by name).
+  Every keyboard control can be reassigned in the settings.
 - **A settings menu that pauses the game.** Open it with F1, Back + Start, or a three-finger
   tap. Every change applies at once, and *Quit Game* leaves the game from a controller too.
 - **Suspend and resume on iPhone and iPad.** Switch away and the game freezes; come back and it
@@ -370,12 +372,47 @@ is B, Square is X and Triangle is Y.
   back, and *Reset page* restores this whole table. A key may drive several controls, as the
   arrows do. There is no mouse control in game.
 
+### Steering wheels
+
+Plug in a USB steering wheel and it plays the game: it is used instead of a controller, and
+**Settings > Wheel** appears while it is plugged in. The **Logitech G29** is the wheel this was
+written for; its family (G920, G923, G27, G25, Driving Force GT and Pro) is known by name too, and
+any other wheel SDL sees is used as best we can work it out.
+
+| Xbox 360 control | Steering wheel |
+|---|---|
+| Left stick | The wheel itself |
+| Right trigger | The throttle pedal |
+| Left trigger | The brake pedal |
+| Right stick up / down | The paddles: the game shifts gears with the right stick |
+| A / B / X / Y | Cross / Circle / Square / Triangle, by position |
+| LB / RB | The two levers behind the paddles (L2 and R2) |
+| D-pad | The wheel's D-pad |
+| Start / Back | Options / Share, so **Share + Options** opens the settings |
+
+- **Settings > Wheel** has Steering Range (how much of the wheel's turn reaches full lock; 540
+  degrees of a G29's 900 by default), Steering Deadzone, Steering Response (gentler or sharper
+  near the centre), Force Feedback, Centering Force, and **Pedals**.
+- **Force feedback needs the system to drive the wheel's motors.** On SteamOS and other Linux
+  systems the kernel does that, so the wheel pushes back and centres itself. **macOS has no driver
+  for these wheels, so a wheel stays slack there** - steering, the pedals and the buttons all
+  work, and the log and the two force-feedback rows say so.
+- If the pedals come out in the wrong places (a wheel we don't know), choose **Pedals** and press
+  each one as it asks. The help line under the rows shows every axis as it moves, so you can check
+  the wheel over without leaving the page. *Reset page* puts the pedals back to the device's own.
+- The clutch is read and shown, but the game has no use for it.
+- A wheel whose buttons come out wrong: start the game with `NFSMW_WHEEL_LOG=1` to see each button
+  as you press it (`[wheel] button 7 down`), then set them with, for example,
+  `NFSMW_WHEEL_BUTTONS="0=B,2=A,8=BACK,9=START,4=SHIFTUP,5=SHIFTDOWN"`. Please report what your
+  wheel needed, so the defaults can take it.
+
 **To open the settings:**
 
 | Device | Open or close the settings |
 |---|---|
 | Keyboard | **F1** (on a Mac also **Cmd+,**) |
 | Xbox-style controller | **Back + Start** (View + Menu) together |
+| Steering wheel | **Share + Options** (the two small buttons) |
 | Steam Deck | Hold **View**, press **Menu** |
 | Steam Frame | **Menu + View** together |
 | iPhone and iPad touchscreen | **Three-finger tap** |
@@ -428,6 +465,18 @@ Vibration (On).
 **Controls:** the keyboard keys for each Xbox 360 control, two per control, as in the table under
 [Controls](#controls). The keys are saved by name in `settings.toml`'s `[keys]` table (`w`,
 `left_shift`, `keypad_1`, or `none`; `runtime/user/key_names.h` lists them).
+
+**Wheel** (only while a steering wheel is plugged in; see [Steering wheels](#steering-wheels)):
+
+| Option | Choices | Default |
+|---|---|---|
+| Steering Wheel | On / Off | On. Off ignores the wheel, and a controller or the keyboard plays. |
+| Steering Range | 180 to 900 degrees, or All | 540. How much of the wheel's turn reaches full lock: less is quicker to steer. The degrees assume a 900-degree wheel, as the G29 is; All uses the whole turn whatever the wheel. |
+| Steering Deadzone | 0% to 30% | 0%. A wheel needs none; raise it only if the car pulls to one side. |
+| Steering Response | 0.50 to 2.00 | 1.00, in step with the wheel. Higher is gentler near the centre and sharper near full lock. |
+| Force Feedback | 0% to 100% | 100%. How strongly the knocks the game asks for reach the wheel. Needs a wheel whose motors this system can drive, and Vibration (Input) turns it off too. |
+| Centering Force | 0% to 100% | 50%. How hard the wheel pulls back to straight ahead. Needs the motors too. |
+| Pedals | Assign | Which axis each pedal is. Worked out from the wheel; press A only if they come out wrong. |
 
 **Advanced:** Asynchronous Shaders (On: an object is skipped for a frame or two while its shader
 compiles, instead of the game stuttering), Performance Overlay (Off: fps, frame times, and CPU
