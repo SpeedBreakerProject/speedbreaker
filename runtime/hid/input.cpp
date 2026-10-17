@@ -853,6 +853,12 @@ namespace
     }
 }
 
+// XInput's device subtypes, of which xbox.h names only the gamepad. The
+// Xbox 360 version of the game supports racing wheels and asks what is
+// connected through XamInputGetCapabilities (its own code queries it in two
+// places), so a wheel says so for itself instead of passing as a pad.
+constexpr uint8_t XAMINPUT_DEVSUBTYPE_WHEEL = 0x02;
+
 uint32_t XamInputGetCapabilities(uint32_t userIndex, uint32_t flags, XAMINPUT_CAPABILITIES* caps)
 {
     bool scripted = !s_script.empty();
@@ -861,9 +867,18 @@ uint32_t XamInputGetCapabilities(uint32_t userIndex, uint32_t flags, XAMINPUT_CA
         if ((userIndex != 0 && userIndex != 0xFF) || !(s_deviceConnected || scripted))
             return ERROR_DEVICE_NOT_CONNECTED;
     }
+    // A wheel in play says so (Settings > Wheel > Tell the Game It's a
+    // Wheel); the type stays the gamepad one, as it is for every XInput
+    // device, and only the subtype differs.
+    const bool asWheel = hid::wheel::Playing() && settings::GetBool(settings::Id::ReportWheel);
     memset(caps, 0, sizeof(*caps));
     caps->Type = XAMINPUT_DEVTYPE_GAMEPAD;
-    caps->SubType = XAMINPUT_DEVSUBTYPE_GAMEPAD;
+    caps->SubType = asWheel ? XAMINPUT_DEVSUBTYPE_WHEEL : XAMINPUT_DEVSUBTYPE_GAMEPAD;
+    // What the device has stays the pad's whole set, whichever subtype it
+    // reports: the wheel's paddles reach the game as the right stick and
+    // its buttons as the pad's, so the game is told those exist. A real
+    // 360 wheel reports no right stick at all, and the game would have no
+    // reason to read one.
     caps->Gamepad.wButtons = ByteSwap(uint16_t(0xF3FF));
     caps->Gamepad.bLeftTrigger = 0xFF;
     caps->Gamepad.bRightTrigger = 0xFF;
@@ -871,6 +886,14 @@ uint32_t XamInputGetCapabilities(uint32_t userIndex, uint32_t flags, XAMINPUT_CA
         *v = ByteSwap(int16_t(0xFFC0));
     caps->Vibration.wLeftMotorSpeed = 0xFFFF;
     caps->Vibration.wRightMotorSpeed = 0xFFFF;
+    // On the first ask, and on any change: whether the game looks at all,
+    // and what it was told.
+    static int told = -1;
+    if (int(caps->SubType) != told)
+    {
+        told = caps->SubType;
+        fprintf(stderr, "[input] the game asked what is connected: told it a %s\n", asWheel ? "racing wheel" : "gamepad");
+    }
     return ERROR_SUCCESS;
 }
 

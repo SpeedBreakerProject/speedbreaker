@@ -75,6 +75,7 @@ namespace settings
         SteeringResponse,
         ForceFeedback,
         CenteringForce,
+        ReportWheel,
         WheelSteerAxis,     // hidden
         WheelThrottleAxis,  // hidden
         WheelBrakeAxis,     // hidden

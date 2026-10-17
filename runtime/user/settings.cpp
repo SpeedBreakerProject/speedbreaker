@@ -316,6 +316,10 @@ namespace settings
               .table = "wheel", .key = "centering_force", .label = "Centering Force",
               .description = "How hard the wheel pulls back to straight ahead. A wheel with no spring of its own needs this; it needs force feedback too.",
               .env = "NFSMW_WHEEL_CENTERING", .defaultValue = 50, .min = 0, .max = 100, .step = 5, .unit = "%" },
+            { .id = Id::ReportWheel, .category = Category::Wheel, .type = Type::Bool, .apply = Apply::Live,
+              .table = "wheel", .key = "report_wheel", .label = "Tell the Game It's a Wheel",
+              .description = "Say a racing wheel is connected, which the Xbox 360 game supports, instead of a controller. Off: it sees a controller. The game may only ask once, as it starts.",
+              .env = "NFSMW_REPORT_WHEEL", .defaultValue = 1 },
             // The axes Settings > Wheel > Pedals assigned, as the device
             // numbers them; -1: work them out from the device itself
             // (hid/wheel_map.h's Detect).

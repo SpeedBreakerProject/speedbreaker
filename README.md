@@ -392,8 +392,11 @@ other wheel SDL sees is used as best we can work it out.
 | Start / Back | Options / Share, so **Share + Options** opens the settings |
 
 - **Settings > Wheel** has Steering Range (how much of the wheel's turn reaches full lock; 540
-  degrees of a G29's 900 by default), Steering Deadzone, Steering Response (gentler or sharper
-  near the centre), Force Feedback, Centering Force, and **Pedals**.
+  degrees of a G29's 900 by default), Invert Steering, Steering Deadzone, Steering Response
+  (gentler or sharper near the centre), Force Feedback, Centering Force, **Tell the Game It's a
+  Wheel**, and **Calibrate**.
+- The Xbox 360 version supports racing wheels, so the game is told a wheel is connected rather
+  than a controller, and treats it as one.
 - **Force feedback works**, and needs nothing installed: on a Mac through Apple's own Force
   Feedback framework (measured on a G29 over USB - the autocentre pull, the spring and the rumble
   all move the wheel), and on SteamOS and other Linux systems through the kernel's driver. Where a
@@ -483,6 +486,7 @@ Vibration (On).
 | Steering Response | 0.50 to 2.00 | 1.00, in step with the wheel. Higher is gentler near the centre and sharper near full lock. |
 | Force Feedback | 0% to 100% | 100%. How strongly the knocks the game asks for reach the wheel. Needs a wheel whose motors this system can drive, and Vibration (Input) turns it off too. |
 | Centering Force | 0% to 100% | 50%. How hard the wheel pulls back to straight ahead. Needs the motors too. |
+| Tell the Game It's a Wheel | On / Off | On. The Xbox 360 game supports racing wheels, so a connected wheel says it is one (XInput's wheel subtype) instead of passing as a controller. Off: it sees a controller. The game may only ask as it starts, so a change can want a restart. |
 | Pedals | Assign | Which axis each pedal is. Worked out from the wheel; press A only if they come out wrong. |
 
 **Controls:** the keyboard keys for each Xbox 360 control, two per control, as in the table under
