@@ -653,8 +653,18 @@ namespace hid::wheel
             {
                 s_axisSeen[size_t(a)] = true;
                 // It is certainly awake now, whatever it was doing when it
-                // was first told what to hold.
+                // was first told what to hold. The centring force is said
+                // again, and the one other thing asked of the device as it
+                // opened - whether it can be made to knock - is asked
+                // again if it said no, for the same reason: a wheel busy
+                // with its own power-on sweep can refuse and then be
+                // perfectly able a moment later.
                 s_centering = -1;
+                if (s_haptic && !s_canHapticRumble && SDL_InitHapticRumble(s_haptic))
+                {
+                    s_canHapticRumble = true;
+                    fprintf(stderr, "[wheel] force feedback: knocks yes after all (the wheel was busy at first)\n");
+                }
                 // A pedal on this axis that had no resting place to work
                 // from takes the value it was at as it started to move,
                 // which is near enough where it rests. A wheel we know

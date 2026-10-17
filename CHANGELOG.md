@@ -66,7 +66,9 @@ it's built into the game).
 - The clutch is read and shown on the page; the game has no use for it.
 - The centring force is said again every second rather than once at the start: a wheel does its
   own power-on sweep and needn't be listening when it is first told, and a call that missed left
-  the setting doing nothing until it was nudged.
+  the setting doing nothing until it was nudged. Whether the wheel can be made to knock is asked
+  again too, the first time it reports an axis, for the same reason: one busy with its sweep can
+  refuse and be perfectly able a moment later.
 - The log says which wheel was found, what its force feedback can do, which axis is which, and
   every Wheel setting as the run read it - so a setting that didn't reach the game shows up
   without having to guess.
