@@ -95,7 +95,7 @@ int main()
     };
     // The keys run from the end of the Wheel options (Input's own rows, then
     // the wheel's, come before them) to the start of Advanced, unbroken.
-    size_t previous = size_t(Id::WheelClutchAxis);
+    size_t previous = size_t(Id::ClutchFull);
     for (const Default& d : defaults)
     {
         const Option& o = Info(d.id);

@@ -11,6 +11,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <format>
 #include <string>
 #include <vector>
 
@@ -85,7 +86,6 @@ namespace hid::wheel
 
         // A pedal step's place in s_pedals (Steer has none).
         int Slot(Step step) { return int(step) - 1; }
-        bool IsPedal(Step step) { return step != Step::Steer; }
 
         settings::Id AxisOption(Step step)
         {
@@ -97,6 +97,26 @@ namespace hid::wheel
             case Step::Clutch: return settings::Id::WheelClutchAxis;
             }
             return settings::Id::WheelSteerAxis;
+        }
+
+        settings::Id RestOption(Step step)
+        {
+            switch (step)
+            {
+            case Step::Brake: return settings::Id::BrakeRest;
+            case Step::Clutch: return settings::Id::ClutchRest;
+            default: return settings::Id::ThrottleRest;
+            }
+        }
+
+        settings::Id FullOption(Step step)
+        {
+            switch (step)
+            {
+            case Step::Brake: return settings::Id::BrakeFull;
+            case Step::Clutch: return settings::Id::ClutchFull;
+            default: return settings::Id::ThrottleFull;
+            }
         }
 
         const char* StepName(Step step)
@@ -182,19 +202,82 @@ namespace hid::wheel
             if (stored.throttle >= 0) s_axes.throttle = stored.throttle;
             if (stored.brake >= 0) s_axes.brake = stored.brake;
             if (stored.clutch >= 0) s_axes.clutch = stored.clutch;
+            // Each pedal's axis and the span it runs over: what Calibrate
+            // measured, else what this wheel's model says its pedals do,
+            // else the axis itself once it has reported (its far end being
+            // as far as it can go). Without any of those it reads nothing,
+            // rather than reading as pressed.
+            struct Plan { int axis = -1; int16_t rest = 0, full = 0; bool known = false; };
+            Plan plan[3];
             for (Step step : { Step::Throttle, Step::Brake, Step::Clutch })
             {
-                const int axis = AxisOf(step);
-                s_pedals[Slot(step)] = {};  // not ready: reads nothing
-                if (axis < 0 || size_t(axis) >= rest.size())
+                Plan& it = plan[Slot(step)];
+                it.axis = AxisOf(step);
+                if (it.axis < 0 || size_t(it.axis) >= rest.size())
+                {
+                    it.axis = -1;
                     continue;
-                if (size_t(axis) < s_axisSeen.size() && s_axisSeen[size_t(axis)])
-                    s_pedals[Slot(step)].Start(rest[size_t(axis)]);  // the axis itself
-                else if (s_model->pedalRest != 0)
-                    s_pedals[Slot(step)].Start(s_model->pedalRest);  // what this wheel's pedals do
+                }
+                const int16_t storedRest = int16_t(settings::GetInt(RestOption(step)));
+                const int16_t storedFull = int16_t(settings::GetInt(FullOption(step)));
+                if (storedRest != storedFull)
+                    it = { it.axis, storedRest, storedFull, true };
+                else if (s_model->pedalRest != s_model->pedalFull)
+                    it = { it.axis, s_model->pedalRest, s_model->pedalFull, true };
+                else if (size_t(it.axis) < s_axisSeen.size() && s_axisSeen[size_t(it.axis)])
+                {
+                    const int16_t at = rest[size_t(it.axis)];
+                    it = { it.axis, at, int16_t(at >= 0 ? -32768 : 32767), true };
+                }
             }
-            fprintf(stderr, "[wheel] axes: steering %d, throttle %d, brake %d, clutch %d (of %zu; rest", s_axes.steer,
-                s_axes.throttle, s_axes.brake, s_axes.clutch, rest.size());
+            // No two controls may read one axis the same way: that is how a
+            // calibration gone wrong has one pedal working two of the
+            // game's, while the other pedal does nothing at all. Two pedals
+            // sharing an axis is allowed only where their spans run
+            // opposite ways, which is how a wheel with both on one axis
+            // reports them. The wheel's own axis is never a pedal.
+            for (int a = 0; a < 3; a++)
+            {
+                if (plan[a].axis >= 0 && plan[a].axis == s_axes.steer)
+                {
+                    fprintf(stderr, "[wheel] %s is on the wheel's own axis %d: ignored\n", StepName(Step(a + 1)), plan[a].axis);
+                    plan[a] = {};
+                }
+                for (int b = a + 1; b < 3; b++)
+                {
+                    if (plan[a].axis < 0 || plan[a].axis != plan[b].axis)
+                        continue;
+                    const bool opposite = plan[a].known && plan[b].known &&
+                        (plan[a].full > plan[a].rest) != (plan[b].full > plan[b].rest);
+                    if (opposite)
+                        continue;  // one axis, one each way: both are real
+                    fprintf(stderr, "[wheel] %s and %s both read axis %d the same way: %s dropped (calibrate it)\n",
+                        StepName(Step(a + 1)), StepName(Step(b + 1)), plan[a].axis, StepName(Step(b + 1)));
+                    plan[b] = {};
+                    settings::Set(AxisOption(Step(b + 1)), -1);  // so it doesn't come back next run
+                }
+            }
+            for (Step step : { Step::Throttle, Step::Brake, Step::Clutch })
+            {
+                const Plan& it = plan[Slot(step)];
+                s_pedals[Slot(step)] = {};  // not ready: reads nothing
+                if (it.axis >= 0 && it.known)
+                    s_pedals[Slot(step)].Start(it.rest, it.full);
+            }
+            s_axes.throttle = plan[0].axis;
+            s_axes.brake = plan[1].axis;
+            s_axes.clutch = plan[2].axis;
+            // Each pedal's span as well as its axis: a pedal reading
+            // nothing, or reading backwards, shows here before anyone has
+            // to guess at it.
+            std::string pedals;
+            for (Step step : { Step::Throttle, Step::Brake, Step::Clutch })
+            {
+                const wheelmap::Pedal& it = s_pedals[Slot(step)];
+                pedals += std::format(", {} {}", StepName(step), AxisOf(step));
+                pedals += it.ready ? std::format(" ({:+d} to {:+d})", int(it.idle), int(it.full)) : std::string(" (not placed)");
+            }
+            fprintf(stderr, "[wheel] axes: steering %d%s (of %zu; rest", s_axes.steer, pedals.c_str(), rest.size());
             for (int16_t v : rest)
                 fprintf(stderr, " %d", int(v));
             fprintf(stderr, ")\n");
@@ -413,8 +496,13 @@ namespace hid::wheel
         bool s_assigning = false;
         Step s_assignStep = Step::Steer;
         std::vector<int16_t> s_assignFrom;
-        std::vector<int32_t> s_assignMoved;  // per axis, the furthest from where it rested
-        std::vector<int32_t> s_assignDir;    // ...and which way it went when it got there
+        // Per axis, the range it has covered since the step began, and
+        // whether it has been worth tracking at all: an axis SDL has not
+        // reported reads 0, which is not where it is, so it is left out
+        // until it speaks. That also keeps a pedal reporting for the first
+        // time out of another step's reckoning.
+        std::vector<int32_t> s_assignLo, s_assignHi;
+        std::vector<bool> s_assignTracked;
 
         // NFSMW_WHEEL_LOG=1: every button as it is pressed (which is how to
         // find a wheel's numbering), and the axes once a second.
@@ -486,9 +574,12 @@ namespace hid::wheel
                 for (Step step : { Step::Throttle, Step::Brake, Step::Clutch })
                     if (AxisOf(step) == a && !s_pedals[Slot(step)].ready)
                     {
-                        s_pedals[Slot(step)].Start(e.jaxis.value);
+                        // Where it was as it started to move is near enough
+                        // where it rests, and it can go as far as its axis.
+                        const int16_t at = e.jaxis.value;
+                        s_pedals[Slot(step)].Start(at, int16_t(at >= 0 ? -32768 : 32767));
                         fprintf(stderr, "[wheel] %s: axis %d first reported %+d, taken as where it rests\n", StepName(step),
-                            a, int(e.jaxis.value));
+                            a, int(at));
                     }
             }
         }
@@ -639,47 +730,62 @@ namespace hid::wheel
         s_assigning = true;
         s_assignStep = step;
         s_assignFrom = AxisStates(false);
-        s_assignMoved.assign(s_assignFrom.size(), 0);
-        s_assignDir.assign(s_assignFrom.size(), 0);
+        s_assignLo.assign(s_assignFrom.size(), 0);
+        s_assignHi.assign(s_assignFrom.size(), 0);
+        s_assignTracked.assign(s_assignFrom.size(), false);
     }
 
     Candidate Watch()
     {
         if (!s_assigning || !s_joystick)
             return {};
-        // Fold in where everything is now, keeping each axis's furthest.
+        // Fold in where everything is now, keeping the range each axis has
+        // covered. An axis that has never reported is left alone.
         for (size_t a = 0; a < s_assignFrom.size(); a++)
         {
-            const int32_t went = int32_t(AxisNow(int(a))) - int32_t(s_assignFrom[a]);
-            const int32_t far = went < 0 ? -went : went;
-            if (far > s_assignMoved[a])
+            if (a >= s_axisSeen.size() || !s_axisSeen[a])
+                continue;
+            const int32_t v = AxisNow(int(a));
+            if (!s_assignTracked[a])
             {
-                s_assignMoved[a] = far;
-                s_assignDir[a] = went;
+                s_assignLo[a] = s_assignHi[a] = v;
+                s_assignTracked[a] = true;
+                continue;
             }
+            s_assignLo[a] = std::min(s_assignLo[a], v);
+            s_assignHi[a] = std::max(s_assignHi[a], v);
         }
+        // The axis that has covered the most ground is the one being moved.
         size_t best = 0;
-        int32_t most = -1;
-        for (size_t a = 0; a < s_assignMoved.size(); a++)
-            if (s_assignMoved[a] > most)
+        int32_t widest = -1;
+        for (size_t a = 0; a < s_assignLo.size(); a++)
+        {
+            if (!s_assignTracked[a])
+                continue;
+            const int32_t span = s_assignHi[a] - s_assignLo[a];
+            if (span > widest)
             {
-                most = s_assignMoved[a];
+                widest = span;
                 best = a;
             }
-        if (most < kAssignMoved)
+        }
+        if (widest < kAssignMoved)
             return {};
         Candidate c;
         c.found = true;
         c.axis = int(best);
-        // As a share of what that axis can travel from where it rested: a
-        // centred one (the wheel) has half the axis either way, one resting
-        // at an end (a pedal) the whole of it.
-        const float span = wheelmap::RestsCentred(s_assignFrom[best]) ? float(wheelmap::kAxisMax)
-                                                                      : float(2 * wheelmap::kAxisMax);
-        c.moved = std::clamp(float(most) / span, 0.0f, 1.0f);
-        // Turning left reads negative on the pad, so an axis that went the
+        // Where it is being held, and the end of the range furthest from
+        // that, which is where it was before the player touched it.
+        const int32_t held = AxisNow(int(best));
+        const int32_t far = std::abs(held - s_assignLo[best]) > std::abs(held - s_assignHi[best]) ? s_assignLo[best]
+                                                                                                 : s_assignHi[best];
+        c.full = int16_t(std::clamp(held, -32768, 32767));
+        c.rest = int16_t(std::clamp(far, -32768, 32767));
+        const float span = wheelmap::RestsCentred(c.rest) ? float(wheelmap::kAxisMax) : float(2 * wheelmap::kAxisMax);
+        c.moved = std::clamp(float(widest) / span, 0.0f, 1.0f);
+        // Turning left reads negative on the pad, so a wheel that went the
         // other way wants inverting.
-        c.invert = s_assignStep == Step::Steer && s_assignDir[best] > 0;
+        c.invert = s_assignStep == Step::Steer && held > far;
         return c;
     }
 
@@ -696,11 +802,15 @@ namespace hid::wheel
         settings::Set(AxisOption(s_assignStep), double(c.axis));
         if (s_assignStep == Step::Steer)
             settings::Set(settings::Id::InvertSteering, c.invert ? 1.0 : 0.0);
+        else
+        {
+            // Both ends, kept for the next run too: a pedal that stops
+            // short of its axis still reads as floored, and one sharing an
+            // axis with another keeps to its own half.
+            settings::Set(RestOption(s_assignStep), double(c.rest));
+            settings::Set(FullOption(s_assignStep), double(c.full));
+        }
         Calibrate(false);
-        // A pedal rests where it did before it was pressed, not where it is
-        // now (the foot may still be on it).
-        if (IsPedal(s_assignStep) && size_t(c.axis) < s_assignFrom.size())
-            s_pedals[Slot(s_assignStep)].Start(s_assignFrom[size_t(c.axis)]);
         return true;
     }
 

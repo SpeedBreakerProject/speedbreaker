@@ -112,6 +112,12 @@ namespace hid::wheel
         int axis = -1;
         float moved = 0.0f;   // how far it went, as a share of its travel
         bool invert = false;  // Steer: it ran the other way (left read positive)
+        // Both ends of what it did: where it was held when confirmed, and
+        // the far end of the range it crossed getting there, which is where
+        // it had been resting. Measuring both is what lets a pedal that
+        // doesn't reach the end of its axis still read as floored, and two
+        // pedals sharing one axis each read only their own half.
+        int16_t rest = 0, full = 0;
     };
     // Main thread, once a frame while a step is running: what A would store.
     Candidate Watch();

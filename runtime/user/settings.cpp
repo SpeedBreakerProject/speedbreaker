@@ -146,6 +146,16 @@ namespace settings
                      .env = env, .defaultValue = -1, .min = -1, .max = 31, .step = 1 };
         }
 
+        // One end of a pedal's travel, as Settings > Wheel > Calibrate
+        // measured it (hidden). Equal ends: not measured.
+        constexpr Option WheelPoint(Id id, const char* key, const char* label, const char* env)
+        {
+            return { .id = id, .category = Category::Wheel, .type = Type::Int, .apply = Apply::Live, .hidden = true,
+                     .table = "wheel", .key = key, .label = label,
+                     .description = "What the pedal's axis reads there, as Calibrate measured it.",
+                     .env = env, .defaultValue = 0, .min = -32768, .max = 32767, .step = 1 };
+        }
+
         // A Controls row's key: the key (user/key_names.h, by its name
         // there) that drives one Xbox 360 control. Two per control, the
         // second named <key>_2 with the same label. No environment
@@ -303,6 +313,12 @@ namespace settings
             WheelAxis(Id::WheelThrottleAxis, "throttle_axis", "Throttle Axis", "NFSMW_WHEEL_THROTTLE_AXIS"),
             WheelAxis(Id::WheelBrakeAxis, "brake_axis", "Brake Axis", "NFSMW_WHEEL_BRAKE_AXIS"),
             WheelAxis(Id::WheelClutchAxis, "clutch_axis", "Clutch Axis", "NFSMW_WHEEL_CLUTCH_AXIS"),
+            WheelPoint(Id::ThrottleRest, "throttle_rest", "Throttle at Rest", "NFSMW_WHEEL_THROTTLE_REST"),
+            WheelPoint(Id::ThrottleFull, "throttle_full", "Throttle Pressed", "NFSMW_WHEEL_THROTTLE_FULL"),
+            WheelPoint(Id::BrakeRest, "brake_rest", "Brake at Rest", "NFSMW_WHEEL_BRAKE_REST"),
+            WheelPoint(Id::BrakeFull, "brake_full", "Brake Pressed", "NFSMW_WHEEL_BRAKE_FULL"),
+            WheelPoint(Id::ClutchRest, "clutch_rest", "Clutch at Rest", "NFSMW_WHEEL_CLUTCH_REST"),
+            WheelPoint(Id::ClutchFull, "clutch_full", "Clutch Pressed", "NFSMW_WHEEL_CLUTCH_FULL"),
             // Controls (Settings > Controls; hid/key_map.h reads them). The
             // defaults are v0.1.4's keys: the arrows steer as well as A
             // and D, and are the D-pad; O/L/K/; are the right stick.

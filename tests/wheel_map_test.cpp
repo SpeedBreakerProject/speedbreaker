@@ -51,9 +51,10 @@ int main()
         CHECK((m.vendor == 0 && m.product == 0) == last, "model %zu: only the last is the fallback", i);
         CHECK(m.name != nullptr && m.axes.steer >= 0 && !m.buttons.empty(), "model %zu: named, steers, has buttons", i);
         // Where its pedals rest: an end of the axis, or 0 for not known.
-        CHECK(m.pedalRest == 0 || m.pedalRest == kAxisMax || m.pedalRest == -kAxisMax,
-            "model %zu: pedalRest %d is an end of the axis, or unknown", i, int(m.pedalRest));
-        CHECK((m.pedalRest != 0) == (m.vendor != 0), "model %zu: the wheels we know say where their pedals rest", i);
+        CHECK((m.pedalRest != m.pedalFull) == (m.vendor != 0),
+            "model %zu: the wheels we know give both ends of their pedals, the fallback neither", i);
+        if (m.pedalRest != m.pedalFull)
+            CHECK((m.pedalRest > 0) != (m.pedalFull > 0), "model %zu: its pedals run from one end of the axis to the other", i);
         CHECK(m.fullTurnDegrees >= 0 && m.fullTurnDegrees <= 1080, "model %zu: %d degrees", i, m.fullTurnDegrees);
         if (!last)
             CHECK(ids.insert(uint32_t(m.vendor) << 16 | m.product).second, "model %zu: its own USB ids", i);
@@ -73,7 +74,7 @@ int main()
         CHECK(g29.vendor == 0x046D && g29.product == product, "the G29 (%04x) is known", product);
         CHECK(g29.axes.steer == 0 && g29.axes.throttle == 2 && g29.axes.brake == 3 && g29.axes.clutch == 1,
             "the G29's measured axes (%d, %d, %d, %d)", g29.axes.steer, g29.axes.throttle, g29.axes.brake, g29.axes.clutch);
-        CHECK(g29.pedalRest == kAxisMax, "the G29's pedals rest at +32767, not 0");
+        CHECK(g29.pedalRest == kAxisMax && g29.pedalFull == -32768, "the G29's pedals run +32767 to -32768");
         CHECK(g29.fullTurnDegrees == 900, "the G29 turns 900 degrees");
         CHECK(g29.buttons.data() == kLogitechButtons, "the G29 has the Logitech buttons");
     }
@@ -167,28 +168,40 @@ int main()
                     double(response), double(v));
             }
 
-    // A pedal resting at one end of its axis runs to the other.
+    // A pedal is the span from where it rests to where it reads floored,
+    // measured at both ends. A G29's rest at +32767 and run to -32768.
     Pedal pedal;
-    pedal.Start(32767);
+    pedal.Start(32767, -32768);
+    CHECK(pedal.ready, "both ends given: it reads");
     CHECK(Near(pedal.Value(32767), 0.0f), "a pedal at rest is up");
     CHECK(Near(pedal.Value(0), 0.5f, 0.01f), "half way down");
     CHECK(Near(pedal.Value(-32768), 1.0f), "on the floor");
-    // ...and one wired the other way round works the same.
-    pedal.Start(-32768);
-    CHECK(Near(pedal.Value(-32768), 0.0f), "a pedal resting at the other end is up");
-    CHECK(Near(pedal.Value(32767), 1.0f), "...and is down at the far end");
-    // A pedal that rests centred has half the axis to travel.
-    pedal.Start(0);
-    CHECK(Near(pedal.Value(0), 0.0f), "a centred pedal is up");
-    CHECK(Near(pedal.Value(32767), 1.0f), "...and down at the end");
-    // The travel is the axis, not the furthest the pedal has been seen to
-    // go: a part press reads as a part press however hard the last one was,
-    // and a cautious first press is never taken for the floor.
-    pedal.Start(32767);
-    CHECK(pedal.Value(-20000) < 1.0f && pedal.Value(-20000) > 0.5f, "a part press is a part press");
-    CHECK(pedal.Value(-30000) > pedal.Value(-20000) && pedal.Value(-30000) < 1.0f, "a harder one is further down, still not the floor");
-    CHECK(Near(pedal.Value(32767), 0.0f), "and it is up again at rest");
-    CHECK(Near(pedal.Value(-20000), float(32767 + 20000) / 65534.0f, 0.001f), "the same press reads the same as before");
+    // One wired the other way round works the same.
+    pedal.Start(-32768, 32767);
+    CHECK(Near(pedal.Value(-32768), 0.0f) && Near(pedal.Value(32767), 1.0f), "a pedal that runs the other way");
+    // Only movement towards the pressed end counts: the other way is a
+    // pedal on its way back up, which is not a pedal being pressed.
+    pedal.Start(0, 32767);
+    CHECK(Near(pedal.Value(0), 0.0f) && Near(pedal.Value(32767), 1.0f), "a pedal from the middle");
+    CHECK(Near(pedal.Value(-32768), 0.0f), "...and the other way is still up, not full");
+    // A pedal that stops short of the end of its axis still reads as
+    // floored, because the span says how far it really goes. (A G29's
+    // brake stops around -31740 when it is pressed hard.)
+    pedal.Start(32767, -31740);
+    CHECK(Near(pedal.Value(-31740), 1.0f), "a pedal that stops short still reaches the floor");
+    CHECK(Near(pedal.Value(-32768), 1.0f), "...and past it is still the floor");
+    CHECK(pedal.Value(0) > 0.4f && pedal.Value(0) < 0.6f, "half way is still half way");
+
+    // Two pedals sharing one axis, one taking it positive and the other
+    // negative: each reads its own half and ignores the other's. (Some
+    // wheels report a combined pedal axis this way.)
+    Pedal shareUp, shareDown;
+    shareUp.Start(0, 32767);
+    shareDown.Start(0, -32768);
+    CHECK(Near(shareUp.Value(32767), 1.0f) && Near(shareDown.Value(32767), 0.0f), "the positive half is one pedal's");
+    CHECK(Near(shareDown.Value(-32768), 1.0f) && Near(shareUp.Value(-32768), 0.0f), "the negative half is the other's");
+    CHECK(Near(shareUp.Value(0), 0.0f) && Near(shareDown.Value(0), 0.0f), "at rest, neither is pressed");
+
     // A pedal nobody has placed reads nothing, however far its axis is from
     // zero: SDL reports an axis only when it moves, so an untouched pedal
     // resting at +32767 would otherwise read as floored.
@@ -196,9 +209,9 @@ int main()
     CHECK(!untouched.ready, "a fresh pedal knows nothing");
     for (int raw : { -32768, 0, 32767 })
         CHECK(untouched.Value(int16_t(raw)) == 0.0f, "an unplaced pedal reads nothing at %d", raw);
-    Pedal placed;
-    placed.Start(32767);
-    CHECK(placed.ready && Near(placed.Value(32767), 0.0f) && Near(placed.Value(-32768), 1.0f), "...and reads once placed");
+    Pedal degenerate;
+    degenerate.Start(5000, 5000);
+    CHECK(!degenerate.ready && degenerate.Value(0) == 0.0f, "two ends the same is no span at all");
 
     // An axis read the other way round (Invert Steering).
     CHECK(Flip(0) == 0, "centred stays centred");
@@ -207,7 +220,7 @@ int main()
     CHECK(Flip(Flip(12345)) == 12345, "twice is where it started");
 
     // Whatever it reads, the answer is a fraction.
-    pedal.Start(0);
+    pedal.Start(32767, -32768);
     for (int raw : { -32768, -1000, 0, 1000, 32767 })
     {
         const float v = pedal.Value(int16_t(raw));
@@ -284,7 +297,8 @@ int main()
     CHECK(SpringLevel(50) > 0 && SpringLevel(50) < SpringLevel(100), "and half is in between");
 
     // Usable at compile time (constexpr), as hid/key_map.h's rules are.
-    static_assert([] { Pedal p; p.Start(32767); return p.Value(32767) == 0.0f && p.Value(-32768) == 1.0f; }(), "constexpr pedal");
+    static_assert([] { Pedal p; p.Start(32767, -32768); return p.Value(32767) == 0.0f && p.Value(-32768) == 1.0f; }(),
+        "constexpr pedal");
     static_assert(Resolve(std::array<bool, 4>{ true, false, false, false }, hat::Up, kLogitechButtons).buttons ==
         (button::A | button::DpadUp), "constexpr buttons");
 

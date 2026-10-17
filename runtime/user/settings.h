@@ -79,6 +79,12 @@ namespace settings
         WheelThrottleAxis,  // hidden
         WheelBrakeAxis,     // hidden
         WheelClutchAxis,    // hidden
+        // Each pedal's two ends, as Calibrate measured them: where it rests
+        // and where it reads fully pressed (hidden; equal values: not
+        // measured, and the wheel's model or its axis is used instead).
+        ThrottleRest, ThrottleFull,
+        BrakeRest, BrakeFull,
+        ClutchRest, ClutchFull,
         // Controls (the [keys] table): the two keyboard keys that drive
         // each Xbox 360 control, as key codes (user/key_names.h); the
         // second of a pair is always the first's id + 1 (hid/key_map.h
