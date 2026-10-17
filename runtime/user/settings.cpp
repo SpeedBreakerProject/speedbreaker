@@ -134,6 +134,15 @@ namespace settings
             { 0, "all", "All" },
         };
 
+        // Settings > Wheel > Tell the Game: what the game is told is
+        // plugged in when it asks (XamInputGetCapabilities). The Xbox 360
+        // version supports racing wheels, and the game does ask.
+        constexpr EnumEntry kReportWheelEntries[] = {
+            { 0, "controller", "Controller" },
+            { 1, "wheel", "Wheel" },
+            { 2, "wheel_only", "Wheel Only" },
+        };
+
         // One of the wheel's axes, as the device numbers them: what
         // Settings > Wheel > Pedals assigned. Hidden (the page's own row
         // shows them, and shows them being pressed), and -1 by default:
@@ -316,10 +325,10 @@ namespace settings
               .table = "wheel", .key = "centering_force", .label = "Centering Force",
               .description = "How hard the wheel pulls back to straight ahead. A wheel with no spring of its own needs this; it needs force feedback too.",
               .env = "NFSMW_WHEEL_CENTERING", .defaultValue = 50, .min = 0, .max = 100, .step = 5, .unit = "%" },
-            { .id = Id::ReportWheel, .category = Category::Wheel, .type = Type::Bool, .apply = Apply::Live,
-              .table = "wheel", .key = "report_wheel", .label = "Tell the Game It's a Wheel",
-              .description = "Say a racing wheel is connected, which the Xbox 360 game supports, instead of a controller. Off: it sees a controller. The game may only ask once, as it starts.",
-              .env = "NFSMW_REPORT_WHEEL", .defaultValue = 1 },
+            { .id = Id::ReportWheel, .category = Category::Wheel, .type = Type::Enum, .apply = Apply::Live,
+              .table = "wheel", .key = "report_wheel", .label = "Tell the Game",
+              .description = "What the game is told is plugged in. Wheel says a racing wheel but keeps every control of a pad; Wheel Only reports a real wheel's own limits as well (force feedback, no sticks but the wheel), which may stop the paddles shifting gear. The game may only ask as it starts.",
+              .env = "NFSMW_REPORT_WHEEL", .defaultValue = 1, .min = 0, .max = 2, .entries = kReportWheelEntries },
             // The axes Settings > Wheel > Pedals assigned, as the device
             // numbers them; -1: work them out from the device itself
             // (hid/wheel_map.h's Detect).

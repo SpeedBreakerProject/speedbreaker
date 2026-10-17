@@ -858,6 +858,9 @@ namespace
 // connected through XamInputGetCapabilities (its own code queries it in two
 // places), so a wheel says so for itself instead of passing as a pad.
 constexpr uint8_t XAMINPUT_DEVSUBTYPE_WHEEL = 0x02;
+// ...and the capability flag for a device with force feedback, which a
+// racing wheel has and a pad has not.
+constexpr uint16_t XAMINPUT_CAPS_FFB_SUPPORTED = 0x0001;
 
 uint32_t XamInputGetCapabilities(uint32_t userIndex, uint32_t flags, XAMINPUT_CAPABILITIES* caps)
 {
@@ -867,10 +870,13 @@ uint32_t XamInputGetCapabilities(uint32_t userIndex, uint32_t flags, XAMINPUT_CA
         if ((userIndex != 0 && userIndex != 0xFF) || !(s_deviceConnected || scripted))
             return ERROR_DEVICE_NOT_CONNECTED;
     }
-    // A wheel in play says so (Settings > Wheel > Tell the Game It's a
-    // Wheel); the type stays the gamepad one, as it is for every XInput
-    // device, and only the subtype differs.
-    const bool asWheel = hid::wheel::Playing() && settings::GetBool(settings::Id::ReportWheel);
+    // What a wheel in play is reported as (Settings > Wheel > Tell the
+    // Game): 0 a controller, 1 a wheel that still has all the pad's
+    // controls, 2 a wheel as a real one reports itself. The type stays the
+    // gamepad one, as it is for every XInput device; only the subtype and
+    // what the device claims to have differ.
+    const int report = hid::wheel::Playing() ? settings::GetInt(settings::Id::ReportWheel) : 0;
+    const bool asWheel = report > 0;
     memset(caps, 0, sizeof(*caps));
     caps->Type = XAMINPUT_DEVTYPE_GAMEPAD;
     caps->SubType = asWheel ? XAMINPUT_DEVSUBTYPE_WHEEL : XAMINPUT_DEVSUBTYPE_GAMEPAD;
@@ -886,13 +892,25 @@ uint32_t XamInputGetCapabilities(uint32_t userIndex, uint32_t flags, XAMINPUT_CA
         *v = ByteSwap(int16_t(0xFFC0));
     caps->Vibration.wLeftMotorSpeed = 0xFFFF;
     caps->Vibration.wRightMotorSpeed = 0xFFFF;
+    if (report >= 2)
+    {
+        // As a real 360 wheel reports itself: force feedback, and no sticks
+        // but its own axis. The paddles still reach the game as the right
+        // stick, which it has now been told isn't there, so a gear change
+        // may stop working - which is the point of having the choice.
+        caps->Flags = ByteSwap(XAMINPUT_CAPS_FFB_SUPPORTED);
+        caps->Gamepad.sThumbLY = 0;
+        caps->Gamepad.sThumbRX = 0;
+        caps->Gamepad.sThumbRY = 0;
+    }
     // On the first ask, and on any change: whether the game looks at all,
     // and what it was told.
     static int told = -1;
-    if (int(caps->SubType) != told)
+    if (report != told)
     {
-        told = caps->SubType;
-        fprintf(stderr, "[input] the game asked what is connected: told it a %s\n", asWheel ? "racing wheel" : "gamepad");
+        told = report;
+        fprintf(stderr, "[input] the game asked what is connected: told it %s\n",
+            report == 0 ? "a gamepad" : report == 1 ? "a racing wheel" : "a racing wheel, with only a wheel's own controls");
     }
     return ERROR_SUCCESS;
 }

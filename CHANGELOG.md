@@ -19,11 +19,13 @@ it's built into the game).
   Steering Range (how much of the wheel's turn reaches full lock, 540 degrees of a G29's 900 by
   default), Invert Steering, Steering Deadzone, Steering Response, Force Feedback, Centering
   Force, and Calibrate.
-- **The game is told a wheel is a wheel.** The Xbox 360 version supports racing wheels, and asks
-  what is connected; it was being told a controller whatever was plugged in. A wheel now reports
-  XInput's wheel subtype, so the game treats it as one. Settings > Wheel > Tell the Game It's a
-  Wheel turns that off, for a game mode that would rather see a controller; the game may only ask
-  as it starts, so a change can want a restart.
+- **The game is told a wheel is a wheel.** The Xbox 360 version supports racing wheels and asks
+  what is connected (it does ask: the log says so); it was being told a controller whatever was
+  plugged in. Settings > Wheel > Tell the Game now chooses: Wheel reports XInput's wheel subtype
+  while still claiming every control a pad has, Wheel Only reports a real wheel's own limits as
+  well (force feedback, and no sticks but the wheel), and Controller is the old behaviour. Wheel
+  Only may stop the paddles changing gear, since the game is then told there is no right stick.
+  The game may only ask as it starts, so a change can want a restart.
 - **Force feedback works, with nothing to install:** on a Mac through Apple's own Force Feedback
   framework, and on SteamOS and other Linux systems through the kernel's driver. The wheel pulls
   back to centre as hard as Centering Force says, and passes on the knocks the game asks for.
