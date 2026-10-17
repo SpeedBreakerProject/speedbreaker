@@ -462,10 +462,6 @@ game while its window isn't in front.
 **Input:** Stick Deadzone (8%; raise it if the car steers by itself), Trigger Deadzone (2%), and
 Vibration (On).
 
-**Controls:** the keyboard keys for each Xbox 360 control, two per control, as in the table under
-[Controls](#controls). The keys are saved by name in `settings.toml`'s `[keys]` table (`w`,
-`left_shift`, `keypad_1`, or `none`; `runtime/user/key_names.h` lists them).
-
 **Wheel** (only while a steering wheel is plugged in; see [Steering wheels](#steering-wheels)):
 
 | Option | Choices | Default |
@@ -477,6 +473,10 @@ Vibration (On).
 | Force Feedback | 0% to 100% | 100%. How strongly the knocks the game asks for reach the wheel. Needs a wheel whose motors this system can drive, and Vibration (Input) turns it off too. |
 | Centering Force | 0% to 100% | 50%. How hard the wheel pulls back to straight ahead. Needs the motors too. |
 | Pedals | Assign | Which axis each pedal is. Worked out from the wheel; press A only if they come out wrong. |
+
+**Controls:** the keyboard keys for each Xbox 360 control, two per control, as in the table under
+[Controls](#controls). The keys are saved by name in `settings.toml`'s `[keys]` table (`w`,
+`left_shift`, `keypad_1`, or `none`; `runtime/user/key_names.h` lists them).
 
 **Advanced:** Asynchronous Shaders (On: an object is skipped for a frame or two while its shader
 compiles, instead of the game stuttering), Performance Overlay (Off: fps, frame times, and CPU

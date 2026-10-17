@@ -93,7 +93,9 @@ int main()
         { Id::KeyLeftStickClick, "left_stick_click", "Left Stick Click", "z", "none" },
         { Id::KeyRightStickClick, "right_stick_click", "Right Stick Click", "c", "none" },
     };
-    size_t previous = size_t(Id::Vibration);
+    // The keys run from the end of the Wheel options (Input's own rows, then
+    // the wheel's, come before them) to the start of Advanced, unbroken.
+    size_t previous = size_t(Id::WheelClutchAxis);
     for (const Default& d : defaults)
     {
         const Option& o = Info(d.id);
