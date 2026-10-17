@@ -14,6 +14,11 @@
 //     stick too, W/S = gas/brake (RT/LT), Space = A, Backspace = B,
 //     Left Shift = X, Left Ctrl = Y, Q/E = LB/RB, Enter = START, Esc = BACK,
 //     O/L/K/; = right stick, Z/C = the stick clicks. A key may drive several.
+//   - A USB steering wheel (hid/wheel.h and hid/wheel_map.h, Settings >
+//     Wheel) is used instead of a controller while one is plugged in: its
+//     own steering curve reaches the left stick, its pedals the triggers
+//     and its paddles the right stick, so the stick deadzone above is not
+//     applied to it. Its force feedback takes the rumble the game asks for.
 //   - NFSMW_INPUT_SCRIPT="12:START,15.5:A,30-90/4:DOWN,100~160:RT": taps
 //     (150 ms) at seconds since launch, taps every `step` seconds over a
 //     range, or inputs held over a range; RT/LT (triggers) and LL/LR/LU/LD

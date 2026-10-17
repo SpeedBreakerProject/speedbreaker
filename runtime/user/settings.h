@@ -91,6 +91,21 @@ namespace settings
         KeyRightStickRight, KeyRightStickRight2,
         KeyLeftStickClick, KeyLeftStickClick2,
         KeyRightStickClick, KeyRightStickClick2,
+        // Wheel (the [wheel] table): a USB steering wheel as the pad
+        // (hid/wheel_map.h). The page shows itself only while one is
+        // connected; the four axis options are hidden, and hold what
+        // Settings > Wheel > Pedals assigned (-1: work it out from the
+        // device).
+        Wheel,
+        SteeringRange,
+        SteeringDeadzone,
+        SteeringResponse,
+        ForceFeedback,
+        CenteringForce,
+        WheelSteerAxis,     // hidden
+        WheelThrottleAxis,  // hidden
+        WheelBrakeAxis,     // hidden
+        WheelClutchAxis,    // hidden
         // Advanced
         AsyncShaders,
         PerformanceOverlay,
@@ -101,7 +116,7 @@ namespace settings
     // Key: a key code of user/key_names.h (0: no key), saved by its name
     // there ("w", "left_shift", "none"); the menu takes it from a key press.
     enum class Type : uint8_t { Bool, Int, Float, Enum, Key };
-    enum class Category : uint8_t { Display, Graphics, Audio, Input, Controls, Advanced, Count };
+    enum class Category : uint8_t { Display, Graphics, Audio, Input, Controls, Wheel, Advanced, Count };
     enum class Apply : uint8_t { Live, Restart };
 
     // Values of the enum options (GetInt returns them).
