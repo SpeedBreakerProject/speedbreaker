@@ -420,7 +420,7 @@ namespace
         // wheel, not to this path: one device, one owner (hid/wheel.h).
         SDL_JoystickID pick = 0;
         for (int i = 0; ids && i < count && !pick; i++)
-            if (!wheel::Owns(ids[i]))
+            if (!hid::wheel::Owns(ids[i]))
                 pick = ids[i];
         if (pick)
         {
@@ -465,7 +465,7 @@ namespace
             return;
         s_noControllerAt = 0;
         // (NFSMW_INPUT_SCRIPT is the controller of an automated run.)
-        if (s_gamepad || wheel::Playing() || SDL_HasKeyboard() || !s_script.empty())
+        if (s_gamepad || hid::wheel::Playing() || SDL_HasKeyboard() || !s_script.empty())
             return;
         fprintf(stderr, "[input] no controller: %s\n", s_noControllerText);
         ui::Toast(s_noControllerText, 10.0);
