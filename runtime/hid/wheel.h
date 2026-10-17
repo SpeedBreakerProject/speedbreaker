@@ -13,10 +13,13 @@
 //     connecting or going mid-game is picked up (Initialize is not needed
 //     again).
 //   - Force feedback goes through SDL's haptics, which need the system to
-//     drive the wheel's motors: that is the maker's driver on Windows and
-//     the kernel's on Linux (a G29 on SteamOS). macOS has no such driver
-//     for these wheels, so the wheel stays slack there and the log says so,
-//     while steering, the pedals and the buttons all work.
+//     drive the wheel's motors: the kernel's driver on Linux (a G29 on
+//     SteamOS), and on macOS Apple's own Force Feedback framework, which
+//     drives a G29 over USB without anything of Logitech's installed
+//     (measured: autocentre, a spring and a rumble all move the wheel).
+//     Where a system can't drive a wheel, the log says so and Settings >
+//     Wheel says so on the two rows that need the motors, while steering,
+//     the pedals and the buttons all work regardless.
 #pragma once
 #include <cstdint>
 #include <string>
@@ -88,29 +91,44 @@ namespace hid::wheel
     void Suspend();
     void Shutdown();
 
-    // Settings > Wheel > Pedals (ui/settings_menu.cpp). Assign watches the
-    // axes and gives the one that moves furthest to a pedal, which is the
-    // only way to tell three identical springs apart on a wheel we don't
-    // know.
-    enum class Pedal : uint8_t { Throttle, Brake, Clutch };
-    // Main thread: start watching. The axes' places are remembered as they
-    // are now, so a pedal already held down isn't taken for one being
-    // pressed.
-    void BeginAssign(Pedal pedal);
-    // Main thread, once a frame while assigning: the axis that has moved
-    // furthest since BeginAssign, once it has moved far enough to mean it
-    // (true, and the assignment is stored and in force). False while
-    // nothing has.
-    bool PollAssign();
-    // Main thread: give up on the assignment under way (B, or the menu
-    // closing). Nothing if none is.
+    // Settings > Wheel > Calibrate (ui/settings_menu.cpp): one step per
+    // thing to learn - the wheel's own axis and which way it turns, then
+    // each pedal.
+    //
+    // A step watches, offers what it has found, and waits for the player to
+    // press A. Nothing is stored before that, and the axis that has moved
+    // *furthest* wins rather than the first one to move. The version before
+    // this took the first axis past a third of its travel and went straight
+    // on to the next step, so one long pedal press was handed to every
+    // remaining step before the foot came up.
+    enum class Step : uint8_t { Steer, Throttle, Brake, Clutch };
+    // Main thread: start watching for `step`. Where the axes rest now is
+    // remembered, so whatever is already held doesn't read as a movement.
+    void BeginAssign(Step step);
+    // What the step has seen.
+    struct Candidate
+    {
+        bool found = false;   // something has moved far enough to mean it
+        int axis = -1;
+        float moved = 0.0f;   // how far it went, as a share of its travel
+        bool invert = false;  // Steer: it ran the other way (left read positive)
+    };
+    // Main thread, once a frame while a step is running: what A would store.
+    Candidate Watch();
+    // Main thread: store what Watch offers and end the step. False while it
+    // has nothing to store (A pressed before anything moved), and the step
+    // then carries on.
+    bool ConfirmAssign();
+    // Main thread: give up on the step under way (B, or the menu closing).
     void CancelAssign();
     bool Assigning();
+    // Main thread: which step is running (only meaningful while Assigning).
+    Step AssigningStep();
     // Main thread: the axis each role is reading, as the device numbers
-    // them; -1: none (shown in Settings > Wheel's Pedals row).
+    // them; -1: none (shown in Settings > Wheel's Calibrate row).
     struct Assignment { int steer = -1, throttle = -1, brake = -1, clutch = -1; };
     Assignment Axes();
-    // Main thread: forget what Settings > Wheel > Pedals assigned and work
-    // the axes out from the device again (the page's Reset).
+    // Main thread: forget what Calibrate stored (the axes and the steering
+    // direction) and work them out from the device again (the page's Reset).
     void ResetAxes();
 }

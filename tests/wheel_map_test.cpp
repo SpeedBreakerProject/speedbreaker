@@ -23,8 +23,8 @@ static bool Near(float a, float b, float slack = 0.001f)
     return std::fabs(a - b) <= slack;
 }
 
-// A G29's axes as they rest: the wheel centred, three pedals held at one end
-// by their springs.
+// A G29's axes as they rest, measured on the hardware: the wheel centred on
+// axis 0, and its three pedals held at +32767 by their springs.
 static constexpr int16_t kG29Rest[] = { 0, 32767, 32767, 32767 };
 
 // Resolve takes a contiguous run of bools (std::vector<bool> is not one).
@@ -50,6 +50,10 @@ int main()
         const bool last = i == kModelCount - 1;
         CHECK((m.vendor == 0 && m.product == 0) == last, "model %zu: only the last is the fallback", i);
         CHECK(m.name != nullptr && m.axes.steer >= 0 && !m.buttons.empty(), "model %zu: named, steers, has buttons", i);
+        // Where its pedals rest: an end of the axis, or 0 for not known.
+        CHECK(m.pedalRest == 0 || m.pedalRest == kAxisMax || m.pedalRest == -kAxisMax,
+            "model %zu: pedalRest %d is an end of the axis, or unknown", i, int(m.pedalRest));
+        CHECK((m.pedalRest != 0) == (m.vendor != 0), "model %zu: the wheels we know say where their pedals rest", i);
         CHECK(m.fullTurnDegrees >= 0 && m.fullTurnDegrees <= 1080, "model %zu: %d degrees", i, m.fullTurnDegrees);
         if (!last)
             CHECK(ids.insert(uint32_t(m.vendor) << 16 | m.product).second, "model %zu: its own USB ids", i);
@@ -59,12 +63,17 @@ int main()
             for (size_t b = a + 1; b < 4; b++)
                 CHECK(axes[a] < 0 || axes[a] != axes[b], "model %zu: axis %d is one role", i, axes[a]);
     }
-    // The G29 is the wheel this was written for: known by both of its USB
-    // product ids, 900 degrees, and the Logitech buttons.
+    // The G29 is the wheel this was written for, and the one its numbers
+    // were measured on: the wheel is axis 0, the pedals are throttle 2,
+    // brake 3 and clutch 1 (not the order they stand in), they rest at
+    // +32767, it turns 900 degrees, and its buttons are the Logitech set.
     for (uint16_t product : { 0xC24F, 0xC260 })
     {
         const Model& g29 = ModelFor(0x046D, product);
         CHECK(g29.vendor == 0x046D && g29.product == product, "the G29 (%04x) is known", product);
+        CHECK(g29.axes.steer == 0 && g29.axes.throttle == 2 && g29.axes.brake == 3 && g29.axes.clutch == 1,
+            "the G29's measured axes (%d, %d, %d, %d)", g29.axes.steer, g29.axes.throttle, g29.axes.brake, g29.axes.clutch);
+        CHECK(g29.pedalRest == kAxisMax, "the G29's pedals rest at +32767, not 0");
         CHECK(g29.fullTurnDegrees == 900, "the G29 turns 900 degrees");
         CHECK(g29.buttons.data() == kLogitechButtons, "the G29 has the Logitech buttons");
     }
@@ -84,7 +93,7 @@ int main()
     // Where the axes rest tells the wheel (centred) from the pedals (held at
     // one end): a G29 comes out as its model says.
     Axes axes = Detect(kG29Rest, ModelFor(0x046D, 0xC24F).axes);
-    CHECK(axes.steer == 0 && axes.throttle == 1 && axes.brake == 2 && axes.clutch == 3, "the G29's axes: %d %d %d %d",
+    CHECK(axes.steer == 0 && axes.throttle == 2 && axes.brake == 3 && axes.clutch == 1, "the G29's axes: %d %d %d %d",
         axes.steer, axes.throttle, axes.brake, axes.clutch);
 
     // A wheel we don't know, with the same resting places, still steers and
@@ -113,10 +122,13 @@ int main()
     CHECK(axes.steer == 0 && axes.throttle == 1 && axes.brake == -1 && axes.clutch == -1, "a wheel with one pedal");
 
     // A wheel held off centre as the game starts is still the wheel (half
-    // way is the line), and a pedal already pressed is still a pedal.
+    // way is the line), and a pedal already pressed is still a pedal: here
+    // axis 1, which on a G29 is the clutch, is held to the floor while the
+    // other two rest, and every role still lands where the model says.
     constexpr int16_t kOffCentreRest[] = { 12000, -32768, 32767, 32767 };
     axes = Detect(kOffCentreRest, ModelFor(0x046D, 0xC24F).axes);
-    CHECK(axes.steer == 0 && axes.throttle == 1, "a wheel off centre, a pedal held down: %d, %d", axes.steer, axes.throttle);
+    CHECK(axes.steer == 0 && axes.throttle == 2 && axes.brake == 3 && axes.clutch == 1,
+        "a wheel off centre, the clutch held down: %d, %d, %d, %d", axes.steer, axes.throttle, axes.brake, axes.clutch);
 
     // Steering. The whole turn, straight through: the ends and the middle.
     CHECK(Near(Steer(0, 0, 900, 0.0f, 1.0f), 0.0f), "centred is straight ahead");
@@ -177,6 +189,23 @@ int main()
     CHECK(pedal.Value(-30000) > pedal.Value(-20000) && pedal.Value(-30000) < 1.0f, "a harder one is further down, still not the floor");
     CHECK(Near(pedal.Value(32767), 0.0f), "and it is up again at rest");
     CHECK(Near(pedal.Value(-20000), float(32767 + 20000) / 65534.0f, 0.001f), "the same press reads the same as before");
+    // A pedal nobody has placed reads nothing, however far its axis is from
+    // zero: SDL reports an axis only when it moves, so an untouched pedal
+    // resting at +32767 would otherwise read as floored.
+    const Pedal untouched;
+    CHECK(!untouched.ready, "a fresh pedal knows nothing");
+    for (int raw : { -32768, 0, 32767 })
+        CHECK(untouched.Value(int16_t(raw)) == 0.0f, "an unplaced pedal reads nothing at %d", raw);
+    Pedal placed;
+    placed.Start(32767);
+    CHECK(placed.ready && Near(placed.Value(32767), 0.0f) && Near(placed.Value(-32768), 1.0f), "...and reads once placed");
+
+    // An axis read the other way round (Invert Steering).
+    CHECK(Flip(0) == 0, "centred stays centred");
+    CHECK(Flip(32767) == -32767 && Flip(-32767) == 32767, "the ends swap");
+    CHECK(Flip(-32768) == kAxisMax, "the extra count clamps rather than wrapping to itself");
+    CHECK(Flip(Flip(12345)) == 12345, "twice is where it started");
+
     // Whatever it reads, the answer is a fraction.
     pedal.Start(0);
     for (int raw : { -32768, -1000, 0, 1000, 32767 })

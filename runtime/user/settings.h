@@ -70,6 +70,7 @@ namespace settings
         // device).
         Wheel,
         SteeringRange,
+        InvertSteering,
         SteeringDeadzone,
         SteeringResponse,
         ForceFeedback,

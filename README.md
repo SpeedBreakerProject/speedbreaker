@@ -376,8 +376,9 @@ is B, Square is X and Triangle is Y.
 
 Plug in a USB steering wheel and it plays the game: it is used instead of a controller, and
 **Settings > Wheel** appears while it is plugged in. The **Logitech G29** is the wheel this was
-written for; its family (G920, G923, G27, G25, Driving Force GT and Pro) is known by name too, and
-any other wheel SDL sees is used as best we can work it out.
+written for, and its axes, buttons and pedals are measured from one rather than guessed at; its
+family (G920, G923, G27, G25, Driving Force GT and Pro) is taken to report the same way, and any
+other wheel SDL sees is used as best we can work it out.
 
 | Xbox 360 control | Steering wheel |
 |---|---|
@@ -393,13 +394,16 @@ any other wheel SDL sees is used as best we can work it out.
 - **Settings > Wheel** has Steering Range (how much of the wheel's turn reaches full lock; 540
   degrees of a G29's 900 by default), Steering Deadzone, Steering Response (gentler or sharper
   near the centre), Force Feedback, Centering Force, and **Pedals**.
-- **Force feedback needs the system to drive the wheel's motors.** On SteamOS and other Linux
-  systems the kernel does that, so the wheel pushes back and centres itself. **macOS has no driver
-  for these wheels, so a wheel stays slack there** - steering, the pedals and the buttons all
-  work, and the log and the two force-feedback rows say so.
-- If the pedals come out in the wrong places (a wheel we don't know), choose **Pedals** and press
-  each one as it asks. The help line under the rows shows every axis as it moves, so you can check
-  the wheel over without leaving the page. *Reset page* puts the pedals back to the device's own.
+- **Force feedback works**, and needs nothing installed: on a Mac through Apple's own Force
+  Feedback framework (measured on a G29 over USB - the autocentre pull, the spring and the rumble
+  all move the wheel), and on SteamOS and other Linux systems through the kernel's driver. Where a
+  system can't drive a particular wheel, the log says so and the two force-feedback rows say so,
+  and steering, the pedals and the buttons all work regardless.
+- If anything comes out in the wrong place (a wheel we don't know), choose **Calibrate**: it asks
+  for one thing at a time - turn the wheel left, then each pedal - shows you what it saw, and
+  waits for **A** before it keeps it, so one long pedal press can't run through the lot. **B**
+  gives up on a step. The help line under the rows shows every axis as it moves, so you can check
+  the wheel over without leaving the page, and *Reset page* puts it all back to the device's own.
 - The clutch is read and shown, but the game has no use for it.
 - A wheel whose buttons come out wrong: start the game with `NFSMW_WHEEL_LOG=1` to see each button
   as you press it (`[wheel] button 7 down`), then set them with, for example,

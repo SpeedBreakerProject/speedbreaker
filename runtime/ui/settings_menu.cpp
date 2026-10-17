@@ -53,10 +53,12 @@ namespace ui
         int s_slot = 0;              // 0: the row's first key, 1: its second
         constexpr const char* kPressAKey = "Press a key";
         constexpr const char* kNoKey = "none";
-        // The Wheel page's Pedals row (PedalsRow): 0 when it isn't asking
-        // for anything, else which pedal it is waiting to be pressed.
-        int s_pedalStep = 0;  // 1 throttle, 2 brake, 3 clutch
-        bool s_describedPedals = false;  // the help line describes that row
+        // The Wheel page's Calibrate row (CalibrateRow): which step is
+        // running, or none. Each one waits for A, so one long pedal press
+        // can't run through the lot (hid/wheel.h).
+        bool s_calibrating = false;
+        hid::wheel::Step s_calStep = hid::wheel::Step::Steer;
+        bool s_describedCal = false;  // the help line describes that row
 
         void EndWait()
         {
@@ -500,38 +502,67 @@ namespace ui
             return activated;
         }
 
-        // Settings > Wheel > Pedals. The wheels we know say which axis each
-        // pedal is, and where the axes rest tells a pedal from the wheel
-        // itself (hid/wheel_map.h) - but three identical springs on a wheel
-        // we don't know can only be told apart by someone pressing them. A
-        // asks for each in turn, and B gives up. The help line shows what
+        // Settings > Wheel > Calibrate. The wheels we know say which axis
+        // each pedal is, and where the axes rest tells a pedal from the
+        // wheel itself (hid/wheel_map.h) - but three identical springs on a
+        // wheel we don't know can only be told apart by someone pressing
+        // them, and which way the wheel turns only by someone turning it.
+        //
+        // So: one step at a time, each showing what it has found and
+        // waiting for A to accept it. B gives up. The help line shows what
         // every axis reads as it happens, so a wheel can be checked over
         // without leaving the page.
-        hid::wheel::Pedal PedalOfStep(int step)
+        using Step = hid::wheel::Step;
+
+        const char* StepName(Step step)
         {
-            return step == 1 ? hid::wheel::Pedal::Throttle : step == 2 ? hid::wheel::Pedal::Brake : hid::wheel::Pedal::Clutch;
+            switch (step)
+            {
+            case Step::Steer: return "Steering";
+            case Step::Throttle: return "Throttle";
+            case Step::Brake: return "Brake";
+            case Step::Clutch: return "Clutch";
+            }
+            return "?";
         }
 
-        const char* PedalName(int step)
+        // What to do for each step, in the player's words.
+        const char* StepAsk(Step step)
         {
-            return step == 1 ? "throttle" : step == 2 ? "brake" : "clutch";
+            switch (step)
+            {
+            case Step::Steer: return "Turn the wheel left";
+            case Step::Throttle: return "Press the throttle";
+            case Step::Brake: return "Press the brake";
+            case Step::Clutch: return "Press the clutch";
+            }
+            return "?";
         }
 
-        void CancelPedals()
+        void CancelCalibrate()
         {
-            s_pedalStep = 0;
+            s_calibrating = false;
             hid::wheel::CancelAssign();
         }
 
-        void AskForPedal(int step)
+        void AskFor(Step step)
         {
-            if (step < 1 || step > 3)
+            s_calibrating = true;
+            s_calStep = step;
+            hid::wheel::BeginAssign(step);
+        }
+
+        // The step after this one; none after the clutch.
+        bool NextStep(Step step, Step& next)
+        {
+            switch (step)
             {
-                CancelPedals();
-                return;
+            case Step::Steer: next = Step::Throttle; return true;
+            case Step::Throttle: next = Step::Brake; return true;
+            case Step::Brake: next = Step::Clutch; return true;
+            case Step::Clutch: return false;
             }
-            s_pedalStep = step;
-            hid::wheel::BeginAssign(PedalOfStep(step));
+            return false;
         }
 
         // Every axis and what it reads now, for the help line.
@@ -539,8 +570,10 @@ namespace ui
         {
             const hid::wheel::Assignment axes = hid::wheel::Axes();
             const hid::wheel::Reading now = hid::wheel::Last();
-            std::string text = axes.steer < 0 ? "Steering: none"
-                                              : std::format("Steering axis {}: {:+.0f}%", axes.steer, double(now.steer) * 100.0);
+            std::string text = axes.steer < 0
+                ? "Steering: none"
+                : std::format("Steering axis {}{}: {:+.0f}%", axes.steer,
+                      settings::GetBool(Id::InvertSteering) ? " inverted" : "", double(now.steer) * 100.0);
             struct Row { const char* name; int axis; float value; };
             for (const Row& row : { Row{ "Throttle", axes.throttle, now.throttle }, Row{ "Brake", axes.brake, now.brake },
                                     Row{ "Clutch", axes.clutch, now.clutch } })
@@ -549,13 +582,31 @@ namespace ui
             return text;
         }
 
-        void PedalsRow(float valueWidth)
+        void CalibrateRow(float valueWidth)
         {
-            if (ActionRow("wheel-pedals", "Pedals", s_pedalStep ? "Press it" : "Assign", valueWidth, s_describedPedals) && !s_pedalStep)
-                AskForPedal(1);
-            // The pedal pressed is the axis that moved: on to the next one.
-            if (s_pedalStep && hid::wheel::PollAssign())
-                AskForPedal(s_pedalStep + 1);
+            const bool activated = ActionRow("wheel-calibrate", "Calibrate",
+                s_calibrating ? StepName(s_calStep) : "Start", valueWidth, s_describedCal);
+            if (!s_calibrating)
+            {
+                if (activated)
+                    AskFor(Step::Steer);
+                return;
+            }
+            // A accepts what the step has found, wherever the cursor is: it
+            // may have wandered off the row while the player had both hands
+            // on the wheel. Nothing happens until something has moved.
+            const bool confirm = activated || ImGui::IsKeyPressed(ImGuiKey_GamepadFaceDown, false) ||
+                ImGui::IsKeyPressed(ImGuiKey_Enter, false) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter, false) ||
+                ImGui::IsKeyPressed(ImGuiKey_Space, false);
+            if (!confirm || !hid::wheel::ConfirmAssign())
+                return;
+            if (Step next; NextStep(s_calStep, next))
+                AskFor(next);
+            else
+            {
+                s_calibrating = false;
+                fprintf(stderr, "[settings] menu: calibrate: done\n");
+            }
         }
 
         // A (or a click) saves the report.
@@ -689,20 +740,26 @@ namespace ui
                     ImGui::TextDisabled("%s", message.empty() ? " " : message.c_str());
                 return;
             }
-            if (s_describedPedals)
+            if (s_describedCal)
             {
-                if (s_pedalStep)
+                if (s_calibrating)
                 {
+                    const hid::wheel::Candidate c = hid::wheel::Watch();
                     PushAccentText();
-                    if (s_pedalStep == 3)
-                        ImGui::TextUnformatted("Press the clutch. B if your wheel hasn't one.");
+                    if (!c.found)
+                        ImGui::Text("%s. %s", StepAsk(s_calStep),
+                            s_calStep == Step::Clutch ? "B if your wheel hasn't one." : "B gives up.");
+                    else if (s_calStep == Step::Steer)
+                        ImGui::Text("Axis %d, turned %.0f%%%s. A to accept it, or keep turning.", c.axis,
+                            double(c.moved) * 100.0, c.invert ? ", the other way round" : "");
                     else
-                        ImGui::Text("Press the %s. B gives up.", PedalName(s_pedalStep));
+                        ImGui::Text("Axis %d, pressed %.0f%%. A to accept it, or press again.", c.axis, double(c.moved) * 100.0);
                     PopAccentText();
                 }
                 else
-                    ImGui::TextWrapped("Which axis each pedal is. A asks for each in turn: press the one it asks for. "
-                                       "Only a wheel whose pedals come out in the wrong places needs this.");
+                    ImGui::TextWrapped("Which axis the wheel and each pedal are, and which way the wheel turns. A asks for "
+                                       "one at a time and waits for A again to accept what it saw. Only a wheel that comes "
+                                       "out wrong needs this.");
                 ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
                 ImGui::TextWrapped("%s", WheelReadings().c_str());
                 ImGui::PopStyleColor();
@@ -849,11 +906,11 @@ namespace ui
         s_described = Id::Count;
         s_describedBugReport = false;
         s_describedUpdate = false;
-        s_describedPedals = false;
+        s_describedCal = false;
         if (s_waiting != Id::Count && settings::Info(s_waiting).category != s_category)
             EndWait();
-        if (s_pedalStep && s_category != Category::Wheel)
-            CancelPedals();  // the page has gone (or the wheel has)
+        if (s_calibrating && s_category != Category::Wheel)
+            CancelCalibrate();  // the page has gone (or the wheel has)
         // For the B check at the end: B's nav cancel (in ImGui's NewFrame,
         // before this) takes the waiting row's focus, and KeyRow then ends
         // the wait before that check could see it.
@@ -910,7 +967,7 @@ namespace ui
                         for (const char* text : { "Saving...", "Checking...", UpdateRowValue() })
                             valueWidth = std::max(valueWidth, ImGui::CalcTextSize(text).x);
                     if (category == Category::Wheel)
-                        for (const char* text : { "Assign", "Press it" })
+                        for (const char* text : { "Start", "Steering", "Throttle", "Brake", "Clutch" })
                             valueWidth = std::max(valueWidth, ImGui::CalcTextSize(text).x);
                     valueWidth += 2 * kSpaceM * s;
                     float arrow = ImGui::GetFrameHeight();
@@ -933,7 +990,7 @@ namespace ui
                                     focusFirst = false;
                                 }
                         if (category == Category::Wheel)
-                            PedalsRow(valueWidth);
+                            CalibrateRow(valueWidth);
                         if (category == Category::Advanced)
                         {
                             BugReportRow(valueWidth);
@@ -1025,9 +1082,9 @@ namespace ui
                 // leaves them, so the wheel puts them back itself.
                 if (s_category == Category::Wheel)
                 {
-                    CancelPedals();
+                    CancelCalibrate();
                     hid::wheel::ResetAxes();
-                    fprintf(stderr, "[settings] menu: pedals: back to the device's own axes\n");
+                    fprintf(stderr, "[settings] menu: calibrate: back to the device's own axes\n");
                 }
                 ImGui::CloseCurrentPopup();
             }
@@ -1053,10 +1110,10 @@ namespace ui
         {
             if (wasWaiting)
                 EndWait();
-            else if (s_pedalStep)
+            else if (s_calibrating)
             {
-                fprintf(stderr, "[settings] menu: pedals: gave up on the %s\n", PedalName(s_pedalStep));
-                CancelPedals();
+                fprintf(stderr, "[settings] menu: calibrate: gave up on the %s\n", StepName(s_calStep));
+                CancelCalibrate();
             }
             else
                 CloseSettings();
@@ -1068,7 +1125,7 @@ namespace ui
     {
         s_opened = true;
         EndWait();  // a wait the menu was closed under is over
-        CancelPedals();  // ...and so is a pedal it was asking for
+        CancelCalibrate();  // ...and so is a step it was asking for
         s_takenKey = SDL_SCANCODE_UNKNOWN;
         s_slotRow = Id::Count;
         s_slot = 0;

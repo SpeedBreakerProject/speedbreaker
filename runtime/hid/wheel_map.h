@@ -78,6 +78,11 @@ namespace hid::wheelmap
         const char* name;
         uint16_t vendor = 0, product = 0;  // 0, 0: the fallback for every other wheel
         Axes axes;
+        // Where its pedals rest, which SDL cannot be asked for: a joystick
+        // reports an axis only when it moves, so a pedal nobody has touched
+        // reads 0 whatever it is really sitting at. 0 here: unknown, and
+        // then a pedal reads nothing until its axis speaks for itself.
+        int16_t pedalRest = 0;
         int fullTurnDegrees = 0;           // lock to lock; 0: unknown (Steering Range then has nothing to go by)
         std::span<const Binding> buttons;
     };
@@ -108,22 +113,31 @@ namespace hid::wheelmap
         { 8, button::LeftThumb }, { 9, button::RightThumb },
     };
 
-    // The wheels we know. Logitech's modern wheels (G25 onwards) all turn
-    // 900 degrees lock to lock and report the wheel first and then the
-    // pedals, throttle before brake before clutch. Nothing here is trusted
-    // blindly: Detect() checks the axes against where they rest, and
-    // Settings > Wheel > Pedals overrules both.
+    // The wheels we know.
+    //
+    // The G29's numbers are measured, on a Logitech G29 (046d:c24f) over
+    // USB on macOS: the wheel is axis 0 and turning left reads negative, as
+    // the pad wants; the pedals are throttle 2, brake 3, clutch 1 - not the
+    // order they sit in on the floor - and each rests at +32767 and runs to
+    // -32768 as it goes down. Its buttons are kLogitechButtons, confirmed
+    // one at a time, and its hat is the D-pad.
+    //
+    // The rest of the family is taken to report the same way, since they
+    // share the G29's report format, but only the G29 has been measured.
+    // Nothing here is trusted blindly in any case: Detect() checks the axes
+    // against where they rest, and Settings > Wheel > Calibrate overrules
+    // the lot.
     inline constexpr Model kModels[] = {
-        { "Logitech G29 Driving Force", 0x046D, 0xC24F, { 0, 1, 2, 3 }, 900, kLogitechButtons },
-        { "Logitech G29 Driving Force", 0x046D, 0xC260, { 0, 1, 2, 3 }, 900, kLogitechButtons },
-        { "Logitech G920 Driving Force", 0x046D, 0xC262, { 0, 1, 2, 3 }, 900, kLogitechButtons },
-        { "Logitech G923 Driving Force", 0x046D, 0xC266, { 0, 1, 2, 3 }, 900, kLogitechButtons },
-        { "Logitech G923 Driving Force", 0x046D, 0xC26E, { 0, 1, 2, 3 }, 900, kLogitechButtons },
-        { "Logitech G27 Racing Wheel", 0x046D, 0xC29B, { 0, 1, 2, 3 }, 900, kLogitechButtons },
-        { "Logitech G25 Racing Wheel", 0x046D, 0xC299, { 0, 1, 2, 3 }, 900, kLogitechButtons },
-        { "Logitech Driving Force GT", 0x046D, 0xC29A, { 0, 1, 2, -1 }, 900, kLogitechButtons },
-        { "Logitech Driving Force Pro", 0x046D, 0xC298, { 0, 1, 2, -1 }, 900, kLogitechButtons },
-        { "Steering wheel", 0, 0, { 0, 1, 2, 3 }, 0, kGenericButtons },
+        { "Logitech G29 Driving Force", 0x046D, 0xC24F, { 0, 2, 3, 1 }, kAxisMax, 900, kLogitechButtons },
+        { "Logitech G29 Driving Force", 0x046D, 0xC260, { 0, 2, 3, 1 }, kAxisMax, 900, kLogitechButtons },
+        { "Logitech G920 Driving Force", 0x046D, 0xC262, { 0, 2, 3, 1 }, kAxisMax, 900, kLogitechButtons },
+        { "Logitech G923 Driving Force", 0x046D, 0xC266, { 0, 2, 3, 1 }, kAxisMax, 900, kLogitechButtons },
+        { "Logitech G923 Driving Force", 0x046D, 0xC26E, { 0, 2, 3, 1 }, kAxisMax, 900, kLogitechButtons },
+        { "Logitech G27 Racing Wheel", 0x046D, 0xC29B, { 0, 2, 3, 1 }, kAxisMax, 900, kLogitechButtons },
+        { "Logitech G25 Racing Wheel", 0x046D, 0xC299, { 0, 2, 3, 1 }, kAxisMax, 900, kLogitechButtons },
+        { "Logitech Driving Force GT", 0x046D, 0xC29A, { 0, 2, 3, -1 }, kAxisMax, 900, kLogitechButtons },
+        { "Logitech Driving Force Pro", 0x046D, 0xC298, { 0, 2, 3, -1 }, kAxisMax, 900, kLogitechButtons },
+        { "Steering wheel", 0, 0, { 0, 1, 2, 3 }, 0, 0, kGenericButtons },
     };
     constexpr size_t kModelCount = sizeof(kModels) / sizeof(kModels[0]);
     static_assert(kModels[kModelCount - 1].vendor == 0 && kModels[kModelCount - 1].product == 0,
@@ -274,6 +288,13 @@ namespace hid::wheelmap
     {
         int16_t idle = 0;
         int32_t travel = kAxisMax;  // how far from idle is fully pressed
+        // Do we know where it rests? SDL reports an axis only when it
+        // moves, so one nobody has touched reads 0 whatever it is sitting
+        // at: for a pedal resting at +32767 that would be a floored pedal.
+        // Until the resting place is known from the wheel's model or from
+        // the axis itself, the pedal reads nothing at all, which is the
+        // safe way to be wrong.
+        bool ready = false;
 
         // The axis rests here. One resting at an end can travel the whole
         // way to the other; one resting centred, half of it.
@@ -281,17 +302,27 @@ namespace hid::wheelmap
         {
             idle = rest;
             travel = RestsCentred(rest) ? kAxisMax : kAxisMax + (rest < 0 ? -int(rest) : int(rest));
+            ready = true;
         }
 
         constexpr float Value(int16_t raw) const
         {
-            if (travel <= 0)
+            if (!ready || travel <= 0)
                 return 0.0f;
             const int32_t from = int32_t(raw) - int32_t(idle);
             const int32_t moved = from < 0 ? -from : from;
             return std::clamp(float(moved) / float(travel), 0.0f, 1.0f);
         }
     };
+
+    // An axis read the other way round (Settings > Wheel > Invert
+    // Steering, or a wheel whose axis runs the opposite way): -32768 has no
+    // positive twin, so it clamps to the end of the other side instead of
+    // wrapping back to itself.
+    constexpr int16_t Flip(int16_t raw)
+    {
+        return int16_t(-std::clamp(int(raw), -kAxisMax, kAxisMax));
+    }
 
     // The wheel's axis as the game's left stick, -1 (full left) to 1.
     //

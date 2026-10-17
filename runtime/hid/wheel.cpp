@@ -59,13 +59,17 @@ namespace hid::wheel
         const wheelmap::Model* s_model = nullptr;
         std::vector<Binding> s_bindings;
         Axes s_axes;
-        wheelmap::Pedal s_pedals[3];  // Pedal::Throttle, Brake, Clutch
+        wheelmap::Pedal s_pedals[3];  // in Step order: Throttle, Brake, Clutch
         int s_fullTurn = 0;           // degrees lock to lock, 0: unknown
         // The axes' resting places are read again on the first frame after
         // the device was opened: a joystick SDL has not polled yet reads 0
         // on every axis, and a pedal taken to rest at 0 when it really
         // rests at one end would hold the throttle down.
         bool s_restAgain = false;
+        // Which axes SDL has reported a value for. It sends an axis only
+        // when it moves, so everything reads 0 until something does: a
+        // reading from an axis that has never spoken means nothing.
+        std::vector<bool> s_axisSeen;
 
         SDL_Haptic* s_haptic = nullptr;
         bool s_canAutocentre = false;  // the wheel takes an autocentre level
@@ -79,38 +83,42 @@ namespace hid::wheel
 
         const bool s_log = std::getenv("NFSMW_WHEEL_LOG") != nullptr;
 
-        // Pedal -> s_pedals, and the setting holding its axis.
-        int Slot(Pedal pedal) { return int(pedal); }
+        // A pedal step's place in s_pedals (Steer has none).
+        int Slot(Step step) { return int(step) - 1; }
+        bool IsPedal(Step step) { return step != Step::Steer; }
 
-        settings::Id AxisOption(Pedal pedal)
+        settings::Id AxisOption(Step step)
         {
-            switch (pedal)
+            switch (step)
             {
-            case Pedal::Throttle: return settings::Id::WheelThrottleAxis;
-            case Pedal::Brake: return settings::Id::WheelBrakeAxis;
-            case Pedal::Clutch: return settings::Id::WheelClutchAxis;
+            case Step::Steer: return settings::Id::WheelSteerAxis;
+            case Step::Throttle: return settings::Id::WheelThrottleAxis;
+            case Step::Brake: return settings::Id::WheelBrakeAxis;
+            case Step::Clutch: return settings::Id::WheelClutchAxis;
             }
-            return settings::Id::WheelThrottleAxis;
+            return settings::Id::WheelSteerAxis;
         }
 
-        const char* PedalName(Pedal pedal)
+        const char* StepName(Step step)
         {
-            switch (pedal)
+            switch (step)
             {
-            case Pedal::Throttle: return "throttle";
-            case Pedal::Brake: return "brake";
-            case Pedal::Clutch: return "clutch";
+            case Step::Steer: return "steering";
+            case Step::Throttle: return "throttle";
+            case Step::Brake: return "brake";
+            case Step::Clutch: return "clutch";
             }
             return "?";
         }
 
-        int AxisOf(Pedal pedal)
+        int AxisOf(Step step)
         {
-            switch (pedal)
+            switch (step)
             {
-            case Pedal::Throttle: return s_axes.throttle;
-            case Pedal::Brake: return s_axes.brake;
-            case Pedal::Clutch: return s_axes.clutch;
+            case Step::Steer: return s_axes.steer;
+            case Step::Throttle: return s_axes.throttle;
+            case Step::Brake: return s_axes.brake;
+            case Step::Clutch: return s_axes.clutch;
             }
             return -1;
         }
@@ -157,25 +165,33 @@ namespace hid::wheel
         void Calibrate(bool initial)
         {
             const std::vector<int16_t> rest = AxisStates(initial);
+            bool anySeen = false;
+            for (size_t a = 0; a < s_axisSeen.size(); a++)
+                anySeen = anySeen || s_axisSeen[a];
             const Axes stored = StoredAxes();
             Axes preferred = s_model->axes;
             if (stored.steer >= 0) preferred.steer = stored.steer;
             if (stored.throttle >= 0) preferred.throttle = stored.throttle;
             if (stored.brake >= 0) preferred.brake = stored.brake;
             if (stored.clutch >= 0) preferred.clutch = stored.clutch;
-            s_axes = wheelmap::Detect(rest, preferred);
+            // Where the axes rest only means something once they have
+            // reported: before that, the model's own layout is all there is.
+            s_axes = anySeen ? wheelmap::Detect(rest, preferred) : preferred;
             // The player's assignments are not guesses: they stand.
             if (stored.steer >= 0) s_axes.steer = stored.steer;
             if (stored.throttle >= 0) s_axes.throttle = stored.throttle;
             if (stored.brake >= 0) s_axes.brake = stored.brake;
             if (stored.clutch >= 0) s_axes.clutch = stored.clutch;
-            const Pedal all[] = { Pedal::Throttle, Pedal::Brake, Pedal::Clutch };
-            for (Pedal pedal : all)
+            for (Step step : { Step::Throttle, Step::Brake, Step::Clutch })
             {
-                const int axis = AxisOf(pedal);
-                s_pedals[Slot(pedal)] = {};
-                if (axis >= 0 && size_t(axis) < rest.size())
-                    s_pedals[Slot(pedal)].Start(rest[size_t(axis)]);
+                const int axis = AxisOf(step);
+                s_pedals[Slot(step)] = {};  // not ready: reads nothing
+                if (axis < 0 || size_t(axis) >= rest.size())
+                    continue;
+                if (size_t(axis) < s_axisSeen.size() && s_axisSeen[size_t(axis)])
+                    s_pedals[Slot(step)].Start(rest[size_t(axis)]);  // the axis itself
+                else if (s_model->pedalRest != 0)
+                    s_pedals[Slot(step)].Start(s_model->pedalRest);  // what this wheel's pedals do
             }
             fprintf(stderr, "[wheel] axes: steering %d, throttle %d, brake %d, clutch %d (of %zu; rest", s_axes.steer,
                 s_axes.throttle, s_axes.brake, s_axes.clutch, rest.size());
@@ -254,8 +270,11 @@ namespace hid::wheel
         }
 
         // What the wheel can do with its motors, which needs the system to
-        // drive them: the maker's driver on Windows, the kernel's on Linux
-        // (lg4ff for a G29 on SteamOS). macOS has neither for these wheels.
+        // drive them: the kernel's driver on Linux (lg4ff for a G29 on
+        // SteamOS), and on macOS Apple's Force Feedback framework, which
+        // takes a G29 as it is (a measured G29 offers a constant force, a
+        // sine, a spring, an autocentre level and gain, 16 effects at
+        // once).
         void OpenHaptics()
         {
             s_canAutocentre = s_canSpring = s_canHapticRumble = s_onlyOneEffect = false;
@@ -309,6 +328,7 @@ namespace hid::wheel
             }
             s_id = 0;
             s_restAgain = false;
+            s_axisSeen.clear();
             s_name.clear();
             s_bindings.clear();
             s_axes = {};
@@ -377,6 +397,7 @@ namespace hid::wheel
                     SDL_GetNumJoystickAxes(s_joystick), SDL_GetNumJoystickButtons(s_joystick),
                     SDL_GetNumJoystickHats(s_joystick), turn.c_str());
                 TakeBindings();
+                s_axisSeen.assign(size_t(std::max(0, SDL_GetNumJoystickAxes(s_joystick))), false);
                 Calibrate(true);
                 s_restAgain = true;
                 OpenHaptics();
@@ -385,10 +406,15 @@ namespace hid::wheel
             SDL_free(ids);
         }
 
-        // Settings > Wheel > Pedals: the assignment under way.
+        // Settings > Wheel > Calibrate: the step under way. The furthest
+        // each axis has moved since it began is kept, so letting a pedal up
+        // doesn't lose the reading and the biggest mover wins however long
+        // the player takes.
         bool s_assigning = false;
-        Pedal s_assignTo = Pedal::Throttle;
+        Step s_assignStep = Step::Steer;
         std::vector<int16_t> s_assignFrom;
+        std::vector<int32_t> s_assignMoved;  // per axis, the furthest from where it rested
+        std::vector<int32_t> s_assignDir;    // ...and which way it went when it got there
 
         // NFSMW_WHEEL_LOG=1: every button as it is pressed (which is how to
         // find a wheel's numbering), and the axes once a second.
@@ -447,7 +473,26 @@ namespace hid::wheel
     {
         if (!s_started)
             return;
-        if (e.type == SDL_EVENT_JOYSTICK_ADDED)
+        if (e.type == SDL_EVENT_JOYSTICK_AXIS_MOTION && s_joystick && e.jaxis.which == s_id)
+        {
+            const int a = e.jaxis.axis;
+            if (a >= 0 && size_t(a) < s_axisSeen.size() && !s_axisSeen[size_t(a)])
+            {
+                s_axisSeen[size_t(a)] = true;
+                // A pedal on this axis that had no resting place to work
+                // from takes the value it was at as it started to move,
+                // which is near enough where it rests. A wheel we know
+                // never gets here: its model said so at the open.
+                for (Step step : { Step::Throttle, Step::Brake, Step::Clutch })
+                    if (AxisOf(step) == a && !s_pedals[Slot(step)].ready)
+                    {
+                        s_pedals[Slot(step)].Start(e.jaxis.value);
+                        fprintf(stderr, "[wheel] %s: axis %d first reported %+d, taken as where it rests\n", StepName(step),
+                            a, int(e.jaxis.value));
+                    }
+            }
+        }
+        else if (e.type == SDL_EVENT_JOYSTICK_ADDED)
         {
             Open();
         }
@@ -502,14 +547,19 @@ namespace hid::wheel
         r.back = (pressed.buttons & wheelmap::button::Back) != 0;
         r.start = (pressed.buttons & wheelmap::button::Start) != 0;
         if (s_axes.steer >= 0)
-            r.steer = wheelmap::Steer(AxisNow(s_axes.steer), settings::GetInt(settings::Id::SteeringRange), s_fullTurn,
+        {
+            int16_t raw = AxisNow(s_axes.steer);
+            if (settings::GetBool(settings::Id::InvertSteering))
+                raw = wheelmap::Flip(raw);
+            r.steer = wheelmap::Steer(raw, settings::GetInt(settings::Id::SteeringRange), s_fullTurn,
                 settings::GetFloat(settings::Id::SteeringDeadzone), settings::GetFloat(settings::Id::SteeringResponse));
+        }
         if (s_axes.throttle >= 0)
-            r.throttle = s_pedals[Slot(Pedal::Throttle)].Value(AxisNow(s_axes.throttle));
+            r.throttle = s_pedals[Slot(Step::Throttle)].Value(AxisNow(s_axes.throttle));
         if (s_axes.brake >= 0)
-            r.brake = s_pedals[Slot(Pedal::Brake)].Value(AxisNow(s_axes.brake));
+            r.brake = s_pedals[Slot(Step::Brake)].Value(AxisNow(s_axes.brake));
         if (s_axes.clutch >= 0)
-            r.clutch = s_pedals[Slot(Pedal::Clutch)].Value(AxisNow(s_axes.clutch));
+            r.clutch = s_pedals[Slot(Step::Clutch)].Value(AxisNow(s_axes.clutch));
         LogSample(held, r);
         s_last = r;
         // Switched off, the wheel plays nothing - but it was still read, so
@@ -582,40 +632,75 @@ namespace hid::wheel
         s_started = false;
     }
 
-    void BeginAssign(Pedal pedal)
+    void BeginAssign(Step step)
     {
         if (!s_joystick)
             return;
         s_assigning = true;
-        s_assignTo = pedal;
+        s_assignStep = step;
         s_assignFrom = AxisStates(false);
+        s_assignMoved.assign(s_assignFrom.size(), 0);
+        s_assignDir.assign(s_assignFrom.size(), 0);
     }
 
-    bool PollAssign()
+    Candidate Watch()
     {
         if (!s_assigning || !s_joystick)
-            return false;
-        int best = -1, moved = 0;
+            return {};
+        // Fold in where everything is now, keeping each axis's furthest.
         for (size_t a = 0; a < s_assignFrom.size(); a++)
         {
-            if (int(a) == s_axes.steer)
-                continue;  // the wheel itself is never a pedal
-            const int by = std::abs(int(AxisNow(int(a))) - int(s_assignFrom[a]));
-            if (by > moved)
+            const int32_t went = int32_t(AxisNow(int(a))) - int32_t(s_assignFrom[a]);
+            const int32_t far = went < 0 ? -went : went;
+            if (far > s_assignMoved[a])
             {
-                moved = by;
-                best = int(a);
+                s_assignMoved[a] = far;
+                s_assignDir[a] = went;
             }
         }
-        if (best < 0 || moved < kAssignMoved)
+        size_t best = 0;
+        int32_t most = -1;
+        for (size_t a = 0; a < s_assignMoved.size(); a++)
+            if (s_assignMoved[a] > most)
+            {
+                most = s_assignMoved[a];
+                best = a;
+            }
+        if (most < kAssignMoved)
+            return {};
+        Candidate c;
+        c.found = true;
+        c.axis = int(best);
+        // As a share of what that axis can travel from where it rested: a
+        // centred one (the wheel) has half the axis either way, one resting
+        // at an end (a pedal) the whole of it.
+        const float span = wheelmap::RestsCentred(s_assignFrom[best]) ? float(wheelmap::kAxisMax)
+                                                                      : float(2 * wheelmap::kAxisMax);
+        c.moved = std::clamp(float(most) / span, 0.0f, 1.0f);
+        // Turning left reads negative on the pad, so an axis that went the
+        // other way wants inverting.
+        c.invert = s_assignStep == Step::Steer && s_assignDir[best] > 0;
+        return c;
+    }
+
+    bool ConfirmAssign()
+    {
+        if (!s_assigning)
             return false;
+        const Candidate c = Watch();
+        if (!c.found)
+            return false;  // nothing has moved yet: the step goes on
         s_assigning = false;
-        fprintf(stderr, "[wheel] %s: axis %d (it moved %d)\n", PedalName(s_assignTo), best, moved);
-        // Stored, so the next run knows it too, and applied at once: the
-        // axis rests where it did before the pedal was pressed.
-        settings::Set(AxisOption(s_assignTo), double(best));
+        fprintf(stderr, "[wheel] %s: axis %d (it moved %.0f%% of its travel%s)\n", StepName(s_assignStep), c.axis,
+            double(c.moved) * 100.0, c.invert ? ", the other way: inverted" : "");
+        settings::Set(AxisOption(s_assignStep), double(c.axis));
+        if (s_assignStep == Step::Steer)
+            settings::Set(settings::Id::InvertSteering, c.invert ? 1.0 : 0.0);
         Calibrate(false);
-        s_pedals[Slot(s_assignTo)].Start(s_assignFrom[size_t(best)]);
+        // A pedal rests where it did before it was pressed, not where it is
+        // now (the foot may still be on it).
+        if (IsPedal(s_assignStep) && size_t(c.axis) < s_assignFrom.size())
+            s_pedals[Slot(s_assignStep)].Start(s_assignFrom[size_t(c.axis)]);
         return true;
     }
 
@@ -629,6 +714,11 @@ namespace hid::wheel
         return s_assigning;
     }
 
+    Step AssigningStep()
+    {
+        return s_assignStep;
+    }
+
     Assignment Axes()
     {
         return { s_axes.steer, s_axes.throttle, s_axes.brake, s_axes.clutch };
@@ -640,6 +730,7 @@ namespace hid::wheel
         for (settings::Id id : { settings::Id::WheelSteerAxis, settings::Id::WheelThrottleAxis, settings::Id::WheelBrakeAxis,
                                  settings::Id::WheelClutchAxis })
             settings::Set(id, -1);
+        settings::Reset(settings::Id::InvertSteering);
         if (s_joystick)
             Calibrate(false);
     }
