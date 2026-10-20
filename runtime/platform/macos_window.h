@@ -51,6 +51,11 @@ namespace platform::macos
     // `maxHz`, if given, get the range (for the log). False without a screen.
     bool DisplayRefreshFixed(SDL_Window* window, double* minHz = nullptr, double* maxHz = nullptr);
 
+    // The window's screen's current EDR headroom (the brightest EDR colour
+    // component over SDR white: 1 on a standard-range display, or without a
+    // screen), for HDR Output's highlight range. Main thread.
+    float DisplayHeadroom(SDL_Window* window);
+
     // Before SDL_DestroyWindow: stops watching the window.
     void ForgetWindow(SDL_Window* window);
 }

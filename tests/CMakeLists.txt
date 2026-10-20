@@ -133,6 +133,9 @@ sb_test(scale_budget_test SOURCES ${RT}/video/scale_budget.cpp ${RT}/video/pictu
 # tone shader's wrapping of the scale shaders, settings.cpp for the two
 # options' defaults (Xbox 360 Display Gamma on since v0.1.4).
 sb_test(display_tone_test ARGS ${RT}/video/presenter.cpp ${RT}/user/settings.cpp)
+# HDR Output's highlight curve and transfer functions
+# (video/hdr_output.h, header only).
+sb_test(hdr_output_test)
 # The display's refresh measured from present completions, at 60 Hz and at
 # whole multiples of it (video/refresh_fit.cpp, video/refresh_multiple.h).
 sb_test(refresh_fit_test SOURCES ${RT}/video/refresh_fit.cpp)

@@ -82,6 +82,13 @@ it's built into the game).
   and Calibrate for other wheels. Tested with a G29 on a Mac; the steering feel is still being
   tuned, so feedback from wheel owners is very welcome. Thanks to byteofmydream, who wrote it
   (pull request #29).
+- HDR output on a Mac with an HDR display (Settings > Display > HDR Output, off by default): the
+  game's highlights — the sun, headlights, lit signs — reach the display's extended dynamic range,
+  while the menus stay at standard brightness. The picture keeps its SDR shadows and mid-tones;
+  only the top of the range opens up. HDR Format chooses Auto, Extended Linear, or HDR10 (PQ);
+  Auto uses Extended Linear when macOS reports EDR headroom and HDR10 otherwise, and HDR10 sends
+  the PQ signal and metadata some monitors need to enter HDR mode. Thanks to @DoubleDips for the
+  idea (GitHub issue #25).
 
 ### Fixed
 
@@ -106,6 +113,13 @@ it's built into the game).
   position, G27, G25, Driving Force GT and Pro; not a G29 in its PS4 position, a G920 or a G923).
   On SteamOS and Linux the wheel should steer as on a Mac; force feedback there isn't tested yet.
 - The log now says when the game's sound code would have dropped sounds, at most once a minute.
+- HDR Output uses either a 16-bit-float swapchain in extended linear sRGB (macOS EDR) or a 10-bit
+  swapchain in HDR10/PQ with Rec.2020 primaries and static metadata; the log says
+  "swapchain: HDR" or "swapchain: HDR10" with the choice. SDR white stays at the menus'
+  brightness: 1.0 in EDR, 100 nits in HDR10 (whose highlights reach 1000 nits). The game renders
+  into its usual 8-bit SDR surfaces first, so bug-report screenshots and NFSMW_CHECK_PRESENT_SEC
+  captures stay standard-range; the PPM decodes PQ back to SDR. NFSMW_HDR=1 and
+  NFSMW_HDR_FORMAT=auto|edr|hdr10 set them for a run; iOS and Linux don't offer them.
 - Updating keeps your saves, settings and the installed game, and needs no disc image: on a Mac,
   drag the new app into Applications and choose Replace, then Open Anyway once more; on SteamOS,
   unpack the new download over the old folder.

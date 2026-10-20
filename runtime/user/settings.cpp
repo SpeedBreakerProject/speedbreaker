@@ -125,6 +125,20 @@ namespace settings
         constexpr bool kLanguageHidden = false;
 #endif
 
+        // HDR Output: macOS only (MoltenVK sets CAMetalLayer EDR on macOS;
+        // iOS needs the layer poked itself, and the issue is a Mac feature).
+#if defined(__APPLE__) && !TARGET_OS_IOS
+        constexpr bool kHdrHidden = false;
+#else
+        constexpr bool kHdrHidden = true;
+#endif
+
+        constexpr EnumEntry kHdrFormatEntries[] = {
+            { 0, "auto", "Auto" },
+            { 1, "edr", "Extended Linear" },
+            { 2, "hdr10", "HDR10 (PQ)" },
+        };
+
         constexpr EnumEntry kAspectEntries[] = {
             { int32_t(AspectMode::Auto), "auto", "Fill Screen" },
             { int32_t(AspectMode::Widescreen), "16:9", "16:9" },
@@ -271,6 +285,14 @@ namespace settings
               .table = "video", .key = "xbox_display_gamma", .label = "Xbox 360 Display Gamma",
               .description = "The gamma ramp the game itself sets for a real Xbox 360's TV output: a little deeper shadows and brighter mid-tones, as on the console. Off: the flatter picture of SpeedBreaker 0.1.3 and earlier.",
               .env = "NFSMW_DISPLAY_GAMMA", .defaultValue = 1 },
+            { .id = Id::Hdr, .category = Category::Display, .type = Type::Bool, .apply = Apply::Live, .hidden = kHdrHidden,
+              .table = "video", .key = "hdr", .label = "HDR Output",
+              .description = "Brighter highlights on an HDR display (extended dynamic range). The menus stay at standard brightness. Off: the standard-range picture.",
+              .env = "NFSMW_HDR", .defaultValue = 0 },
+            { .id = Id::HdrFormat, .category = Category::Display, .type = Type::Enum, .apply = Apply::Live, .hidden = kHdrHidden,
+              .table = "video", .key = "hdr_format", .label = "HDR Format",
+              .description = "How HDR is sent. Auto: Extended Linear on a display with EDR headroom, HDR10 otherwise. HDR10 (PQ) can wake a monitor that ignores Extended Linear.",
+              .env = "NFSMW_HDR_FORMAT", .defaultValue = 0, .entries = kHdrFormatEntries },
             { .id = Id::Sharpening, .category = Category::Graphics, .type = Type::Float, .apply = Apply::Live,
               .table = "video", .key = "sharpening", .label = "Sharpening",
               .description = kFsr1Offered

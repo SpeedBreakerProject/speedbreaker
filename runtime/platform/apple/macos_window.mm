@@ -186,6 +186,16 @@ namespace platform::macos
         return shortest > 0 && longest > 0 && std::abs(longest - shortest) <= 0.01 * shortest;
     }
 
+    float DisplayHeadroom(SDL_Window* window)
+    {
+        NSWindow* w = CocoaWindow(window);
+        NSScreen* screen = w ? w.screen : nil;
+        if (!screen)
+            return 1.0f;
+        const CGFloat headroom = screen.maximumExtendedDynamicRangeColorComponentValue;
+        return headroom > 1.0 ? float(headroom) : 1.0f;
+    }
+
     void ForgetWindow(SDL_Window*)
     {
         for (id token in s_observers)
