@@ -28,7 +28,7 @@
   &nbsp;·&nbsp;
   <a href="#building-the-windows-version">Build it</a>
   &nbsp;·&nbsp;
-  <a href="../../releases/latest"><b>Windows download</b></a>
+  <a href="https://github.com/rafidwayne/speedbreaker/releases/tag/v0.1.7-win.1"><b>Windows download</b></a>
   &nbsp;·&nbsp;
   <a href="https://github.com/SpeedBreakerProject/speedbreaker">Upstream</a>
 </p>
@@ -127,7 +127,7 @@ belongs to its owners.</sub>
 | **Linux** (x86-64) | [Download][dl-steamos-x86_64] the x86-64 SteamOS build, `SpeedBreaker-steamos-x86_64.tar.xz`, or [build from source](#building-from-source) | Tested here on SteamOS. Players reported v0.1.1 working on Fedora 44 (GeForce GTX 1080 Ti) and Ubuntu 24.04 (Intel Arc 140T). Other setups: reports welcome. |
 | **Mac** (Apple silicon) | [Download][dl-macos]<br>`SpeedBreaker-macos.dmg` | MacBook Pro (M1 Pro) on macOS 27 and Mac Studio (M4 Max) on macOS 26; macOS 15.6 (Sequoia) in a virtual machine. There is no Intel Mac build. |
 | **iPhone** and **iPad** | [Sideload the IPA](#iphone-and-ipad) (experimental), `SpeedBreaker-<version>-ios.ipa` on the [release page][releases], or [build it yourself](#iphone-and-ipad) with Xcode | iPhone 15 Pro Max and iPhone 18 Pro Max (iOS 27). iPad Pro 12.9-inch (M2, iPadOS 27) with a Backbone Pro. Not on the App Store. Those were Xcode-signed builds: the IPA itself hasn't been installed on a device yet. |
-| **Windows** (x86-64) | [Releases](../../releases/latest) on this fork: `SpeedBreaker.exe` and `SpeedBreakerLauncher.exe`, in the same folder. Details in [README-WINDOWS.md](README-WINDOWS.md) | Unofficial fork build. Not part of upstream's releases. |
+| **Windows** (x86-64) | [Releases](https://github.com/rafidwayne/speedbreaker/releases/tag/v0.1.7-win.1) on this fork: `SpeedBreaker.exe` and `SpeedBreakerLauncher.exe`, in the same folder. Details in [README-WINDOWS.md](README-WINDOWS.md) | Unofficial fork build. Not part of upstream's releases. |
 | **Android** | Coming soon | |
 
 Each link downloads the newest release. Every file and its `.sha256` checksum file are on the
@@ -592,7 +592,7 @@ pull requests are handled.
 
 The repository contains source only; the `.exe` files are not in it. You get them in one of three ways:
 
-1. **Download** them from this fork's [Releases](../../releases/latest) page.
+1. **Download** them from this fork's [Releases](https://github.com/rafidwayne/speedbreaker/releases/tag/v0.1.7-win.1) page.
 2. **Build on GitHub Actions** (no tools needed on your PC). Fork this repository and enable Actions.
    - `SpeedBreakerLauncher.exe` builds by itself on every push (workflow *Launcher and tools*).
    - `SpeedBreaker.exe` is built from **your own** `default.xex` (USA NTSC-U), which can't be in the
