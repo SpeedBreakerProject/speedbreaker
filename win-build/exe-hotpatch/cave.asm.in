@@ -1,0 +1,113 @@
+; SpeedBreaker audio-thread high-resolution wait (binary patch).
+; Replaces the call to winpthreads nanosleep at 0x1400020e8 inside AudioThread.
+;   rcx = rdx = const struct timespec* { int64 tv_sec; int32 tv_nsec; }   (same as nanosleep(req, rem))
+;   returns eax = 0 once the time has passed.
+; Waits on a high-resolution waitable timer (Windows 10 1803+); if that can't be set up for any reason it
+; tail-calls the original nanosleep with the original arguments, so the worst case is the old behaviour.
+; Position independent, no relocations; the only things it touches outside itself are four kernel32 import slots.
+bits 64
+default rel
+org %(CAVE_VA)s
+
+IAT_GetModuleHandleW  equ %(IAT_GetModuleHandleW)s
+IAT_GetProcAddress    equ %(IAT_GetProcAddress)s
+IAT_WaitForSingleObject equ %(IAT_WaitForSingleObject)s
+IAT_CloseHandle       equ %(IAT_CloseHandle)s
+ORIG_NANOSLEEP        equ %(ORIG_NANOSLEEP)s
+
+; call qword [rip+disp32] to an absolute address (NASM can't make that RIP-relative from an equ): FF 15 disp32
+%%macro callabs 1
+    db 0xFF, 0x15
+    dd %%1 - ($ + 4)
+%%endmacro
+
+hr_wait:
+    push    rbx
+    push    rsi
+    push    rdi
+    sub     rsp, 0x40               ; 0x00-0x1f shadow, 0x20/0x28 args 5-6, 0x30 due time, 0x38 timer handle
+    mov     rsi, rcx                ; req
+    mov     rdi, rdx                ; rem
+
+    mov     rax, [rsi]              ; tv_sec
+    test    rax, rax
+    js      .fallback
+    movsxd  rdx, dword [rsi+8]      ; tv_nsec
+    cmp     rdx, 0
+    jl      .fallback
+    add     rdx, 99                 ; round up to whole 100 ns units
+    imul    rcx, rax, 10000000      ; seconds in 100 ns
+    mov     rax, rdx
+    xor     edx, edx
+    mov     r8d, 100
+    div     r8                      ; rax = ceil(nsec / 100)
+    add     rax, rcx
+    jnz     .have
+    mov     eax, 1
+.have:
+    neg     rax                     ; negative = relative due time
+    mov     [rsp+0x30], rax
+
+    lea     rcx, [rel str_kernel32]
+    callabs IAT_GetModuleHandleW
+    test    rax, rax
+    jz      .fallback
+    mov     rbx, rax                ; kernel32
+
+    mov     rcx, rbx
+    lea     rdx, [rel str_CreateWaitableTimerExW]
+    callabs IAT_GetProcAddress
+    test    rax, rax
+    jz      .fallback
+    xor     ecx, ecx                ; no attributes
+    xor     edx, edx                ; no name
+    mov     r8d, 2                  ; CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
+    mov     r9d, 0x1F0003           ; TIMER_ALL_ACCESS
+    call    rax
+    test    rax, rax
+    jz      .fallback               ; older than Windows 10 1803
+    mov     [rsp+0x38], rax
+
+    mov     rcx, rbx
+    lea     rdx, [rel str_SetWaitableTimer]
+    callabs IAT_GetProcAddress
+    test    rax, rax
+    jz      .close_fallback
+    mov     rcx, [rsp+0x38]         ; timer
+    lea     rdx, [rsp+0x30]         ; &due
+    xor     r8d, r8d                ; one shot
+    xor     r9d, r9d                ; no completion routine
+    mov     qword [rsp+0x20], 0     ; its argument
+    mov     qword [rsp+0x28], 0     ; fResume = FALSE
+    call    rax
+    test    eax, eax
+    jz      .close_fallback
+
+    mov     rcx, [rsp+0x38]
+    mov     edx, 0xFFFFFFFF         ; INFINITE
+    callabs IAT_WaitForSingleObject
+    mov     rcx, [rsp+0x38]
+    callabs IAT_CloseHandle
+    xor     eax, eax
+    add     rsp, 0x40
+    pop     rdi
+    pop     rsi
+    pop     rbx
+    ret
+
+.close_fallback:
+    mov     rcx, [rsp+0x38]
+    callabs IAT_CloseHandle
+.fallback:
+    mov     rcx, rsi
+    mov     rdx, rdi
+    add     rsp, 0x40
+    pop     rdi
+    pop     rsi
+    pop     rbx
+    jmp     ORIG_NANOSLEEP
+
+align 2
+str_kernel32: dw 'k','e','r','n','e','l','3','2','.','d','l','l',0
+str_CreateWaitableTimerExW: db "CreateWaitableTimerExW",0
+str_SetWaitableTimer: db "SetWaitableTimer",0
