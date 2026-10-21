@@ -20,6 +20,6 @@ echo GL_OK > /home/claude/deps/gl_ok
 if [ ! -f /home/claude/deps/ffmpeg-xma/lib/libavcodec.a ]; then
   cd $S/FFmpeg && for p in /home/claude/speedbreaker/patches/ffmpeg/*.patch; do patch -s -p1 < $p; done
   ./configure --disable-everything --disable-programs --disable-doc --disable-debug --disable-network --disable-autodetect --disable-avdevice --disable-avformat --disable-swscale --disable-swresample --disable-postproc --disable-avfilter --enable-decoder=xma1,xma2,wmapro --enable-static --disable-shared --enable-cross-compile --target-os=mingw32 --arch=x86_64 --cross-prefix=x86_64-w64-mingw32- --cc="clang --target=x86_64-w64-mingw32" --prefix=/home/claude/deps/ffmpeg-xma --disable-x86asm > /home/claude/deps/ffconf.log 2>&1 || { echo FFCONF_FAIL > /home/claude/deps/FAIL; exit 1; }
-  make -j1 && make install || { echo FF_FAIL > /home/claude/deps/FAIL; exit 1; }
+  make -j"${JOBS:-1}" && make install || { echo FF_FAIL > /home/claude/deps/FAIL; exit 1; }
 fi
 echo ALL_OK > /home/claude/deps/all_ok

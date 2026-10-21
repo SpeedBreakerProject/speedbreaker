@@ -3,7 +3,8 @@
 # this source tree. These are the commands that were run, in order, collected
 # into one script. NOTE: it has not been run end-to-end as one script; each
 # step was run separately in the original session. Needs ~10 GB free disk,
-# several hours on one CPU core. Paths are absolute (/home/claude) because the
+# several hours on one CPU core (set JOBS=N to use N: the generated-code and FFmpeg
+# builds then run N at a time). Paths are absolute (/home/claude) because the
 # helper scripts (build_ppc.sh, deps.sh, mingw-toolchain.cmake) use them.
 #
 # Needs from you: your own USA (NTSC-U) NFS Most Wanted Xbox 360 default.xex
@@ -48,7 +49,7 @@ echo "aebdf3c14d1e4e4ed2c130d94bc1a0e97bd6d5bf39bdfdef33c3909c9cc4ba4c  $XEX" | 
 cp "$XEX" $SRC/game/files/default.xex
 cd $SRC && tools/XenonRecomp/build/XenonRecomp/XenonRecomp config/nfsmw.toml tools/XenonRecomp/XenonUtils/ppc_context.h
 
-# 4. Cross-compile the generated code (clang --target=x86_64-w64-mingw32 -O2 -march=x86-64-v3); ~30-60 min on one core
+# 4. Cross-compile the generated code (clang --target=x86_64-w64-mingw32 -O2 -march=x86-64-v3); ~30-60 min on one core, JOBS=N divides that
 $W/build_ppc.sh
 [ -f $W/ppc_fail.log ] && { echo "some ppc files failed:"; cat $W/ppc_fail.log; exit 1; }
 x86_64-w64-mingw32-ar rcs $W/libNfsmwRecompLib.a $W/ppcobj/*.o
