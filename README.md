@@ -23,6 +23,15 @@
 </p>
 
 <p align="center">
+  <b>Windows fork:</b> this repository adds an unofficial Windows (x86-64) build, a launcher and an audio fix on top of upstream v0.1.7.<br>
+  <a href="README-WINDOWS.md"><b>Windows README</b></a>
+  &nbsp;·&nbsp;
+  <a href="../../releases/latest"><b>Windows download</b></a>
+  &nbsp;·&nbsp;
+  <a href="https://github.com/SpeedBreakerProject/speedbreaker">Upstream</a>
+</p>
+
+<p align="center">
   <img src="assets/screenshots/speedbreaker-00-ultrawide-chase-cam-race.jpg" alt="A race on a 21:9 ultrawide screen, seen from the camera behind the player's car: an open expressway into a low sun, with the race HUD and the rear-view mirror" width="100%">
   <br>
   <sub>What you see in a race, on a 21:9 ultrawide: a wider view, not a stretched one, with the HUD and the mirror where they belong.</sub>
@@ -116,7 +125,7 @@ belongs to its owners.</sub>
 | **Linux** (x86-64) | [Download][dl-steamos-x86_64] the x86-64 SteamOS build, `SpeedBreaker-steamos-x86_64.tar.xz`, or [build from source](#building-from-source) | Tested here on SteamOS. Players reported v0.1.1 working on Fedora 44 (GeForce GTX 1080 Ti) and Ubuntu 24.04 (Intel Arc 140T). Other setups: reports welcome. |
 | **Mac** (Apple silicon) | [Download][dl-macos]<br>`SpeedBreaker-macos.dmg` | MacBook Pro (M1 Pro) on macOS 27 and Mac Studio (M4 Max) on macOS 26; macOS 15.6 (Sequoia) in a virtual machine. There is no Intel Mac build. |
 | **iPhone** and **iPad** | [Sideload the IPA](#iphone-and-ipad) (experimental), `SpeedBreaker-<version>-ios.ipa` on the [release page][releases], or [build it yourself](#iphone-and-ipad) with Xcode | iPhone 15 Pro Max and iPhone 18 Pro Max (iOS 27). iPad Pro 12.9-inch (M2, iPadOS 27) with a Backbone Pro. Not on the App Store. Those were Xcode-signed builds: the IPA itself hasn't been installed on a device yet. |
-| **Windows** | Coming soon | |
+| **Windows** (x86-64) | [Releases](../../releases/latest) on this fork: `SpeedBreaker.exe` and `SpeedBreakerLauncher.exe`, in the same folder. Details in [README-WINDOWS.md](README-WINDOWS.md) | Unofficial fork build. Not part of upstream's releases. |
 | **Android** | Coming soon | |
 
 Each link downloads the newest release. Every file and its `.sha256` checksum file are on the
@@ -579,7 +588,7 @@ pull requests are handled.
 
 ## What's next
 
-- **Windows:** coming soon.
+- **Windows:** available in this fork, see [README-WINDOWS.md](README-WINDOWS.md). Upstream: coming soon.
 - **Android:** coming soon.
 
 **One more thing… SpeedBreaker: Carbon, coming soon.** It's planned, not available yet.
