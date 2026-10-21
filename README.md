@@ -26,6 +26,8 @@
   <b>Windows fork:</b> this repository adds an unofficial Windows (x86-64) build, a launcher and an audio fix on top of upstream v0.1.7.<br>
   <a href="README-WINDOWS.md"><b>Windows README</b></a>
   &nbsp;·&nbsp;
+  <a href="#building-the-windows-version">Build it</a>
+  &nbsp;·&nbsp;
   <a href="../../releases/latest"><b>Windows download</b></a>
   &nbsp;·&nbsp;
   <a href="https://github.com/SpeedBreakerProject/speedbreaker">Upstream</a>
@@ -585,6 +587,34 @@ and a screenshot of the last game frame. Paths in your home folder show as `~`. 
 crashed, start it again and save a report: the crash report is included. **Never attach game
 files or disc images to an issue.** [CONTRIBUTING.md](CONTRIBUTING.md) says how bug reports and
 pull requests are handled.
+
+## Building the Windows version
+
+The repository contains source only; the `.exe` files are not in it. You get them in one of three ways:
+
+1. **Download** them from this fork's [Releases](../../releases/latest) page.
+2. **Build on GitHub Actions** (no tools needed on your PC). Fork this repository and enable Actions.
+   - `SpeedBreakerLauncher.exe` builds by itself on every push (workflow *Launcher and tools*).
+   - `SpeedBreaker.exe` is built from **your own** `default.xex` (USA NTSC-U), which can't be in the
+     repository. Put it at a private HTTPS URL, add that URL as the repository secret `XEX_URL`, then run
+     the workflow **Game (SpeedBreaker.exe)**. It takes a few hours. Pushing a tag such as
+     `v0.1.7-win.2` builds everything and publishes a release.
+3. **Build on your own machine** (Ubuntu 24.04 or WSL2 on Windows, about 10 GB free, a few hours).
+   This is the way to build the game without hosting anything: **you supply your own `default.xex`
+   locally** (from your USA NTSC-U Xbox 360 disc), and the script asks for it.
+
+   ```
+   win-build/ci-build.sh                          # asks for the path to your default.xex
+   win-build/ci-build.sh /path/to/default.xex     # or give it directly
+   ```
+
+   It checks that the file is the supported build, then writes `dist/SpeedBreaker.exe`. The launcher
+   builds on Windows with `launcher\build.bat`.
+
+GitHub Actions can't ask you for a file while it runs, which is why the Actions route needs the
+private `XEX_URL` instead.
+
+Full details are in [README-WINDOWS.md](README-WINDOWS.md).
 
 ## What's next
 
