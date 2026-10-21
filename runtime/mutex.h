@@ -2,7 +2,7 @@
 // GPL-3.0-or-later. Modified for SpeedBreaker.
 #pragma once
 
-#ifdef _WIN32
+#if 0  // SpeedBreaker Windows port: pthread-based Mutex below
 
 struct Mutex : CRITICAL_SECTION
 {

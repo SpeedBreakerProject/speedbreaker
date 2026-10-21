@@ -225,7 +225,7 @@ uint32_t RtlUnicodeToMultiByteN(char* MultiByteString, uint32_t MaxBytesInMultiB
 
 void KeSetBasePriorityThread(GuestThreadHandle* hThread, int priority)
 {
-#ifdef _WIN32
+#if 0  // SpeedBreaker Windows port: threads are pthreads here; priority left alone
     if (priority == 16)
     {
         priority = 15;

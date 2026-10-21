@@ -8,6 +8,17 @@ if(NOT PPC_SOURCES)
     message(FATAL_ERROR "No generated sources in ppc/. Run XenonRecomp first.")
 endif()
 
+if(WIN32 AND SB_PPC_PREBUILT)
+    # Windows port: ppc/ compiled ahead of time (a cross-compile of the 222 generated files takes hours on one core).
+    # Whole archive: COFF archive indexes leave out the weak aliases the generated code defines.
+    add_library(NfsmwRecompLib INTERFACE)
+    target_link_libraries(NfsmwRecompLib INTERFACE -Wl,--whole-archive ${SB_PPC_PREBUILT} -Wl,--no-whole-archive)
+    target_include_directories(NfsmwRecompLib INTERFACE
+        ${ROOT}/ppc
+        ${ROOT}/tools/XenonRecomp/XenonUtils
+        ${ROOT}/tools/XenonRecomp/thirdparty/simde)
+    return()
+endif()
 add_library(NfsmwRecompLib STATIC ${PPC_SOURCES})
 target_compile_features(NfsmwRecompLib PUBLIC cxx_std_20)
 target_include_directories(NfsmwRecompLib PUBLIC

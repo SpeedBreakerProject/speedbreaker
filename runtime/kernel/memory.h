@@ -2,7 +2,7 @@
 // GPL-3.0-or-later. Modified for SpeedBreaker.
 #pragma once
 
-#ifndef _WIN32
+#ifndef MEM_COMMIT
 #define MEM_COMMIT  0x00001000  
 #define MEM_RESERVE 0x00002000  
 #endif

@@ -64,6 +64,8 @@ namespace
         a.size = dir ? 0 : uint64_t(st.st_size);
 #ifdef __APPLE__
         int64_t sec = st.st_mtimespec.tv_sec, nsec = st.st_mtimespec.tv_nsec;
+#elif defined(_WIN32)
+        int64_t sec = st.st_mtime, nsec = 0;
 #else
         int64_t sec = st.st_mtim.tv_sec, nsec = st.st_mtim.tv_nsec;
 #endif

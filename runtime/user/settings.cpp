@@ -1029,7 +1029,7 @@ namespace settings
                 unlink(temp.c_str());
                 return std::format("can't replace {}: {}", target.string(), strerror(error));
             }
-            if (int dirFd = open(dir.empty() ? "." : dir.c_str(), O_RDONLY | O_CLOEXEC); dirFd >= 0)
+            if (int dirFd = open((dir.empty() ? std::filesystem::path(".") : dir).c_str(), O_RDONLY | O_CLOEXEC); dirFd >= 0)
             {
                 fsync(dirFd);  // best effort: some file systems refuse it on directories
                 close(dirFd);
@@ -1347,8 +1347,8 @@ namespace settings
                 bad += ".bad";
                 std::error_code ec;
                 std::filesystem::copy_file(path, bad, std::filesystem::copy_options::overwrite_existing, ec);
-                fprintf(stderr, "[settings] %s doesn't parse: %s (line %u, column %u); defaults (kept as %s)\n", path.c_str(),
-                    error.c_str(), unsigned(where.line), unsigned(where.column), ec ? "nothing: the copy failed" : bad.c_str());
+                fprintf(stderr, "[settings] %s doesn't parse: %s (line %u, column %u); defaults (kept as %s)\n", path.string().c_str(),
+                    error.c_str(), unsigned(where.line), unsigned(where.column), ec ? "nothing: the copy failed" : bad.string().c_str());
                 lastError = std::format("{} has a mistake at line {}, column {} ({}). The settings are at their defaults; {}.",
                     path.string(), where.line, where.column, error,
                     ec ? "saving them will replace the file" : std::format("the file was kept as {}", bad.string()));

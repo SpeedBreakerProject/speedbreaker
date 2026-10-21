@@ -232,7 +232,7 @@ void GuestThread::SetLastError(uint32_t error)
     *(uint32_t*)(thread + TEB_OFFSET + 0x160) = ByteSwap(error);
 }
 
-#ifdef _WIN32
+#if 0  // SpeedBreaker Windows port: MSVC-only debugger thread naming
 void GuestThread::SetThreadName(uint32_t threadId, const char* name)
 {
 #pragma pack(push,8)

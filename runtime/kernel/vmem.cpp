@@ -1,6 +1,9 @@
 // SpeedBreaker runtime. GPL-3.0-or-later (see COPYING).
 #include "../stdafx.h"
 #include "vmem.h"
+#ifdef _WIN32
+#include <compat/win/win_mem.h>
+#endif
 
 namespace vmem
 {
@@ -17,9 +20,14 @@ namespace vmem
         size_t bytes = size_t(count) * m_pageSize;
         // Physical memory is a shared object mirrored at three windows:
         // remapping would break the aliasing, so zero it in place.
+#ifdef _WIN32
+        if (m_base >= 0xA0000000 || !winmem::ResetPages(host, bytes))
+            memset(host, 0, bytes);
+#else
         if (m_base >= 0xA0000000 ||
             mmap(host, bytes, PROT_READ | PROT_WRITE, MAP_FIXED | MAP_ANON | MAP_PRIVATE, -1, 0) == MAP_FAILED)
             memset(host, 0, bytes);
+#endif
     }
 
     uint32_t PageHeap::Alloc(uint32_t size, uint32_t alignment, uint32_t type, uint32_t protect, bool topDown,

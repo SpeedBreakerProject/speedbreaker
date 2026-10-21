@@ -9,6 +9,9 @@
 //   SpeedBreaker --install <image>     and the other commands in install/install_cli.h
 
 #include "stdafx.h"
+#ifdef _WIN32
+#include <compat/win/win_mem.h>
+#endif
 #include "kernel/arena.h"
 #include "kernel/memory_status.h"
 #include "kernel/module.h"
@@ -358,11 +361,19 @@ int main(int argc, char** argv)
     guesttime::SetResumeHook(dispatcher::WakeAfterResume);
 
     report::PrepareCrashReports();
+#ifdef _WIN32
+    _fmode = _O_BINARY;
+    winseh::Install([](const void* address, bool write, const void* pc) {
+        writewatch::t_faultPc = pc;
+        return writewatch::HandleFault(address, write);
+    });
+#else
     struct sigaction sa{};
     sa.sa_sigaction = CrashHandler;
     sa.sa_flags = SA_SIGINFO;
     for (int sig : { SIGSEGV, SIGBUS, SIGILL, SIGTRAP, SIGFPE, SIGABRT })
         sigaction(sig, &sa, nullptr);
+#endif
     // SIGTERM, SIGINT and SIGHUP quit the game as its window's close button
     // does (platform/quit_signals.h): before SDL starts, which leaves them to
     // us.
