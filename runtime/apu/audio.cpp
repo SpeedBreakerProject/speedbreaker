@@ -30,6 +30,7 @@
 #include <stdafx.h>
 #include "audio.h"
 #include "audio_cadence.h"
+#include "audio_wait.h"
 #include <kernel/function.h>
 #include <cpu/guest_thread.h>
 #include <cpu/guest_time.h>
@@ -148,6 +149,14 @@ namespace
 #endif
         GuestThreadContext ctx(0);
         SetHostThreadName("nfsmw-audio");
+        apu::AudioWait wait;
+        fprintf(stderr, "[audio] pacing: %s\n", wait.Describe());
+        // Ticks that woke a whole interval or more late (a catch-up burst
+        // follows, and a burst's frames after the first two are silent), the
+        // worst wake, and when the last of them was logged.
+        uint32_t lateTicks = 0;
+        double worstLateMs = 0;
+        auto lateLogged = std::chrono::steady_clock::now();
         constexpr auto INTERVAL = nanoseconds(1000000000ull * SAMPLES_PER_FRAME / SAMPLE_RATE);
         // The time suspended that `next` allows for. Both taken while running
         // (XAudio can start this thread in a suspension): `next` is a host
@@ -176,7 +185,23 @@ namespace
         const auto started = steady_clock::now();
         while (s_running)
         {
-            std::this_thread::sleep_until(next);
+            wait.Until(next);
+            {
+                const auto woke = steady_clock::now();
+                const double lateMs = duration<double, std::milli>(woke - next).count();
+                if (lateMs >= duration<double, std::milli>(INTERVAL).count())
+                {
+                    lateTicks++;
+                    worstLateMs = std::max(worstLateMs, lateMs);
+                }
+                if (lateTicks && woke - lateLogged >= seconds(10))
+                {
+                    fprintf(stderr, "[audio] pacing: %u ticks woke an interval or more late in 10 s (worst %.1f ms)\n", lateTicks, worstLateMs);
+                    lateTicks = 0;
+                    worstLateMs = 0;
+                    lateLogged = woke;
+                }
+            }
             if (stallAt >= 0 && stallState < 2 && s_stream)
             {
                 const double t = duration<double>(steady_clock::now() - started).count();
