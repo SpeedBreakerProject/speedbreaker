@@ -1,0 +1,47 @@
+name: Release
+
+# Push a tag such as v0.1.7-win.1 to build everything and publish a GitHub release.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  launcher:
+    uses: ./.github/workflows/launcher.yml
+
+  game:
+    uses: ./.github/workflows/game.yml
+    secrets: inherit
+
+  publish:
+    needs: [launcher, game]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ls -l dist
+          {
+            echo "Windows build of SpeedBreaker, from commit ${GITHUB_SHA}."
+            echo
+            echo "Put SpeedBreaker.exe and SpeedBreakerLauncher.exe in the same folder and start the launcher."
+            echo "You need your own copy of the game, as with upstream. See README-WINDOWS.md."
+            echo
+            echo "SHA-256:"
+            echo '```'
+            cat dist/*.sha256
+            echo '```'
+            if [ ! -f dist/SpeedBreaker.exe ]; then
+              echo
+              echo "SpeedBreaker.exe is not attached: the XEX_URL secret was not set for this build."
+            fi
+          } > notes.md
+          gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --notes-file notes.md

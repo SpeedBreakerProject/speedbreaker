@@ -1,0 +1,63 @@
+name: Launcher and tools
+
+on:
+  push:
+    paths:
+      - 'launcher/**'
+      - 'win-build/audio-pacing-test/**'
+      - 'runtime/apu/audio_wait.h'
+      - '.github/workflows/launcher.yml'
+  pull_request:
+    paths:
+      - 'launcher/**'
+      - 'win-build/audio-pacing-test/**'
+      - 'runtime/apu/audio_wait.h'
+      - '.github/workflows/launcher.yml'
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  launcher:
+    name: SpeedBreakerLauncher.exe
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build with the C# compiler that ships with Windows
+        shell: pwsh
+        run: |
+          $csc = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
+          & $csc /nologo /optimize+ /target:winexe /out:SpeedBreakerLauncher.exe /reference:System.Windows.Forms.dll /reference:System.Drawing.dll launcher\SpeedBreakerLauncher.cs
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          $hash = (Get-FileHash SpeedBreakerLauncher.exe -Algorithm SHA256).Hash.ToLower()
+          "$hash  SpeedBreakerLauncher.exe" | Set-Content -Encoding ascii SpeedBreakerLauncher.exe.sha256
+          Get-Content SpeedBreakerLauncher.exe.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SpeedBreakerLauncher
+          path: |
+            SpeedBreakerLauncher.exe
+            SpeedBreakerLauncher.exe.sha256
+
+  pacing-test:
+    name: AudioPacingTest.exe
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install MinGW-w64
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq g++-mingw-w64-x86-64-posix
+      - name: Cross-compile (this also compiles runtime/apu/audio_wait.h for Windows)
+        run: |
+          x86_64-w64-mingw32-g++-posix -std=c++20 -O2 -Wall -Wextra -Iruntime/apu \
+            win-build/audio-pacing-test/AudioPacingTest.cpp -o AudioPacingTest.exe -static -lwinmm
+          sha256sum AudioPacingTest.exe | tee AudioPacingTest.exe.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AudioPacingTest
+          path: |
+            AudioPacingTest.exe
+            AudioPacingTest.exe.sha256

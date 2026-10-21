@@ -1,0 +1,80 @@
+name: Game (SpeedBreaker.exe)
+
+# SpeedBreaker.exe is built from a translation of the player's own default.xex, which is
+# never in this repository. Set the repository secret XEX_URL to a PRIVATE download URL of
+# that file (and XEX_AUTH to a header such as "Authorization: Bearer ...", if the URL needs
+# one). Without XEX_URL this workflow does nothing. See README-WINDOWS.md.
+on:
+  workflow_dispatch:
+  workflow_call:
+    secrets:
+      XEX_URL:
+        required: false
+      XEX_AUTH:
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+    env:
+      XEX_URL: ${{ secrets.XEX_URL }}
+      XEX_AUTH: ${{ secrets.XEX_AUTH }}
+    steps:
+      - name: Is a default.xex source configured?
+        id: cfg
+        run: |
+          if [ -n "$XEX_URL" ]; then
+            echo "have=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "have=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::The XEX_URL secret is not set, so SpeedBreaker.exe was not built. See README-WINDOWS.md."
+          fi
+
+      - uses: actions/checkout@v4
+        if: steps.cfg.outputs.have == 'true'
+
+      - name: Free disk space (the build needs about 10 GB)
+        if: steps.cfg.outputs.have == 'true'
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          df -h /
+
+      - name: Fetch default.xex
+        if: steps.cfg.outputs.have == 'true'
+        run: |
+          args=(-fsSL --retry 3 -o "$RUNNER_TEMP/default.xex")
+          if [ -n "$XEX_AUTH" ]; then args+=(-H "$XEX_AUTH"); fi
+          curl "${args[@]}" "$XEX_URL"
+          echo "aebdf3c14d1e4e4ed2c130d94bc1a0e97bd6d5bf39bdfdef33c3909c9cc4ba4c  $RUNNER_TEMP/default.xex" | sha256sum -c -
+
+      - name: Build (win-build/ci-build.sh)
+        if: steps.cfg.outputs.have == 'true'
+        run: win-build/ci-build.sh "$RUNNER_TEMP/default.xex"
+
+      - name: Remove default.xex and fix file ownership (the build ran as root)
+        if: always() && steps.cfg.outputs.have == 'true'
+        run: |
+          rm -f "$RUNNER_TEMP/default.xex" game/files/default.xex
+          sudo chown -R "$(id -u):$(id -g)" "$GITHUB_WORKSPACE"
+
+      - uses: actions/upload-artifact@v4
+        if: steps.cfg.outputs.have == 'true'
+        with:
+          name: SpeedBreaker
+          path: |
+            dist/SpeedBreaker.exe
+            dist/SpeedBreaker.exe.sha256
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: build-logs
+          path: |
+            /home/claude/ppc_fail.log
+            /home/claude/deps/ffconf.log
+            /home/claude/deps/FAIL
+          if-no-files-found: ignore

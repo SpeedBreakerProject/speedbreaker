@@ -54,3 +54,8 @@ speedbreaker-bug-report-*.zip
 # Python
 __pycache__/
 *.pyc
+
+# Windows port: build output
+/dist/
+/launcher/*.exe
+/SpeedBreaker*.exe
