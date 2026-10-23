@@ -1694,7 +1694,24 @@ namespace gpu::renderer
 vec2 g_pcssUv[64];
 int g_pcssGroup = -1;
 float g_pcssRadius = 0.0;
-float g_pcssAngle = 0.0;
+vec2 g_pcssRotation = vec2(1.0, 0.0);
+const vec2 kPcssPoisson[9] = vec2[9](
+    vec2(-0.202364, -0.096147),
+    vec2(-0.803133, -0.081058),
+    vec2( 0.070341,  0.430444),
+    vec2( 0.334362, -0.304084),
+    vec2(-0.682725,  0.357424),
+    vec2( 0.750426, -0.556983),
+    vec2( 0.430213,  0.835631),
+    vec2(-0.472458,  0.778306),
+    vec2(-0.321404, -0.708171)
+);
+
+vec2 rotatePcssSample(vec2 sampleOffset)
+{
+    return vec2(sampleOffset.x * g_pcssRotation.x - sampleOffset.y * g_pcssRotation.y,
+        sampleOffset.x * g_pcssRotation.y + sampleOffset.y * g_pcssRotation.x);
+}
 
 float shadowPcssSample(sampler2D shadowMap, vec2 uv, float receiverDepth, int group, int tap)
 {
@@ -1707,13 +1724,13 @@ float shadowPcssSample(sampler2D shadowMap, vec2 uv, float receiverDepth, int gr
     if (g_pcssGroup != group)
     {
         g_pcssGroup = group;
-        g_pcssAngle = fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715)))) * 6.2831853;
+        float angle = fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715)))) * 6.2831853;
+        g_pcssRotation = vec2(cos(angle), sin(angle));
         float blockerDepth = 0.0;
         int blockerCount = 0;
         for (int i = 0; i < 8; ++i)
         {
-            float a = g_pcssAngle + float(i) * 2.39996323;
-            vec2 offset = vec2(cos(a), sin(a)) * (sqrt((float(i) + 0.5) / 8.0) * PCSS_MAX_RADIUS * texelScale);
+            vec2 offset = rotatePcssSample(kPcssPoisson[i]) * (PCSS_MAX_RADIUS * texelScale);
             float depth = texelFetch(shadowMap, clamp(ivec2(floor(center + offset)), ivec2(0), maxPixel), 0).x;
             if (depth < receiverDepth)
             {
@@ -1726,8 +1743,7 @@ float shadowPcssSample(sampler2D shadowMap, vec2 uv, float receiverDepth, int gr
     }
     if (g_pcssRadius <= 0.0)
         return receiverDepth + 1.0;
-    float a = g_pcssAngle + 1.0 + float(tap) * 2.39996323;
-    vec2 offset = vec2(cos(a), sin(a)) * (sqrt((float(tap) + 0.5) / 9.0) * g_pcssRadius * texelScale);
+    vec2 offset = rotatePcssSample(kPcssPoisson[tap]) * (g_pcssRadius * texelScale);
     float depth = texelFetch(shadowMap, clamp(ivec2(floor(center + offset)), ivec2(0), maxPixel), 0).x;
     return depth >= receiverDepth ? receiverDepth + 1.0 : receiverDepth - 1.0;
 }
