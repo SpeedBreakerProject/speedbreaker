@@ -121,7 +121,7 @@ namespace settings
 
         constexpr EnumEntry kShadowFilteringEntries[] = {
             { int32_t(ShadowFilteringMode::Original), "original", "Original" },
-            { int32_t(ShadowFilteringMode::PcssPrototype), "pcss", "PCSS (prototype)" },
+            { int32_t(ShadowFilteringMode::PcssExperimental), "pcss", "PCSS (experimental)" },
         };
 
         constexpr EnumEntry kAnisotropyEntries[] = {
@@ -272,13 +272,13 @@ namespace settings
               .table = "video", .key = "internal_resolution", .label = "Internal Resolution",
               .description = "Render the 3D scene above the 360's 720p. 1.5x is 1080p, a little over half the pixels of 2x. Auto: from the screen (1440p: 2x, or 3x2 filling an ultrawide).",
               .env = "NFSMW_RESOLUTION", .defaultValue = kResolutionAuto, .entries = kResolutionEntries },
-            { .id = Id::ShadowResolution, .category = Category::Graphics, .type = Type::Enum, .apply = Apply::Live,
+            { .id = Id::ShadowResolution, .category = Category::Experimental, .type = Type::Enum, .apply = Apply::Live,
               .table = "video", .key = "shadow_resolution", .label = "Shadow Resolution",
               .description = "Resolution of the 1600x1600 sun shadow map, independent of Internal Resolution. Higher settings use more GPU time and memory; a separate 256 MB pool is allocated above 1x.",
               .env = "NFSMW_SHADOW_RESOLUTION", .defaultValue = 2, .entries = kShadowResolutionEntries },
-            { .id = Id::ShadowFiltering, .category = Category::Graphics, .type = Type::Enum, .apply = Apply::Live,
+            { .id = Id::ShadowFiltering, .category = Category::Experimental, .type = Type::Enum, .apply = Apply::Live,
               .table = "video", .key = "shadow_filtering", .label = "Shadow Filtering",
-              .description = "Original: the game's linear filtering. PCSS is an experimental soft-shadow prototype.",
+              .description = "Original: the game's linear filtering. PCSS is experimental soft-shadow filtering.",
               .env = "NFSMW_SHADOW_FILTERING", .defaultValue = double(ShadowFilteringMode::Original), .entries = kShadowFilteringEntries },
             { .id = Id::WindowWidth, .category = Category::Display, .type = Type::Int, .apply = Apply::Restart, .hidden = true,
               .table = "video", .key = "window_width", .label = "Window Width",
@@ -1227,6 +1227,7 @@ namespace settings
         case Category::Controls: return "Controls";
         case Category::Wheel: return "Wheel";
         case Category::Advanced: return "Advanced";
+        case Category::Experimental: return "Experimental";
         default: return "";
         }
     }

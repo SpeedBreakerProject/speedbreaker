@@ -142,7 +142,7 @@ namespace settings
     // Key: a key code of user/key_names.h (0: no key), saved by its name
     // there ("w", "left_shift", "none"); the menu takes it from a key press.
     enum class Type : uint8_t { Bool, Int, Float, Enum, Key };
-    enum class Category : uint8_t { Display, Graphics, Audio, Input, Wheel, Controls, Advanced, Count };
+    enum class Category : uint8_t { Display, Graphics, Audio, Input, Wheel, Controls, Advanced, Experimental, Count };
     enum class Apply : uint8_t { Live, Restart };
 
     // Values of the enum options (GetInt returns them).
@@ -164,7 +164,7 @@ namespace settings
     // taller view (Vert+, down to 4:3). Only a screen within 1% of 16:9 keeps
     // the 16:9 frame (video::kTallMinStretch). Widescreen: 16:9 with bars.
     enum class AspectMode : int32_t { Auto = 0, Widescreen = 1 };
-    enum class ShadowFilteringMode : int32_t { Original = 0, PcssPrototype = 1 };
+    enum class ShadowFilteringMode : int32_t { Original = 0, PcssExperimental = 1 };
     // Anisotropy: 1 (off), 2, 4, 8, 16, or one of these.
     constexpr int32_t kAnisotropyAuto = 0;   // 16x on a discrete GPU or an M-series iPad, 4x on other integrated ones
     constexpr int32_t kAnisotropyGame = -1;  // each texture's own setting, as on the 360

@@ -1,4 +1,4 @@
-// Settings > Graphics > Shadow Resolution: independent scales, live, saved in
+// Settings > Experimental > Shadow Resolution: independent scales, live, saved in
 // [video], and overridden for one run by NFSMW_SHADOW_RESOLUTION.
 #include <user/settings.h>
 
@@ -54,8 +54,11 @@ int main(int argc, char** argv)
     const std::filesystem::path file = dir / "settings.toml";
 
     const Option& option = Info(id);
-    CHECK(option.category == Category::Graphics && option.type == Type::Enum && option.apply == Apply::Live && !option.hidden,
-        "available as a live Graphics menu option");
+    CHECK(option.category == Category::Experimental && option.type == Type::Enum && option.apply == Apply::Live && !option.hidden,
+        "available as a live Experimental menu option");
+    CHECK(static_cast<uint8_t>(Category::Experimental) == static_cast<uint8_t>(Category::Count) - 1,
+        "Experimental is the last settings tab");
+    CHECK(std::string_view(CategoryName(option.category)) == "Experimental", "has an Experimental tab");
     CHECK(std::string(option.table) == "video" && std::string(option.key) == "shadow_resolution",
         "stored in [video].shadow_resolution");
     CHECK(std::string(option.env) == "NFSMW_SHADOW_RESOLUTION", "environment override name");
@@ -99,21 +102,22 @@ int main(int argc, char** argv)
 
     constexpr Id filteringId = Id::ShadowFiltering;
     const Option& filtering = Info(filteringId);
-    CHECK(filtering.category == Category::Graphics && filtering.type == Type::Enum &&
-        filtering.apply == Apply::Live && !filtering.hidden, "available as a live Graphics menu option");
+    CHECK(filtering.category == Category::Experimental && filtering.type == Type::Enum &&
+        filtering.apply == Apply::Live && !filtering.hidden, "available as a live Experimental menu option");
     CHECK(std::string(filtering.table) == "video" && std::string(filtering.key) == "shadow_filtering",
         "stored in [video].shadow_filtering");
     CHECK(std::string(filtering.env) == "NFSMW_SHADOW_FILTERING", "environment override name");
     CHECK(DefaultValue(filteringId) == int32_t(ShadowFilteringMode::Original), "Original is the default");
-    CHECK(filtering.entries.size() == 2, "Original and PCSS prototype choices");
+    CHECK(filtering.entries.size() == 2, "Original and PCSS experimental choices");
     if (filtering.entries.size() == 2)
     {
         CHECK(filtering.entries[0].value == int32_t(ShadowFilteringMode::Original) &&
             std::string(filtering.entries[0].token) == "original", "first: Original filtering");
-        CHECK(filtering.entries[1].value == int32_t(ShadowFilteringMode::PcssPrototype) &&
-            std::string(filtering.entries[1].token) == "pcss", "second: PCSS prototype");
+        CHECK(filtering.entries[1].value == int32_t(ShadowFilteringMode::PcssExperimental) &&
+            std::string(filtering.entries[1].token) == "pcss" &&
+            std::string(filtering.entries[1].label) == "PCSS (experimental)", "second: PCSS experimental");
     }
-    CHECK(Set(filteringId, int32_t(ShadowFilteringMode::PcssPrototype)) == SetResult::Applied, "PCSS applies live");
+    CHECK(Set(filteringId, int32_t(ShadowFilteringMode::PcssExperimental)) == SetResult::Applied, "PCSS applies live");
     CHECK(Save(file) && Read(file).find("shadow_filtering = \"pcss\"") != std::string::npos,
         "PCSS is saved as a TOML token");
     SetEnv("NFSMW_SHADOW_FILTERING", "original");

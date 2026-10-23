@@ -94,7 +94,7 @@ endif()
 # it): "fsr1" read, saved and read back, the environment's override, an
 # unknown value; in a scratch folder.
 sb_test(settings_scaling_test SOURCES ${RT}/user/settings.cpp ARGS ${CMAKE_CURRENT_BINARY_DIR}/settings_scaling_scratch)
-# Settings > Graphics > Shadow Resolution: independent scale choices, saved
+# Settings > Experimental > Shadow Resolution: independent scale choices, saved
 # tokens, and NFSMW_SHADOW_RESOLUTION override.
 sb_test(settings_shadow_resolution_test SOURCES ${RT}/user/settings.cpp ARGS ${CMAKE_CURRENT_BINARY_DIR}/settings_shadow_resolution_scratch)
 # Internal Resolution Auto's budget on iPhones and iPads, chip by chip

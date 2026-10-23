@@ -2730,7 +2730,7 @@ float shadowPcssSample(sampler2D shadowMap, vec2 uv, float receiverDepth, int gr
                     outputs |= 1u << i;
             uint32_t psRegs = std::min(16u, ps.info.registerCount);
             uint32_t inputs = vs.info.interpolatorMask & ((1u << psRegs) - 1);
-            uint32_t pcssSlot = ((key.pad >> 5) & 3) == uint32_t(settings::ShadowFilteringMode::PcssPrototype)
+            uint32_t pcssSlot = ((key.pad >> 5) & 3) == uint32_t(settings::ShadowFilteringMode::PcssExperimental)
                 ? key.pad & 31 : 32;
             VkShaderModule psModule = PixelVariant(ps, outputs, inputs, (key.raster >> 5) & 1, pcssSlot);
             if (!psModule)
@@ -7197,7 +7197,7 @@ void main()
         void ApplyShadowFiltering(int32_t setting)
         {
             s_shadowFilteringSetting = setting;
-            const char* mode = setting == int32_t(settings::ShadowFilteringMode::PcssPrototype) ? "PCSS (prototype)" : "Original";
+            const char* mode = setting == int32_t(settings::ShadowFilteringMode::PcssExperimental) ? "PCSS (experimental)" : "Original";
             fprintf(stderr, "[renderer] shadow filtering %s: shader pipelines selected per draw\n", mode);
         }
 
@@ -8101,7 +8101,7 @@ void main()
         key.vs = s_vs->hash;
         key.ps = s_ps->hash;
         const int shadowFiltering = s_pcssAb ? s_pcssAbMode : settings::GetInt(settings::Id::ShadowFiltering);
-        if (shadowFiltering == int(settings::ShadowFilteringMode::PcssPrototype))
+        if (shadowFiltering == int(settings::ShadowFilteringMode::PcssExperimental))
         {
             uint32_t shadowSlot = ShadowTextureSlot(*s_ps);
             if (shadowSlot < 32 && (s_ps->info.pcssSlotMask & (1u << shadowSlot)))
@@ -10049,7 +10049,7 @@ void main()
             static double sumMs[2] = {};
             static int windows[2] = {};
             const uint64_t execNs = s_gpuExecNs.load();
-            const int arm = s_pcssAbMode == int32_t(settings::ShadowFilteringMode::PcssPrototype) ? 1 : 0;
+            const int arm = s_pcssAbMode == int32_t(settings::ShadowFilteringMode::PcssExperimental) ? 1 : 0;
             const double ms = double(execNs - lastExecNs) / 1e6 / 120;
             lastExecNs = execNs;
             if (frame > 120)  // the first window is startup
@@ -10065,7 +10065,7 @@ void main()
                 (unsigned long long)(frame - 119), (unsigned long long)frame, arm ? "PCSS" : "Original", ms,
                 double(s_pcssAbDraws) / 120, mean);
             s_pcssAbDraws = 0;
-            s_pcssAbMode = (frame / 120) % 2 ? int32_t(settings::ShadowFilteringMode::PcssPrototype)
+            s_pcssAbMode = (frame / 120) % 2 ? int32_t(settings::ShadowFilteringMode::PcssExperimental)
                                               : int32_t(settings::ShadowFilteringMode::Original);
         }
         // NFSMW_LOG_UNTILED_AREA=1: with each [perf] line, whether the toggle

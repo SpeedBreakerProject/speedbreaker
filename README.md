@@ -444,8 +444,6 @@ then Yes, puts it back.
 | Anisotropic Filtering | Auto / Off / 2x / 4x / 8x / 16x / Original | Auto: 16x on dedicated graphics cards and M-series iPads, 4x elsewhere. Original uses each texture's own setting, as on the 360. |
 | Mipmaps | On / Off | On, so distant textures don't shimmer |
 | Internal Resolution | Auto / 1x (720p) / 1.5x (1080p) / 2x (1440p) / 3x (2160p) / 4x (2880p) | Auto: enough to cover your screen, within what the device can afford (whole scales only: 1x, 2x, 3x, or 3x2 on an ultrawide). 4x is a manual option and renders all eligible targets at 4x. On iPhone and iPad, Auto always picks 1x. |
-| Shadow Resolution | 1x (1600x1600) / 1.5x (2400x2400) / 2x (3200x3200) / 3x (4800x4800) / 4x (6400x6400) | 1x (1600x1600). Multipliers are relative to the original 1600x1600 shadow map, independently of Internal Resolution. Above 1x, allocates a separate 256 MB pool by default (`NFSMW_SCALED_MB` overrides the pool size). Higher values use more GPU time and memory. Saved as `[video].shadow_resolution`; `NFSMW_SHADOW_RESOLUTION` overrides it for a run. |
-| Shadow Filtering | Original / PCSS (prototype) | Original keeps the game's linear sampling. PCSS (prototype) finds the game's shadow-map compares in any pixel shader and replaces its 3x3 PCF taps with a PCSS blocker search (8 samples per pixel) plus one rotated Poisson-disk sample per tap, so it also covers shaders added later in the game. It costs a few percent more GPU time; `NFSMW_PCSS_SCALE` (default 400) and `NFSMW_PCSS_MAX_RADIUS` (default 8 texels at 1x shadow resolution; the penumbra keeps its world size at higher resolutions) tune the penumbra. Saved as `[video].shadow_filtering`; `NFSMW_SHADOW_FILTERING` overrides it for a run. |
 
 **Audio:** Master Volume (100%), Mute (Off), and Mute in Background (Off), which silences the
 game while its window isn't in front.
@@ -467,6 +465,13 @@ other than the G29: both ends of its turn, each pedal, then a button for each co
 compiles, instead of the game stuttering), Performance Overlay (Off: fps, frame times, and CPU
 and GPU time per frame), **Save Bug Report**, and **Check for Updates** (the only thing that goes
 online, and only when you press it). The page also shows which build you're running.
+
+**Experimental**
+
+| Option | Choices | Default |
+|---|---|---|
+| Shadow Resolution | 1x (1600x1600) / 1.5x (2400x2400) / 2x (3200x3200) / 3x (4800x4800) / 4x (6400x6400) | 1x (1600x1600). Multipliers are relative to the original 1600x1600 shadow map, independently of Internal Resolution. Above 1x, allocates a separate 256 MB pool by default (`NFSMW_SCALED_MB` overrides the pool size). Higher values use more GPU time and memory. Saved as `[video].shadow_resolution`; `NFSMW_SHADOW_RESOLUTION` overrides it for a run. |
+| Shadow Filtering | Original / PCSS (experimental) | Original keeps the game's linear sampling. PCSS (experimental) finds the game's shadow-map compares in any pixel shader and replaces its 3x3 PCF taps with a PCSS blocker search (8 samples per pixel) plus one rotated Poisson-disk sample per tap, so it also covers shaders added later in the game. It costs a few percent more GPU time; `NFSMW_PCSS_SCALE` (default 400) and `NFSMW_PCSS_MAX_RADIUS` (default 8 texels at 1x shadow resolution; the penumbra keeps its world size at higher resolutions) tune the penumbra. Saved as `[video].shadow_filtering`; `NFSMW_SHADOW_FILTERING` overrides it for a run. |
 
 </details>
 
