@@ -12,6 +12,7 @@
 #include <cmath>
 #include <cstdio>
 #include <format>
+#include <map>
 #include <set>
 
 namespace gpu
@@ -142,6 +143,24 @@ float xmul(float a, float b)
             VertexFetchInstruction lastFullFetch{};
             // r0 (a vertex shader's incoming vertex index) written so far.
             bool r0Written = false;
+
+            // 2D fetches seen per slot: a shadow lookup is 9 fetches, so the
+            // PCSS receiver depth is picked per group of 9.
+            uint32_t fetchOrdinal2D[32] = {};
+
+            // Shadow-tap candidates: 2D fetch results not yet consumed by a
+            // compare, keyed by register component ("r[3].x").
+            struct PcssTap { uint32_t slot, index, ordinal; };
+            static constexpr uint32_t kMaxPcssTaps = 64;
+            std::map<std::string, PcssTap> pcssTaps;
+            uint32_t pcssTapCount = 0;
+
+            void ErasePcssTaps(const std::string& base, uint32_t mask)
+            {
+                for (uint32_t c = 0; c < 4; c++)
+                    if (mask & (1u << c))
+                        pcssTaps.erase(base + "." + kComp[c]);
+            }
 
             void Error(const std::string& message)
             {
@@ -408,6 +427,44 @@ float xmul(float a, float b)
                 return "o_unused";
             }
 
+            // A pixel-shader `sge`/`sgt` of shadow-tap registers against a
+            // receiver depth is the game's PCF compare: before it, swap each tap
+            // for a PCSS-filtered depth (the receiver is this compare's own
+            // second operand, so no per-shader table is needed).
+            void PcssCompare(const AluInstruction& op)
+            {
+                if (stage != ShaderStage::Pixel || pcssTaps.empty() ||
+                    (op.vector_opcode() != AluVectorOpcode::kSge && op.vector_opcode() != AluVectorOpcode::kSgt) ||
+                    !op.src_is_temp(1) || op.src_negate(1))
+                    return;
+                const uint32_t reg = op.src_reg(1);
+                if (AluInstruction::is_src_temp_relative(reg) || AluInstruction::is_src_temp_value_absolute(reg))
+                    return;
+                const std::string base = Reg(AluInstruction::src_temp_reg(reg), false);
+                const std::string receiverVec = AluVector(op, 2);
+                const uint32_t sw = op.src_swizzle(1);
+                uint32_t done = 0;
+                for (uint32_t lane = 0; lane < 4; lane++)
+                {
+                    const uint32_t comp = AluInstruction::GetSwizzledComponentIndex(sw, lane);
+                    if (done & (1u << comp))
+                        continue;
+                    auto tap = pcssTaps.find(base + "." + kComp[comp]);
+                    if (tap == pcssTaps.end())
+                        continue;
+                    done |= 1u << comp;
+                    const PcssTap t = tap->second;
+                    out.pcssSlotMask |= 1u << t.slot;
+                    Line("#ifdef SHADOW_PCSS");
+                    Line(std::format("#if SHADOW_PCSS_SLOT == {}", t.slot));
+                    Line(std::format("{}.{} = shadowPcssSample(t2d_{}, g_pcssUv[{}], ({}).{}, {}, {});", base, kComp[comp],
+                        t.slot, t.index, receiverVec, kComp[lane], t.ordinal / 9, t.ordinal % 9));
+                    Line("#endif");
+                    Line("#endif");
+                    pcssTaps.erase(tap);
+                }
+            }
+
             void Alu(const AluInstruction& op)
             {
                 uint32_t vecMask = op.GetVectorOpResultWriteMask();
@@ -431,6 +488,8 @@ float xmul(float a, float b)
                 // instruction: compute into temporaries, then store.
                 Line("{");
                 indent++;
+                if (vecNeeded)
+                    PcssCompare(op);
                 if (vecNeeded)
                     Line("vec4 vres = " + VectorOp(op) + ";");
                 if (scaNeeded)
@@ -464,6 +523,10 @@ float xmul(float a, float b)
                     if (vecMask)
                     {
                         std::string dst = Reg(op.vector_dest(), op.is_vector_dest_relative());
+                        if (op.is_vector_dest_relative())
+                            pcssTaps.clear();
+                        else
+                            ErasePcssTaps(dst, vecMask);
                         for (uint32_t c = 0; c < 4; c++)
                             if (vecMask & (1u << c))
                                 Line(dst + "." + kComp[c] + " = " + clamp(std::string("vres.") + kComp[c], op.vector_clamp()) + ";");
@@ -471,6 +534,10 @@ float xmul(float a, float b)
                     if (scaMask)
                     {
                         std::string dst = Reg(op.scalar_dest(), op.is_scalar_dest_relative());
+                        if (op.is_scalar_dest_relative())
+                            pcssTaps.clear();
+                        else
+                            ErasePcssTaps(dst, scaMask);
                         for (uint32_t c = 0; c < 4; c++)
                             if (scaMask & (1u << c))
                                 Line(dst + "." + kComp[c] + " = " + clamp(scaNeeded ? "sres" : "ps", op.scalar_clamp()) + ";");
@@ -491,6 +558,16 @@ float xmul(float a, float b)
                 if (dest == 0 || destRelative)
                     r0Written = true;
                 std::string dst = Reg(dest, destRelative);
+                if (destRelative)
+                    pcssTaps.clear();
+                else
+                {
+                    uint32_t written = 0;
+                    for (uint32_t c = 0; c < 4; c++)
+                        if (((swizzle >> (3 * c)) & 7) != 7)
+                            written |= 1u << c;
+                    ErasePcssTaps(dst, written);
+                }
                 for (uint32_t c = 0; c < 4; c++)
                 {
                     uint32_t s = (swizzle >> (3 * c)) & 7;
@@ -679,6 +756,7 @@ float xmul(float a, float b)
                                        : std::format("textureLod({}, {}, {})", texture, coords, lod);
                 };
                 std::string value;
+                std::string pcssCoords;
                 switch (op.dimension())
                 {
                 case xenos::FetchOpDimension::k1D:
@@ -697,6 +775,7 @@ float xmul(float a, float b)
                             : std::format("({}) / vec2(textureSize(t2d_{}, 0))", uv, slot);
                     if (op.offset_x() != 0.0f || op.offset_y() != 0.0f)
                         uv = std::format("({} + vec2({}, {}) / vec2(textureSize(t2d_{}, 0)))", uv, op.offset_x(), op.offset_y(), slot);
+                    pcssCoords = uv;
                     value = sample(std::format("t2d_{}", slot), uv);
                     break;
                 }
@@ -718,7 +797,27 @@ float xmul(float a, float b)
                 }
                 }
                 Line("vec4 tdata = " + value + ";");
+                uint32_t pcssIndex = ~0u;
+                if (stage == ShaderStage::Pixel && op.dimension() == xenos::FetchOpDimension::k2D &&
+                    !op.unnormalized_coordinates() && pcssTapCount < kMaxPcssTaps)
+                {
+                    // Keep the UV for the compare that consumes this tap.
+                    pcssIndex = pcssTapCount++;
+                    Line("#ifdef SHADOW_PCSS");
+                    Line(std::format("#if SHADOW_PCSS_SLOT == {}", slot));
+                    Line(std::format("g_pcssUv[{}] = {};", pcssIndex, pcssCoords));
+                    Line("#endif");
+                    Line("#endif");
+                }
+                const uint32_t pcssOrdinal = stage == ShaderStage::Pixel ? fetchOrdinal2D[slot & 31]++ : 0;
                 StoreFetchResult(op.dest(), op.is_dest_relative(), op.dest_swizzle(), "tdata");
+                if (pcssIndex != ~0u && !op.is_dest_relative())
+                {
+                    const std::string base = Reg(op.dest(), false);
+                    for (uint32_t c = 0; c < 4; c++)
+                        if (((op.dest_swizzle() >> (3 * c)) & 7) == 0)
+                            pcssTaps[base + "." + kComp[c]] = { slot, pcssIndex, pcssOrdinal };
+                }
                 indent--;
                 Line("}");
                 if (op.is_predicated())

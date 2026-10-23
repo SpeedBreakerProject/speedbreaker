@@ -392,7 +392,7 @@ static void TestParse()
     CHECK(gpu::ScaleName({ kHalf, kHalf }) == "1.5x1.5", "%s", gpu::ScaleName({ kHalf, kHalf }).c_str());
     CHECK(gpu::ScaleName(RenderScale::Whole(3, 2)) == "3x2", "%s", gpu::ScaleName(RenderScale::Whole(3, 2)).c_str());
     CHECK((gpu::AxisFromHalves(2) == AxisScale{ 1, 1 }) && (gpu::AxisFromHalves(3) == kHalf) && (gpu::AxisFromHalves(4) == AxisScale{ 2, 1 }) &&
-        (gpu::AxisFromHalves(6) == AxisScale{ 3, 1 }), "half steps");
+        (gpu::AxisFromHalves(6) == AxisScale{ 3, 1 }) && (gpu::AxisFromHalves(8) == AxisScale{ 4, 1 }), "half steps through 4x");
     RenderScale half{ kHalf, kHalf };
     CHECK(half.x.Size(1280) == 1920 && half.y.Size(720) == 1080 && half.SlotWords() == 2304 && half.PixelsNum() == 9 && half.PixelsDen() == 4,
         "1.5x: %ux%u, %u words a page", half.x.Size(1280), half.y.Size(720), half.SlotWords());
@@ -422,6 +422,25 @@ static void TestShaders(const char* rendererPath)
         CHECK(body.find("sbSampleWord") != std::string::npos || body.find("sbBlockIndex") != std::string::npos,
             "%s doesn't use the block layout", shader);
     }
+    const size_t untileAt = text.find("const char* kScaledUntileGlsl = R\"(");
+    const size_t untileEnd = text.find("\n)\";", untileAt);
+    const std::string scaledUntile = untileAt == std::string::npos || untileEnd == std::string::npos
+        ? std::string{} : text.substr(untileAt, untileEnd - untileAt);
+    CHECK(scaledUntile.find("if (p.convert == 4u)") != std::string::npos &&
+        scaledUntile.find("floatBitsToUint(float(v >> 8) / 16777215.0)") != std::string::npos,
+        "scaled textures convert resolved D24 words to the same float representation as ordinary untile");
+    CHECK(text.find("bool shadowMap = fi.convert == 4 && width == 1600 && height == 1600") != std::string::npos &&
+        text.find("ScaledMemory& scaledMemory = shadowPool ? s_shadowScaled : s_scaled") != std::string::npos &&
+        text.find("ScaledFormat(fi, shadowPool)") != std::string::npos,
+        "the 1600x1600 depth texture uses its independent scaled-memory pool");
+    CHECK(text.find("(s_drawScaled || shadowPool) && scaledMemory.enabled") != std::string::npos &&
+        text.find("(drawScaled || e.shadowPool)") != std::string::npos,
+        "a scaled shadow texture is sampled even when the scene target is 1x");
+    CHECK(text.find("updatePoolSequences(s_scaled, scaledWrite && !shadowPool, sceneSiblings)") != std::string::npos &&
+        text.find("updatePoolSequences(s_shadowScaled, scaledWrite && shadowPool, shadowSiblings)") != std::string::npos,
+        "resolves invalidate overlapping pages in the other scale pool");
+    CHECK(text.find("(scaledMemory.direct || textureScale.HostPixels(width, height) * 4 <= scaledMemory.scratchSize)") != std::string::npos,
+        "direct scaled stores don't require scratch-buffer capacity");
     const std::string glsl = GLSL_SCALE_CODE;
     for (const char* fn : { "uint sbHostEdge(", "uint sbOverlap(", "uint sbCenterHost(", "uint sbBlockIndex(", "uint sbSampleWord(" })
         CHECK(glsl.find(fn) != std::string::npos, "GLSL_SCALE_CODE lacks %s", fn);

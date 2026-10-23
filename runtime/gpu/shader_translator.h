@@ -51,6 +51,9 @@ namespace gpu
         uint32_t texture2DMask = 0;      // texture fetch slots used, by dimension
         uint32_t texture3DMask = 0;
         uint32_t textureCubeMask = 0;
+        // 2D texture slots whose fetches feed `sge` shadow compares; with the
+        // sun shadow map bound there, the host can swap those taps for PCSS.
+        uint32_t pcssSlotMask = 0;
         // Float constants the shader reads (by absolute index, 0..255 of its
         // stage). Packed: those reads use slots 0..N-1 in index order, so the
         // host uploads only the N used constants (not with relative reads).

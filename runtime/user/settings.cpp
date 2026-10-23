@@ -108,6 +108,20 @@ namespace settings
             { 3, "1.5x", "1.5x (1080p)" },
             { 4, "2x", "2x (1440p)" },
             { 6, "3x", "3x (2160p)" },
+            { 8, "4x", "4x (2880p)" },
+        };
+
+        constexpr EnumEntry kShadowResolutionEntries[] = {
+            { 2, "1x", "1x (1600x1600)" },
+            { 3, "1.5x", "1.5x (2400x2400)" },
+            { 4, "2x", "2x (3200x3200)" },
+            { 6, "3x", "3x (4800x4800)" },
+            { 8, "4x", "4x (6400x6400)" },
+        };
+
+        constexpr EnumEntry kShadowFilteringEntries[] = {
+            { int32_t(ShadowFilteringMode::Original), "original", "Original" },
+            { int32_t(ShadowFilteringMode::PcssPrototype), "pcss", "PCSS (prototype)" },
         };
 
         constexpr EnumEntry kAnisotropyEntries[] = {
@@ -258,6 +272,14 @@ namespace settings
               .table = "video", .key = "internal_resolution", .label = "Internal Resolution",
               .description = "Render the 3D scene above the 360's 720p. 1.5x is 1080p, a little over half the pixels of 2x. Auto: from the screen (1440p: 2x, or 3x2 filling an ultrawide).",
               .env = "NFSMW_RESOLUTION", .defaultValue = kResolutionAuto, .entries = kResolutionEntries },
+            { .id = Id::ShadowResolution, .category = Category::Graphics, .type = Type::Enum, .apply = Apply::Live,
+              .table = "video", .key = "shadow_resolution", .label = "Shadow Resolution",
+              .description = "Resolution of the 1600x1600 sun shadow map, independent of Internal Resolution. Higher settings use more GPU time and memory; a separate 256 MB pool is allocated above 1x.",
+              .env = "NFSMW_SHADOW_RESOLUTION", .defaultValue = 2, .entries = kShadowResolutionEntries },
+            { .id = Id::ShadowFiltering, .category = Category::Graphics, .type = Type::Enum, .apply = Apply::Live,
+              .table = "video", .key = "shadow_filtering", .label = "Shadow Filtering",
+              .description = "Original: the game's linear filtering. PCSS is an experimental soft-shadow prototype.",
+              .env = "NFSMW_SHADOW_FILTERING", .defaultValue = double(ShadowFilteringMode::Original), .entries = kShadowFilteringEntries },
             { .id = Id::WindowWidth, .category = Category::Display, .type = Type::Int, .apply = Apply::Restart, .hidden = true,
               .table = "video", .key = "window_width", .label = "Window Width",
               .description = "The window's width when the game starts.",
