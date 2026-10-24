@@ -25,38 +25,7 @@ jobs:
         run: |
           Add-MpPreference -ExclusionPath "$env:GITHUB_WORKSPACE"
 
-      # 1. Setup XenonRecomp Dependencies (e.g. .NET / Dotnet if XenonRecomp requires it)
-      - name: Setup .NET SDK (Required for XenonRecomp)
-        uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: '8.x'
-
-      # 2. Build or download XenonRecomp tools on the fly
-      - name: Fetch and Build XenonRecomp
-        shell: bash
-        run: |
-          git clone https://github.com/hedge-dev/XenonRecomp.git temp-xenonrecomp
-          dotnet publish temp-xenonrecomp -c Release -o build-xenonrecomp
-
-      # 3. Securely acquire your game binary (default.xex)
-      # NOTE: You must provide a secure direct link or GitHub Secret/Artifact download 
-      # containing your legally dumped default.xex / game assets.
-      - name: Download Game Binary
-        shell: powershell
-        run: |
-          # Example: If you host your encrypted/private default.xex somewhere secure:
-          # Invoke-WebRequest -Uri "${{ secrets.GAME_BINARY_URL }}" -OutFile "default.xex"
-          
-          Write-Host "Place your default.xex download logic or secret retrieval here."
-
-      # 4. Run XenonRecomp to generate source files into ppc/
-      - name: Run XenonRecomp
-        shell: bash
-        run: |
-          # Run XenonRecomp pointing to your game executable and outputting to ppc/
-          # dotnet build-xenonrecomp/XenonRecomp.dll <config.toml> <ppc_context.h> <output_dir>
-          echo "Running XenonRecomp..."
-
+      # 1. Setup MSVC & Ninja Toolchain early (needed for both XenonRecomp and main project)
       - name: Setup MSVC & Ninja Toolchain
         uses: ilammy/msvc-dev-cmd@v1
         with:
@@ -70,6 +39,32 @@ jobs:
       - name: Install Ninja
         run: choco install ninja -y
 
+      # 2. Clone and Build XenonRecomp using CMake & Ninja
+      - name: Build XenonRecomp Tool
+        shell: bash
+        run: |
+          git clone --recursive https://github.com/hedge-dev/XenonRecomp.git temp-xenonrecomp
+          cmake -B temp-xenonrecomp/build -S temp-xenonrecomp -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake --build temp-xenonrecomp/build --config Release
+
+      # 3. Securely acquire your game binary (default.xex)
+      # NOTE: If you store your default.xex in a private repository release or GitHub Secret URL, 
+      # download it here so XenonRecomp can process it.
+      - name: Download Game Binary
+        shell: powershell
+        run: |
+          Write-Host "Insert command here to fetch your game binary (default.xex) if required for generation."
+          # Example: Invoke-WebRequest -Uri "${{ secrets.GAME_BINARY_URL }}" -OutFile "default.xex"
+
+      # 4. Run XenonRecomp to generate source files into ppc/
+      - name: Run XenonRecomp
+        shell: bash
+        run: |
+          # Point the built XenonRecomp binary to your game executable and output directory
+          # ./temp-xenonrecomp/build/<path-to-executable>/XenonRecomp ...
+          echo "Running XenonRecomp..."
+
+      # 5. Setup SCCache for compiler caching across runs
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@v0.0.7
         with:
@@ -81,6 +76,7 @@ jobs:
           echo "CC=sccache cl" >> $GITHUB_ENV
           echo "CXX=sccache cl" >> $GITHUB_ENV
 
+      # 6. Configure Main Project CMake using Ninja generator
       - name: Configure CMake
         shell: bash
         run: |
@@ -89,11 +85,13 @@ jobs:
             -DCMAKE_C_COMPILER_LAUNCHER=sccache \
             -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
 
+      # 7. Build Main Project rapidly using all cores
       - name: Build with Ninja
         shell: bash
         run: |
           cmake --build build --config Release
 
+      # 8. Package Artifacts
       - name: Prepare Artifacts
         shell: bash
         run: |
