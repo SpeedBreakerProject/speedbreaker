@@ -47,17 +47,15 @@ jobs:
             
           cmake --build temp-xenonrecomp/build --config Release
 
-      # 2. Download default.xex and inspect TOML configuration paths
-      - name: Download Game Binary & Inspect Config
+      # 2. Download default.xex into game/files/ where config/nfsmw.toml expects it
+      - name: Download Game Binary
         shell: powershell
         run: |
-          curl.exe -L -o default.xex "https://github.com/rafidwayne/speedbreaker-private/releases/download/xex/default.xex"
-          
-          Write-Host "=== Contents of config/nfsmw.toml ==="
-          Get-Content config/nfsmw.toml
-          Write-Host "====================================="
+          New-Item -ItemType Directory -Force -Path "game/files"
+          curl.exe -L -o "game/files/default.xex" "https://github.com/rafidwayne/speedbreaker-private/releases/download/xex/default.xex"
+          Write-Host "Successfully downloaded default.xex into game/files/."
 
-      # 3. Run XenonRecomp from root with absolute path safeguards
+      # 3. Run XenonRecomp from repository root
       - name: Generate PPC Sources via XenonRecomp
         shell: powershell
         run: |
@@ -69,13 +67,10 @@ jobs:
           
           New-Item -ItemType Directory -Force -Path ppc
           
-          # Run from repository root so relative paths inside nfsmw.toml resolve correctly
           & $recompExe config/nfsmw.toml "$contextHeader"
-          $recompExitCode = $LASTEXITCODE
-          
-          if ($recompExitCode -ne 0) {
-              Write-Error "XenonRecomp crashed with exit code $recompExitCode"
-              exit $recompExitCode
+          if ($LASTEXITCODE -ne 0) {
+              Write-Error "XenonRecomp failed with exit code $LASTEXITCODE"
+              exit $LASTEXITCODE
           }
           
           Write-Host "Contents of ppc directory after generation:"
