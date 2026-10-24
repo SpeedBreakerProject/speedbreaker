@@ -28,13 +28,12 @@ jobs:
         shell: powershell
         run: choco install ninja -y
 
-      # 1. Build XenonRecomp using Ninja + clang-cl (enforces Clang and fixes builtin errors)
+      # 1. Build XenonRecomp using Ninja + clang-cl
       - name: Build XenonRecomp with Clang & Ninja
         shell: powershell
         run: |
           git clone --recursive https://github.com/hedge-dev/XenonRecomp.git temp-xenonrecomp
           
-          # Add LLVM bin directory to PATH
           $llvmPath = "C:\Program Files\LLVM\bin"
           if (!(Test-Path $llvmPath)) {
               $llvmPath = "C:\Program Files (x86)\LLVM\bin"
@@ -55,13 +54,20 @@ jobs:
           curl.exe -L -o default.xex "https://github.com/rafidwayne/speedbreaker-private/releases/download/xex/default.xex"
           Write-Host "Successfully downloaded default.xex."
 
-      # 3. Run XenonRecomp dynamically to populate ppc/
+      # 3. Run XenonRecomp properly using its TOML config and context header
       - name: Generate PPC Sources via XenonRecomp
         shell: powershell
         run: |
           $recompExe = (Get-ChildItem -Recurse -Filter "XenonRecomp.exe" -Path temp-xenonrecomp).FullName
+          $contextHeader = (Get-ChildItem -Recurse -Filter "ppc_context.h" -Path temp-xenonrecomp).FullName
+          
           Write-Host "Found XenonRecomp at: $recompExe"
-          & $recompExe default.xex
+          Write-Host "Found PPC Context Header at: $contextHeader"
+          
+          New-Item -ItemType Directory -Force -Path ppc
+          
+          # Execute XenonRecomp with the required project config and context header
+          & $recompExe config/nfsmw.toml $contextHeader
 
       # 4. Configure Main Project CMake using default Visual Studio generator
       - name: Configure Main CMake Project
