@@ -55,7 +55,13 @@ jobs:
         shell: powershell
         run: |
           New-Item -ItemType Directory -Force -Path "game/files"
-          curl.exe -L -o "game/files/default.xex" "https://github.com/rafidwayne/speedbreaker-private/releases/download/xex/default.xex"
+          curl.exe --fail --show-error --location --retry 3 --retry-all-errors `
+            -o "game/files/default.xex" `
+            "https://github.com/rafidwayne/speedbreaker-private/releases/download/xex/default.xex"
+          if ($LASTEXITCODE -ne 0) { throw "Download of default.xex failed with exit code $LASTEXITCODE" }
+          if (!(Test-Path "game/files/default.xex") -or (Get-Item "game/files/default.xex").Length -eq 0) {
+              throw "default.xex is missing or empty after download."
+          }
           Write-Host "Successfully downloaded default.xex into game/files/."
 
       # 3. Run XenonRecomp from tools/XenonRecomp
@@ -218,11 +224,12 @@ jobs:
           $unistdStubPath = "runtime/compat/win/unistd.h"
           $unistdStubContent = @"
           #pragma once
+          // Include Winsock before Windows headers to avoid winsock.h conflicts.
+          #include <winsock2.h>
+          #include <windows.h>
           #include <io.h>
           #include <process.h>
           #include <direct.h>
-          #include <winsock2.h>
-          #include <windows.h>
           #include <stdint.h>
           #include <stdio.h>
 
@@ -251,6 +258,8 @@ jobs:
           #define R_OK 4
           #define X_OK 0
 
+          // POSIX names used by the project, mapped to the Windows CRT.
+          inline int isatty(int fd) { return _isatty(fd); }
           inline int access(const char* path, int mode) { return _access(path, mode); }
           inline int unlink(const char* path) { return _unlink(path); }
           inline int rmdir(const char* path) { return _rmdir(path); }
@@ -289,7 +298,7 @@ jobs:
       # 9. Build Main Project with Ninja (Picks up incremental progress and finishes compilation)
       - name: Build Main Project with Ninja
         shell: powershell
-        run: cmake --build build --parallel
+        run: cmake --build build --parallel --verbose
 
       # 10. Save Fresh Build Cache
       - name: Save CMake Build Cache
