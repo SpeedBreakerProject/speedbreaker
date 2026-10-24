@@ -42,19 +42,20 @@ jobs:
           cmake -B temp-xenonrecomp/build -S temp-xenonrecomp -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=clang-cl -DCMAKE_CXX_COMPILER=clang-cl
           cmake --build temp-xenonrecomp/build --config Release
 
-      # 3. Download default.xex from your release link
+      # 3. Download default.xex using robust curl with redirect tracking
       - name: Download Game Binary
         shell: powershell
         run: |
-          Invoke-WebRequest -Uri "https://github.com/rafidwayne/speedbreaker-private/releases/download/xex/default.xex" -OutFile "default.xex"
+          curl.exe -L -o default.xex "https://github.com/rafidwayne/speedbreaker-private/releases/download/xex/default.xex"
           Write-Host "Successfully downloaded default.xex."
 
-      # 4. Run XenonRecomp to populate ppc/
+      # 4. Run XenonRecomp dynamically to populate ppc/
       - name: Generate PPC Sources via XenonRecomp
         shell: powershell
         run: |
-          Write-Host "Running XenonRecomp..."
-          .\temp-xenonrecomp\build\XenonRecomp\XenonRecomp.exe default.xex
+          $recompExe = (Get-ChildItem -Recurse -Filter "XenonRecomp.exe" -Path temp-xenonrecomp).FullName
+          Write-Host "Found XenonRecomp at: $recompExe"
+          & $recompExe default.xex
 
       # 5. Setup sccache for instant future builds
       - name: Setup sccache
