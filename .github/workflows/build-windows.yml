@@ -214,15 +214,17 @@ jobs:
           Set-Content -Path $pthreadStubPath -Value $pthreadStubContent -Encoding UTF8
           Write-Host "Successfully created pthread.h compatibility stub."
 
-          # Create robust unistd.h Windows compatibility stub
+          # Create robust unistd.h Windows compatibility stub (with direct.h and file descriptors)
           $unistdStubPath = "runtime/compat/win/unistd.h"
           $unistdStubContent = @"
           #pragma once
           #include <io.h>
           #include <process.h>
+          #include <direct.h>
           #include <winsock2.h>
           #include <windows.h>
           #include <stdint.h>
+          #include <stdio.h>
 
           #ifndef _SSIZE_T_DEFINED
           #define _SSIZE_T_DEFINED
@@ -232,6 +234,16 @@ jobs:
           #ifndef _USECONDS_T_DEFINED
           #define _USECONDS_T_DEFINED
           typedef unsigned int useconds_t;
+          #endif
+
+          #ifndef STDIN_FILENO
+          #define STDIN_FILENO 0
+          #endif
+          #ifndef STDOUT_FILENO
+          #define STDOUT_FILENO 1
+          #endif
+          #ifndef STDERR_FILENO
+          #define STDERR_FILENO 2
           #endif
 
           #define F_OK 0
