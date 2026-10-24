@@ -28,11 +28,14 @@ jobs:
         shell: powershell
         run: choco install ninja -y
 
-      # 1. Build XenonRecomp using Ninja + clang-cl
+      # 1. Clone XenonRecomp directly into tools/XenonRecomp and build with Ninja + clang-cl
       - name: Build XenonRecomp with Clang & Ninja
         shell: powershell
         run: |
-          git clone --recursive https://github.com/hedge-dev/XenonRecomp.git temp-xenonrecomp
+          New-Item -ItemType Directory -Force -Path "tools"
+          if (!(Test-Path "tools/XenonRecomp")) {
+              git clone --recursive https://github.com/hedge-dev/XenonRecomp.git tools/XenonRecomp
+          }
           
           $llvmPath = "C:\Program Files\LLVM\bin"
           if (!(Test-Path $llvmPath)) {
@@ -40,12 +43,12 @@ jobs:
           }
           echo "$llvmPath" >> $env:GITHUB_PATH
           
-          cmake -B temp-xenonrecomp/build -S temp-xenonrecomp -G Ninja `
+          cmake -B tools/XenonRecomp/build -S tools/XenonRecomp -G Ninja `
             -DCMAKE_C_COMPILER=clang-cl `
             -DCMAKE_CXX_COMPILER=clang-cl `
             -DCMAKE_BUILD_TYPE=Release
             
-          cmake --build temp-xenonrecomp/build --config Release
+          cmake --build tools/XenonRecomp/build --config Release
 
       # 2. Download default.xex into game/files/ where config/nfsmw.toml expects it
       - name: Download Game Binary
@@ -55,12 +58,12 @@ jobs:
           curl.exe -L -o "game/files/default.xex" "https://github.com/rafidwayne/speedbreaker-private/releases/download/xex/default.xex"
           Write-Host "Successfully downloaded default.xex into game/files/."
 
-      # 3. Run XenonRecomp from repository root
+      # 3. Run XenonRecomp from tools/XenonRecomp
       - name: Generate PPC Sources via XenonRecomp
         shell: powershell
         run: |
-          $recompExe = (Get-ChildItem -Recurse -Filter "XenonRecomp.exe" -Path temp-xenonrecomp).FullName
-          $contextHeader = (Get-ChildItem -Recurse -Filter "ppc_context.h" -Path temp-xenonrecomp).FullName
+          $recompExe = (Get-ChildItem -Recurse -Filter "XenonRecomp.exe" -Path tools/XenonRecomp).FullName
+          $contextHeader = (Get-ChildItem -Recurse -Filter "ppc_context.h" -Path tools/XenonRecomp).FullName
           
           Write-Host "Found XenonRecomp at: $recompExe"
           Write-Host "Found PPC Context Header at: $contextHeader"
@@ -76,7 +79,7 @@ jobs:
           Write-Host "Contents of ppc directory after generation:"
           Get-ChildItem ppc
 
-      # 4. Restore vcpkg Cache (Restores instantly from now on)
+      # 4. Restore vcpkg Cache (Restores in seconds)
       - name: Restore vcpkg Cache
         uses: actions/cache/restore@v4
         with:
@@ -85,7 +88,7 @@ jobs:
             C:\vcpkg\packages
           key: vcpkg-windows-cache-v4
 
-      # 5. Install Dependencies via vcpkg (Restores from cache in seconds)
+      # 5. Install Dependencies via vcpkg
       - name: Install Dependencies
         shell: powershell
         run: |
@@ -130,13 +133,19 @@ jobs:
         shell: powershell
         run: cmake --build build --config Release --parallel
 
-      # 9. Package Artifacts
+      # 9. Package Artifacts & Required Runtime DLLs
       - name: Prepare Artifacts
         shell: powershell
         run: |
           New-Item -ItemType Directory -Force -Path output
           Get-ChildItem -Recurse -Filter "*.exe" build | Copy-Item -Destination output
           Get-ChildItem -Recurse -Filter "*.dll" build | Copy-Item -Destination output -ErrorAction SilentlyContinue
+          
+          # Copy required vcpkg runtime DLLs (SDL3, FFmpeg, etc.) to output so the game runs out-of-the-box
+          $vcpkgBin = "$env:VCPKG_INSTALLATION_ROOT\installed\x64-windows\bin"
+          if (Test-Path $vcpkgBin) {
+              Get-ChildItem -Filter "*.dll" $vcpkgBin | Copy-Item -Destination output -ErrorAction SilentlyContinue
+          }
 
       - name: Upload Build Artifacts
         uses: actions/upload-artifact@v4
