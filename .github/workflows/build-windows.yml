@@ -111,8 +111,8 @@ jobs:
             C:\vcpkg\packages
           key: vcpkg-windows-cache-v4
 
-      # 7. Forcefully patch win_compat.h and guest_thread.h globally
-      - name: Patch Windows Compatibility & Threads
+      # 7. Setup Windows Compatibility Layer & PThread Stub for MSVC/Clang on Windows
+      - name: Patch Windows Compatibility & PThread Stub
         shell: powershell
         run: |
           $winCompatPath = "runtime/compat/win/win_compat.h"
@@ -139,20 +139,22 @@ jobs:
               Write-Host "Successfully prepended Windows headers and ssize_t to win_compat.h"
           }
 
-          $guestThreadPath = "runtime/cpu/guest_thread.h"
-          if (Test-Path $guestThreadPath) {
-              $gtContent = Get-Content $guestThreadPath -Raw
-              $gtContent = $gtContent -replace '#include <pthread.h>', "#include <windows.h>"
-              $gtContent = $gtContent -replace 'pthread_t\s+thread;', "HANDLE thread;"
-              Set-Content -Path $guestThreadPath -Value $gtContent -Encoding UTF8
-              Write-Host "Successfully patched guest_thread.h"
-          }
+          # Create a pthread.h compatibility stub inside win compat folder so guest_thread.cpp compiles smoothly
+          $pthreadStubPath = "runtime/compat/win/pthread.h"
+          $pthreadStubContent = @"
+          #pragma once
+          #include <windows.h>
+          typedef struct { int dummy; } pthread_attr_t;
+          typedef HANDLE pthread_t;
+          inline int pthread_detach(pthread_t thread) { CloseHandle(thread); return 0; }
+          "@
+          Set-Content -Path $pthreadStubPath -Value $pthreadStubContent -Encoding UTF8
+          Write-Host "Successfully created pthread.h compatibility stub."
 
-      # 8. Configure Main Project CMake using Ninja + Clang (Clean build, no stale cache)
+      # 8. Configure Main Project CMake using Ninja + Clang
       - name: Configure Main CMake Project
         shell: powershell
         run: |
-          Remove-Item -Recurse -Force build -ErrorAction SilentlyContinue
           $vcpkgInstalled = "$env:VCPKG_INSTALLATION_ROOT\installed\x64-windows"
           
           $llvmPath = "C:\Program Files\LLVM\bin"
@@ -173,13 +175,13 @@ jobs:
             -DSWSCALE_LIBRARY="$vcpkgInstalled/lib/swscale.lib" `
             -DSWRESAMPLE_LIBRARY="$vcpkgInstalled/lib/swresample.lib"
 
-      # 9. Build Main Project with Ninja from scratch
+      # 9. Build Main Project with Ninja (Picks up incremental progress and finishes compilation)
       - name: Build Main Project with Ninja
         shell: powershell
         run: cmake --build build --parallel
 
-      # 10. Save Fresh Build Cache for future commits
-      - name: Save Clean CMake Build Cache
+      # 10. Save Fresh Build Cache
+      - name: Save CMake Build Cache
         uses: actions/cache/save@v4
         if: always()
         with:
