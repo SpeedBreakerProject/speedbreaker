@@ -79,7 +79,7 @@ jobs:
           Write-Host "Contents of ppc directory after generation:"
           Get-ChildItem ppc
 
-      # 4. Restore vcpkg Cache (Restores in seconds)
+      # 4. Restore vcpkg Cache
       - name: Restore vcpkg Cache
         uses: actions/cache/restore@v4
         with:
@@ -111,11 +111,31 @@ jobs:
             C:\vcpkg\packages
           key: vcpkg-windows-cache-v4
 
-      # 7. Configure Main Project CMake using Ninja + Clang (supports Unix flags like -include)
+      # 7. Restore CMake Build Cache (Keeps previously compiled object files)
+      - name: Restore CMake Build Cache
+        uses: actions/cache/restore@v4
+        with:
+          path: build
+          key: cmake-build-cache-${{ runner.os }}-${{ github.sha }}
+          restore-keys: |
+            cmake-build-cache-${{ runner.os }}-
+
+      # 8. Patch POSIX unistd.h header in Windows compatibility files
+      - name: Patch win_compat.h for Windows
+        shell: powershell
+        run: |
+          $winCompatPath = "runtime/compat/win/win_compat.h"
+          if (Test-Path $winCompatPath) {
+              $content = Get-Content $winCompatPath -Raw
+              $content = $content -replace '#include <unistd.h>', "#include <io.h>`n#include <process.h>"
+              Set-Content $winCompatPath $content
+              Write-Host "Patched $winCompatPath to replace unistd.h with Windows headers."
+          }
+
+      # 9. Configure Main Project CMake using Ninja + Clang (Without deleting build!)
       - name: Configure Main CMake Project
         shell: powershell
         run: |
-          Remove-Item -Recurse -Force build -ErrorAction SilentlyContinue
           $vcpkgInstalled = "$env:VCPKG_INSTALLATION_ROOT\installed\x64-windows"
           
           $llvmPath = "C:\Program Files\LLVM\bin"
@@ -136,12 +156,20 @@ jobs:
             -DSWSCALE_LIBRARY="$vcpkgInstalled/lib/swscale.lib" `
             -DSWRESAMPLE_LIBRARY="$vcpkgInstalled/lib/swresample.lib"
 
-      # 8. Build Main Project with Ninja rapidly in parallel
+      # 10. Build Main Project with Ninja (Inrementally builds only new/modified files)
       - name: Build Main Project with Ninja
         shell: powershell
         run: cmake --build build --parallel
 
-      # 9. Package Artifacts & Required Runtime DLLs
+      # 11. Save CMake Build Cache (Saves progress even if it fails later)
+      - name: Save CMake Build Cache
+        uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: build
+          key: cmake-build-cache-${{ runner.os }}-${{ github.sha }}
+
+      # 12. Package Artifacts & Required Runtime DLLs
       - name: Prepare Artifacts
         shell: powershell
         run: |
