@@ -22,8 +22,7 @@ jobs:
 
       - name: Exclude Workspace from Windows Defender
         shell: powershell
-        run: |
-          Add-MpPreference -ExclusionPath "$env:GITHUB_WORKSPACE"
+        run: Add-MpPreference -ExclusionPath "$env:GITHUB_WORKSPACE"
 
       # 1. Setup MSVC Toolchain
       - name: Setup MSVC Toolchain
@@ -31,18 +30,16 @@ jobs:
         with:
           arch: x64
 
-      # 2. Remove conflicting Git Bash 'link' utility via PowerShell
+      # 2. Remove conflicting Git Bash 'link' utility
       - name: Remove Conflicting Unix Link Command
         shell: powershell
-        run: |
-          Remove-Item "C:\Program Files\Git\usr\bin\link.exe" -ErrorAction SilentlyContinue
+        run: Remove-Item "C:\Program Files\Git\usr\bin\link.exe" -ErrorAction SilentlyContinue
 
       - name: Install Ninja
         shell: powershell
-        run: |
-          choco install ninja -y
+        run: choco install ninja -y
 
-      # 3. Build XenonRecomp using Clang-cl in PowerShell
+      # 3. Build XenonRecomp using Clang-cl
       - name: Build XenonRecomp from Source
         shell: powershell
         run: |
@@ -70,20 +67,15 @@ jobs:
         with:
           version: v0.8.1
 
-      # 7. Configure Main Project CMake in PowerShell
+      # 7. Configure Main Project CMake cleanly on a single line
       - name: Configure CMake
         shell: powershell
-        run: |
-          cmake -B build -G Ninja `
-            -DCMAKE_BUILD_TYPE=Release `
-            -DCMAKE_C_COMPILER_LAUNCHER=sccache `
-            -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
+        run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER_LAUNCHER=sccache -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
 
       # 8. Build Main Project rapidly using all CPU cores
       - name: Build with Ninja
         shell: powershell
-        run: |
-          cmake --build build --config Release
+        run: cmake --build build --config Release
 
       # 9. Package Artifacts
       - name: Prepare Artifacts
