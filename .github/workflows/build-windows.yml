@@ -39,7 +39,7 @@ jobs:
       - name: Install Ninja
         run: choco install ninja -y
 
-      # 2. Clone and Build XenonRecomp using clang-cl (supports GCC builtins required by XenonRecomp)
+      # 2. Build XenonRecomp using clang-cl
       - name: Build XenonRecomp from Source with Clang
         shell: bash
         run: |
@@ -65,24 +65,20 @@ jobs:
           # ./temp-xenonrecomp/build/XenonRecomp/XenonRecomp.exe ...
           echo "Running XenonRecomp generation..."
 
-      # 5. Setup sccache for fast incremental compilation of the main project
+      # 5. Setup sccache action
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@v0.0.7
         with:
           version: v0.8.1
 
-      - name: Configure Environment for SCCache
-        shell: bash
-        run: |
-          echo "CC=sccache cl" >> $GITHUB_ENV
-          echo "CXX=sccache cl" >> $GITHUB_ENV
-
-      # 6. Configure Main Project CMake using Ninja generator
+      # 6. Configure Main Project CMake cleanly with sccache launcher
       - name: Configure CMake
         shell: bash
         run: |
           cmake -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER=cl \
+            -DCMAKE_CXX_COMPILER=cl \
             -DCMAKE_C_COMPILER_LAUNCHER=sccache \
             -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
 
