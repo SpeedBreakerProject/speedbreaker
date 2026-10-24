@@ -47,23 +47,16 @@ jobs:
             
           cmake --build temp-xenonrecomp/build --config Release
 
-      # 2. Download default.xex and mirror it across all potential expected folders
-      - name: Download Game Binary & Mirror Paths
+      # 2. Download default.xex and place it in root and config folders
+      - name: Download Game Binary
         shell: powershell
         run: |
           curl.exe -L -o default.xex "https://github.com/rafidwayne/speedbreaker-private/releases/download/xex/default.xex"
-          
-          New-Item -ItemType Directory -Force -Path private
           New-Item -ItemType Directory -Force -Path config
-          
-          Copy-Item default.xex private/ -Force
           Copy-Item default.xex config/ -Force
-          
-          Write-Host "Successfully downloaded and mirrored default.xex."
-          Write-Host "--- TOML Config Contents ---"
-          Get-Content config/nfsmw.toml
+          Write-Host "Successfully downloaded and placed default.xex."
 
-      # 3. Run XenonRecomp with explicit path safety
+      # 3. Run XenonRecomp from the config directory so relative paths resolve correctly
       - name: Generate PPC Sources via XenonRecomp
         shell: powershell
         run: |
@@ -75,10 +68,15 @@ jobs:
           
           New-Item -ItemType Directory -Force -Path ppc
           
-          & $recompExe config/nfsmw.toml $contextHeader
-          if ($LASTEXITCODE -ne 0) {
-              Write-Error "XenonRecomp failed with exit code $LASTEXITCODE"
-              exit $LASTEXITCODE
+          # Move into config folder context to satisfy relative paths in nfsmw.toml
+          Push-Location config
+          & $recompExe nfsmw.toml "$contextHeader"
+          $recompExitCode = $LASTEXITCODE
+          Pop-Location
+          
+          if ($recompExitCode -ne 0) {
+              Write-Error "XenonRecomp failed with exit code $recompExitCode"
+              exit $recompExitCode
           }
           
           Write-Host "Contents of ppc directory after generation:"
@@ -98,7 +96,7 @@ jobs:
 
       # 6. Package Artifacts
       - name: Prepare Artifacts
-        shell: powershell
+        shell: powershell,
         run: |
           New-Item -ItemType Directory -Force -Path output
           Get-ChildItem -Recurse -Filter "*.exe" build | Copy-Item -Destination output
