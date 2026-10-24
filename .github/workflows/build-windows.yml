@@ -111,7 +111,7 @@ jobs:
             C:\vcpkg\packages
           key: vcpkg-windows-cache-v4
 
-      # 7. Restore CMake Build Cache (Incremental compilation saved!)
+      # 7. Restore CMake Build Cache (Incremental progress kept)
       - name: Restore CMake Build Cache
         uses: actions/cache/restore@v4
         with:
@@ -120,7 +120,7 @@ jobs:
           restore-keys: |
             cmake-build-cache-${{ runner.os }}-
 
-      # 8. Patch POSIX unistd.h and pthread.h headers in Windows compatibility files
+      # 8. Patch win_compat.h to fix unistd, pthread, ssize_t, and Windows types
       - name: Patch win_compat.h for Windows
         shell: powershell
         run: |
@@ -128,9 +128,14 @@ jobs:
           if (Test-Path $winCompatPath) {
               $content = Get-Content $winCompatPath -Raw
               $content = $content -replace '#include <unistd.h>', "#include <io.h>`n#include <process.h>"
-              $content = $content -replace '#include <pthread.h>', "// #include <pthread.h> // Not native on Windows"
+              $content = $content -replace '#include <pthread.h>', "// #include <pthread.h>"
+              
+              if ($content -notmatch "ssize_t") {
+                  $content = "`n#include <windows.h>`n#ifndef _SSIZE_T_DEFINED`n#define _SSIZE_T_DEFINED`ntypedef intptr_t ssize_t;`n#endif`n" + $content
+              }
+              
               Set-Content $winCompatPath $content
-              Write-Host "Patched $winCompatPath successfully."
+              Write-Host "Successfully patched win_compat.h with Windows type definitions."
           }
 
       # 9. Configure Main Project CMake using Ninja + Clang
@@ -157,7 +162,7 @@ jobs:
             -DSWSCALE_LIBRARY="$vcpkgInstalled/lib/swscale.lib" `
             -DSWRESAMPLE_LIBRARY="$vcpkgInstalled/lib/swresample.lib"
 
-      # 10. Build Main Project with Ninja (Inrementally resumes from cached 70%)
+      # 10. Build Main Project with Ninja (Incrementally finishes remaining 30%)
       - name: Build Main Project with Ninja
         shell: powershell
         run: cmake --build build --parallel
