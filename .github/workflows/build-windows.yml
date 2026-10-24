@@ -25,8 +25,8 @@ jobs:
         run: |
           Add-MpPreference -ExclusionPath "$env:GITHUB_WORKSPACE"
 
-      # 1. Setup MSVC & Ninja Toolchain
-      - name: Setup MSVC & Ninja Toolchain
+      # 1. Setup MSVC Toolchain environment variables
+      - name: Setup MSVC Toolchain
         uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: x64
@@ -39,19 +39,16 @@ jobs:
       - name: Install Ninja
         run: choco install ninja -y
 
-      # 2. Download Pre-built XenonRecomp Tool (Bypasses compilation errors instantly)
-      - name: Download XenonRecomp Release
-        shell: powershell
+      # 2. Clone and Build XenonRecomp using clang-cl (supports GCC builtins required by XenonRecomp)
+      - name: Build XenonRecomp from Source with Clang
+        shell: bash
         run: |
-          $repo = "hedge-dev/XenonRecomp"
-          $release = Invoke-RestMethod "https://api.github.com/repos/$repo/releases/latest"
-          $asset = $release.assets | Where-Object { $_.name -like "*.zip" } | Select-Object -First 1
-          if ($asset) {
-              Invoke-WebRequest -Uri $asset.browser_download_url -OutFile "xenonrecomp.zip"
-              Expand-Archive -Path "xenonrecomp.zip" -DestinationPath "temp-xenonrecomp"
-          } else {
-              throw "Could not find XenonRecomp release zip asset."
-          }
+          git clone --recursive https://github.com/hedge-dev/XenonRecomp.git temp-xenonrecomp
+          cmake -B temp-xenonrecomp/build -S temp-xenonrecomp -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER=clang-cl \
+            -DCMAKE_CXX_COMPILER=clang-cl
+          cmake --build temp-xenonrecomp/build --config Release
 
       # 3. Securely acquire your game binary (default.xex)
       - name: Download Game Binary
@@ -61,13 +58,14 @@ jobs:
           # Example: Invoke-WebRequest -Uri "${{ secrets.GAME_BINARY_URL }}" -OutFile "default.xex"
 
       # 4. Run XenonRecomp to generate source files into ppc/
-      - name: Run XenonRecomp
+      - name: Run XenonRecomp Generation
         shell: bash
         run: |
-          # Run the downloaded XenonRecomp binary pointing to your game executable
+          # Point the built XenonRecomp binary to your game executable
+          # ./temp-xenonrecomp/build/XenonRecomp/XenonRecomp.exe ...
           echo "Running XenonRecomp generation..."
 
-      # 5. Setup SCCache for compiler caching across runs
+      # 5. Setup sccache for fast incremental compilation of the main project
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@v0.0.7
         with:
