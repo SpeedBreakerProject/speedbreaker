@@ -111,7 +111,7 @@ jobs:
             C:\vcpkg\packages
           key: vcpkg-windows-cache-v4
 
-      # 7. Configure Main Project CMake with explicit vcpkg FFmpeg paths
+      # 7. Configure Main Project CMake using Clang-CL
       - name: Configure Main CMake Project
         shell: powershell
         run: |
@@ -119,6 +119,8 @@ jobs:
           $vcpkgInstalled = "$env:VCPKG_INSTALLATION_ROOT\installed\x64-windows"
           
           cmake -B build -DCMAKE_BUILD_TYPE=Release `
+            -DCMAKE_C_COMPILER=clang-cl `
+            -DCMAKE_CXX_COMPILER=clang-cl `
             -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" `
             -DFFMPEG_DIR="$vcpkgInstalled" `
             -DFFMPEG_INCLUDE_DIR="$vcpkgInstalled/include" `
@@ -128,7 +130,7 @@ jobs:
             -DSWSCALE_LIBRARY="$vcpkgInstalled/lib/swscale.lib" `
             -DSWRESAMPLE_LIBRARY="$vcpkgInstalled/lib/swresample.lib"
 
-      # 8. Build Main Project rapidly in parallel using all CPU cores
+      # 8. Build Main Project rapidly in parallel
       - name: Build Main Project with Visual Studio
         shell: powershell
         run: cmake --build build --config Release --parallel
@@ -141,7 +143,6 @@ jobs:
           Get-ChildItem -Recurse -Filter "*.exe" build | Copy-Item -Destination output
           Get-ChildItem -Recurse -Filter "*.dll" build | Copy-Item -Destination output -ErrorAction SilentlyContinue
           
-          # Copy required vcpkg runtime DLLs (SDL3, FFmpeg, etc.) to output so the game runs out-of-the-box
           $vcpkgBin = "$env:VCPKG_INSTALLATION_ROOT\installed\x64-windows\bin"
           if (Test-Path $vcpkgBin) {
               Get-ChildItem -Filter "*.dll" $vcpkgBin | Copy-Item -Destination output -ErrorAction SilentlyContinue
