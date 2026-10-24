@@ -25,76 +25,73 @@ jobs:
         run: |
           Add-MpPreference -ExclusionPath "$env:GITHUB_WORKSPACE"
 
-      # 1. Setup MSVC Toolchain environment variables
+      # 1. Setup MSVC Toolchain
       - name: Setup MSVC Toolchain
         uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: x64
 
+      # 2. Remove conflicting Git Bash 'link' utility via PowerShell
       - name: Remove Conflicting Unix Link Command
-        shell: bash
+        shell: powershell
         run: |
-          rm -f /usr/bin/link
+          Remove-Item "C:\Program Files\Git\usr\bin\link.exe" -ErrorAction SilentlyContinue
 
       - name: Install Ninja
-        run: choco install ninja -y
+        shell: powershell
+        run: |
+          choco install ninja -y
 
-      # 2. Build XenonRecomp using clang-cl
-      - name: Build XenonRecomp from Source with Clang
-        shell: bash
+      # 3. Build XenonRecomp using Clang-cl in PowerShell
+      - name: Build XenonRecomp from Source
+        shell: powershell
         run: |
           git clone --recursive https://github.com/hedge-dev/XenonRecomp.git temp-xenonrecomp
-          cmake -B temp-xenonrecomp/build -S temp-xenonrecomp -G Ninja \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_C_COMPILER=clang-cl \
-            -DCMAKE_CXX_COMPILER=clang-cl
+          cmake -B temp-xenonrecomp/build -S temp-xenonrecomp -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=clang-cl -DCMAKE_CXX_COMPILER=clang-cl
           cmake --build temp-xenonrecomp/build --config Release
 
-      # 3. Securely acquire your game binary (default.xex)
+      # 4. Securely acquire your game binary (default.xex)
       - name: Download Game Binary
         shell: powershell
         run: |
           Write-Host "Insert command here to fetch your game binary (default.xex) if required for generation."
           # Example: Invoke-WebRequest -Uri "${{ secrets.GAME_BINARY_URL }}" -OutFile "default.xex"
 
-      # 4. Run XenonRecomp to generate source files into ppc/
+      # 5. Run XenonRecomp Generation
       - name: Run XenonRecomp Generation
-        shell: bash
+        shell: powershell
         run: |
-          # Point the built XenonRecomp binary to your game executable
-          # ./temp-xenonrecomp/build/XenonRecomp/XenonRecomp.exe ...
-          echo "Running XenonRecomp generation..."
+          Write-Host "Running XenonRecomp generation..."
+          # .\temp-xenonrecomp\build\XenonRecomp\XenonRecomp.exe ...
 
-      # 5. Setup sccache action
+      # 6. Setup sccache for instant incremental builds
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@v0.0.7
         with:
           version: v0.8.1
 
-      # 6. Configure Main Project CMake cleanly with sccache launcher
+      # 7. Configure Main Project CMake in PowerShell
       - name: Configure CMake
-        shell: bash
+        shell: powershell
         run: |
-          cmake -B build -G Ninja \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_C_COMPILER=cl \
-            -DCMAKE_CXX_COMPILER=cl \
-            -DCMAKE_C_COMPILER_LAUNCHER=sccache \
+          cmake -B build -G Ninja `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DCMAKE_C_COMPILER_LAUNCHER=sccache `
             -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
 
-      # 7. Build Main Project rapidly using all cores
+      # 8. Build Main Project rapidly using all CPU cores
       - name: Build with Ninja
-        shell: bash
+        shell: powershell
         run: |
           cmake --build build --config Release
 
-      # 8. Package Artifacts
+      # 9. Package Artifacts
       - name: Prepare Artifacts
-        shell: bash
+        shell: powershell
         run: |
-          mkdir -p output
-          find build -name "*.exe" -exec cp {} output/ \;
-          find build -name "*.dll" -exec cp {} output/ \; 2>/dev/null || true
+          New-Item -ItemType Directory -Force -Path output
+          Get-ChildItem -Recurse -Filter "*.exe" build | Copy-Item -Destination output
+          Get-ChildItem -Recurse -Filter "*.dll" build | Copy-Item -Destination output -ErrorAction SilentlyContinue
 
       - name: Upload Build Artifacts
         uses: actions/upload-artifact@v4
