@@ -111,7 +111,7 @@ jobs:
             C:\vcpkg\packages
           key: vcpkg-windows-cache-v4
 
-      # 7. Restore CMake Build Cache (Keeps previously compiled object files)
+      # 7. Restore CMake Build Cache (Incremental compilation saved!)
       - name: Restore CMake Build Cache
         uses: actions/cache/restore@v4
         with:
@@ -120,7 +120,7 @@ jobs:
           restore-keys: |
             cmake-build-cache-${{ runner.os }}-
 
-      # 8. Patch POSIX unistd.h header in Windows compatibility files
+      # 8. Patch POSIX unistd.h and pthread.h headers in Windows compatibility files
       - name: Patch win_compat.h for Windows
         shell: powershell
         run: |
@@ -128,11 +128,12 @@ jobs:
           if (Test-Path $winCompatPath) {
               $content = Get-Content $winCompatPath -Raw
               $content = $content -replace '#include <unistd.h>', "#include <io.h>`n#include <process.h>"
+              $content = $content -replace '#include <pthread.h>', "// #include <pthread.h> // Not native on Windows"
               Set-Content $winCompatPath $content
-              Write-Host "Patched $winCompatPath to replace unistd.h with Windows headers."
+              Write-Host "Patched $winCompatPath successfully."
           }
 
-      # 9. Configure Main Project CMake using Ninja + Clang (Without deleting build!)
+      # 9. Configure Main Project CMake using Ninja + Clang
       - name: Configure Main CMake Project
         shell: powershell
         run: |
@@ -156,12 +157,12 @@ jobs:
             -DSWSCALE_LIBRARY="$vcpkgInstalled/lib/swscale.lib" `
             -DSWRESAMPLE_LIBRARY="$vcpkgInstalled/lib/swresample.lib"
 
-      # 10. Build Main Project with Ninja (Inrementally builds only new/modified files)
+      # 10. Build Main Project with Ninja (Inrementally resumes from cached 70%)
       - name: Build Main Project with Ninja
         shell: powershell
         run: cmake --build build --parallel
 
-      # 11. Save CMake Build Cache (Saves progress even if it fails later)
+      # 11. Save CMake Build Cache
       - name: Save CMake Build Cache
         uses: actions/cache/save@v4
         if: always()
