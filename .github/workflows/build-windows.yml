@@ -16,29 +16,35 @@ jobs:
     runs-on: windows-latest
     
     steps:
-      # 1. Fast shallow checkout (saves tons of clone time)
+      # 1. Fast shallow checkout
       - name: Checkout Repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
           submodules: recursive
 
-      # 2. Speed up Windows I/O by excluding build folder from Defender scanning
+      # 2. Exclude workspace from Windows Defender to speed up file I/O
       - name: Exclude Workspace from Windows Defender
         shell: powershell
         run: |
           Add-MpPreference -ExclusionPath "$env:GITHUB_WORKSPACE"
 
-      # 3. Setup Ninja & MSVC Environment
+      # 3. Setup MSVC & Ninja Toolchain
       - name: Setup MSVC & Ninja Toolchain
         uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: x64
 
+      # 4. Remove conflicting Unix 'link' command so MSVC link.exe takes precedence
+      - name: Remove Conflicting Unix Link Command
+        shell: bash
+        run: |
+          rm -f /usr/bin/link
+
       - name: Install Ninja
         run: choco install ninja -y
 
-      # 4. Setup SCCache for compiler caching across runs
+      # 5. Setup SCCache for compiler caching across runs
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@v0.0.7
         with:
@@ -50,7 +56,7 @@ jobs:
           echo "CC=sccache cl" >> $GITHUB_ENV
           echo "CXX=sccache cl" >> $GITHUB_ENV
 
-      # 5. Configure CMake using Ninja generator
+      # 6. Configure CMake using Ninja generator
       - name: Configure CMake
         shell: bash
         run: |
@@ -59,18 +65,17 @@ jobs:
             -DCMAKE_C_COMPILER_LAUNCHER=sccache \
             -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
 
-      # 6. Build the project rapidly using all cores
+      # 7. Build the project rapidly using all cores
       - name: Build with Ninja
         shell: bash
         run: |
           cmake --build build --config Release
 
-      # 7. Package Artifacts
+      # 8. Package Artifacts
       - name: Prepare Artifacts
         shell: bash
         run: |
           mkdir -p output
-          # Adjust paths according to where your executable outputs (e.g. build/Release or build/)
           find build -name "*.exe" -exec cp {} output/ \;
           find build -name "*.dll" -exec cp {} output/ \; 2>/dev/null || true
 
@@ -79,4 +84,3 @@ jobs:
         with:
           name: speedbreaker-windows-release
           path: output/
-          
