@@ -3,8 +3,6 @@ name: Build Windows (Optimized)
 on:
   push:
     branches: [ "windows", "main", "master" ]
-  pull_request:
-    branches: [ "windows", "main", "master" ]
   workflow_dispatch:
 
 concurrency:
@@ -16,26 +14,54 @@ jobs:
     runs-on: windows-latest
     
     steps:
-      # 1. Fast shallow checkout
       - name: Checkout Repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
           submodules: recursive
 
-      # 2. Exclude workspace from Windows Defender to speed up file I/O
       - name: Exclude Workspace from Windows Defender
         shell: powershell
         run: |
           Add-MpPreference -ExclusionPath "$env:GITHUB_WORKSPACE"
 
-      # 3. Setup MSVC & Ninja Toolchain
+      # 1. Setup XenonRecomp Dependencies (e.g. .NET / Dotnet if XenonRecomp requires it)
+      - name: Setup .NET SDK (Required for XenonRecomp)
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.x'
+
+      # 2. Build or download XenonRecomp tools on the fly
+      - name: Fetch and Build XenonRecomp
+        shell: bash
+        run: |
+          git clone https://github.com/hedge-dev/XenonRecomp.git temp-xenonrecomp
+          dotnet publish temp-xenonrecomp -c Release -o build-xenonrecomp
+
+      # 3. Securely acquire your game binary (default.xex)
+      # NOTE: You must provide a secure direct link or GitHub Secret/Artifact download 
+      # containing your legally dumped default.xex / game assets.
+      - name: Download Game Binary
+        shell: powershell
+        run: |
+          # Example: If you host your encrypted/private default.xex somewhere secure:
+          # Invoke-WebRequest -Uri "${{ secrets.GAME_BINARY_URL }}" -OutFile "default.xex"
+          
+          Write-Host "Place your default.xex download logic or secret retrieval here."
+
+      # 4. Run XenonRecomp to generate source files into ppc/
+      - name: Run XenonRecomp
+        shell: bash
+        run: |
+          # Run XenonRecomp pointing to your game executable and outputting to ppc/
+          # dotnet build-xenonrecomp/XenonRecomp.dll <config.toml> <ppc_context.h> <output_dir>
+          echo "Running XenonRecomp..."
+
       - name: Setup MSVC & Ninja Toolchain
         uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: x64
 
-      # 4. Remove conflicting Unix 'link' command so MSVC link.exe takes precedence
       - name: Remove Conflicting Unix Link Command
         shell: bash
         run: |
@@ -44,7 +70,6 @@ jobs:
       - name: Install Ninja
         run: choco install ninja -y
 
-      # 5. Setup SCCache for compiler caching across runs
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@v0.0.7
         with:
@@ -56,7 +81,6 @@ jobs:
           echo "CC=sccache cl" >> $GITHUB_ENV
           echo "CXX=sccache cl" >> $GITHUB_ENV
 
-      # 6. Configure CMake using Ninja generator
       - name: Configure CMake
         shell: bash
         run: |
@@ -65,13 +89,11 @@ jobs:
             -DCMAKE_C_COMPILER_LAUNCHER=sccache \
             -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
 
-      # 7. Build the project rapidly using all cores
       - name: Build with Ninja
         shell: bash
         run: |
           cmake --build build --config Release
 
-      # 8. Package Artifacts
       - name: Prepare Artifacts
         shell: bash
         run: |
