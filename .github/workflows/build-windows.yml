@@ -85,14 +85,35 @@ jobs:
           Write-Host "Contents of ppc directory after generation:"
           Get-ChildItem ppc
 
-      # 4. Restore vcpkg Cache
+      - name: Check vcpkg cache directories
+        shell: powershell
+        run: |
+          Write-Host "VCPKG_INSTALLATION_ROOT=$env:VCPKG_INSTALLATION_ROOT"
+          if (Test-Path "C:\vcpkg\installed") {
+              Write-Host "Existing installed tree found."
+          } else {
+              Write-Host "No installed cache directory exists before restore."
+          }
+          if (Test-Path "C:\vcpkg\packages") {
+              Write-Host "Existing packages tree found."
+          } else {
+              Write-Host "No packages cache directory exists before restore."
+          }
+
+      # 4. Restore vcpkg Cache (stalled segment downloads time out after 5 minutes)
       - name: Restore vcpkg Cache
         uses: actions/cache/restore@v4
+        # A cache restore failure must not prevent vcpkg from installing dependencies.
+        continue-on-error: true
+        env:
+          SEGMENT_DOWNLOAD_TIMEOUT_MINS: '5'
         with:
           path: |
             C:\vcpkg\installed
             C:\vcpkg\packages
-          key: vcpkg-windows-cache-v4
+          key: vcpkg-windows-cache-v5
+          restore-keys: |
+            vcpkg-windows-cache-v4
 
       # 5. Install Dependencies via vcpkg
       - name: Install Dependencies
@@ -110,12 +131,14 @@ jobs:
       # 6. Save vcpkg Cache immediately
       - name: Save vcpkg Cache
         uses: actions/cache/save@v4
-        if: always()
+        if: success()
+        env:
+          SEGMENT_DOWNLOAD_TIMEOUT_MINS: '5'
         with:
           path: |
             C:\vcpkg\installed
             C:\vcpkg\packages
-          key: vcpkg-windows-cache-v4
+          key: vcpkg-windows-cache-v5
 
       # 7. Setup Windows Compatibility Layer & POSIX Stubs (pthread.h & unistd.h)
       - name: Patch Windows Compatibility & POSIX Stubs
@@ -303,7 +326,7 @@ jobs:
       # 10. Save Fresh Build Cache
       - name: Save CMake Build Cache
         uses: actions/cache/save@v4
-        if: always()
+        if: success()
         with:
           path: build
           key: cmake-build-cache-${{ runner.os }}-${{ github.sha }}
