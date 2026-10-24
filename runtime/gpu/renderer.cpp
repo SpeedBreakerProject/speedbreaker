@@ -1816,6 +1816,19 @@ namespace gpu::renderer
             bool wholeArea = false;
         };
         std::unordered_map<uint64_t, std::unique_ptr<RenderTarget>> s_targets;
+        struct ShadowResolveTarget
+        {
+            RenderTarget* target;
+            uint64_t writeSequence;
+        };
+        std::unordered_map<uint32_t, ShadowResolveTarget> s_shadowTargetsByResolve;
+
+        void InvalidateShadowResolve(RenderTarget* target)
+        {
+            if (!target || !target->depth || target->pitch != 1600)
+                return;
+            std::erase_if(s_shadowTargetsByResolve, [&](const auto& entry) { return entry.second == target; });
+        }
 
         VkFormat ColorFormat(uint32_t format)
         {
@@ -1909,6 +1922,7 @@ namespace gpu::renderer
         // the new scale between two frames, and Auto follows the picture's
         // size (the window, fullscreen, the aspect ratio setting).
         gpu::RenderScale s_renderScale;
+        gpu::RenderScale s_shadowScale;
         uint32_t s_scalePitchMin = 640, s_scalePitchMax = 1280;
         uint32_t s_scaleBudget = 6;  // Auto's most host pixels per guest pixel
         bool s_scaleFixed = false;   // NFSMW_RENDER_SCALE: no live changes
@@ -2010,6 +2024,7 @@ namespace gpu::renderer
                 video::FrameRegion(regionW, regionH);
                 s_renderScale = WantedRenderScale(setting, regionW, regionH);
             }
+            s_shadowScale = gpu::ShadowScale(s_renderScale);
             if (const char* v = std::getenv("NFSMW_SCALE_PITCH"))
                 sscanf(v, "%u-%u", &s_scalePitchMin, &s_scalePitchMax);
             fprintf(stderr, "[renderer] internal resolution %s (%ux%u, %s; surface pitches %u-%u)\n", gpu::ScaleName(s_renderScale).c_str(),
@@ -2020,6 +2035,11 @@ namespace gpu::renderer
         bool ScaledPitch(uint32_t pitch)
         {
             return pitch >= s_scalePitchMin && pitch <= s_scalePitchMax;
+        }
+
+        bool ScaledTarget(const RenderTarget& target)
+        {
+            return ScaledPitch(target.pitch) || (target.depth && target.pitch == 1600);
         }
 
         // Untiled rendering draws tile 0 over the whole frame (TileShift).
@@ -2053,6 +2073,8 @@ namespace gpu::renderer
             rt->guestHeight = rows;
             if (ScaledPitch(pitch))
                 rt->scale = s_renderScale;
+            if (depth && pitch == 1600)
+                rt->scale = s_shadowScale;
             // (Rounded up: a pitch that isn't whole blocks at 1.5x still
             // has room for its last host column.)
             rt->width = rt->scale.x.Size(rt->guestWidth);
@@ -2244,6 +2266,9 @@ namespace gpu::renderer
 
         void BeginPass(RenderTarget* const color[4], RenderTarget* depth, VkRect2D area)
         {
+            for (RenderTarget* target : color)
+                InvalidateShadowResolve(target);
+            InvalidateShadowResolve(depth);
             bool sameTargets = s_passActive && depth == s_passDepth && std::equal(color, color + 4, s_passColor);
             if (sameTargets && Contains(s_passArea, area))
                 return;
@@ -4107,6 +4132,20 @@ void main()
                     mipSize = std::min(mipSize, uint32_t(kSharedSize) - mipBase);
                 }
             }
+            if (!cube && !volume && format == 22 && width == 1600 && height == 1600 && maxLevel == 0)
+            {
+                if (auto it = s_shadowTargetsByResolve.find(base); it != s_shadowTargetsByResolve.end())
+                {
+                    RenderTarget* target = it->second;
+                    if (target->scale == s_shadowScale && target->sampleView &&
+                        f.tiled && pitchTexels == 1600 && f.endianness == xenos::Endian::kNone &&
+                        f.swizzle == 0x688 && writewatch::WriteSequence(base, size) == it->second.writeSequence)
+                    {
+                        sampler = GetSampler(f, maxLevel);
+                        return target->sampleView;
+                    }
+                }
+            }
             // Drawn into scaled targets: a texture that scaled resolves wrote
             // (and nothing since) is sampled at host resolution, base level
             // only (resolved surfaces have no mips).
@@ -5383,6 +5422,7 @@ void main()
                 auto ci = RegAt<reg::RB_COLOR_INFO>(infoRegs[copyControl.copy_src_select & 3]);
                 source = GetTarget(ci.color_base, uint32_t(ci.color_format), false, pitch);
             }
+            InvalidateShadowResolve(source);
 
             // Copy.
             auto destInfo = Reg<reg::RB_COPY_DEST_INFO>();
@@ -5489,6 +5529,11 @@ void main()
                     const bool wholeBlocks = (r.x0 + shiftX) >= 0 && (r.y0 + shiftY) >= 0 &&
                         source->scale.x.Exact(uint32_t(r.x0 + shiftX)) && source->scale.y.Exact(uint32_t(r.y0 + shiftY)) &&
                         source->scale.x.Exact(uint32_t(r.x0)) && source->scale.y.Exact(uint32_t(r.y0));
+                    const bool directShadowResolve = depthSource && source->depth && source->pitch == 1600 &&
+                        source->scale == s_shadowScale && !source->scale.IsOne() && format == 22 &&
+                        !destInfo.copy_dest_array && destInfo.copy_dest_endian == xenos::Endian::kNone &&
+                        !destInfo.copy_dest_swap && destInfo.copy_dest_exp_bias == 0 && rc.destPitch == 1600 &&
+                        r.x0 == 0 && r.y0 == 0 && r.x1 == 1600 && r.y1 == 1600;
                     if (!wholeBlocks)
                         LogOnce(0x2500, "resolve at (%d,%d) (tile shift %d,%d) from a %s target isn't whole blocks: kept at 1x only, "
                             "its 1x average up to half a host pixel off", r.x0, r.y0, shiftX, shiftY, gpu::ScaleName(source->scale).c_str());
@@ -5496,7 +5541,7 @@ void main()
                     uint32_t firstPage = rangeBase >> 12;
                     uint32_t lastPage = std::min<uint32_t>((rangeBase + rangeBytes - 1) >> 12, kGuestPages - 1);
                     // A 32-bit resolve from a scaled target keeps its samples.
-                    bool scaledWrite = !source->scale.IsOne() && wholeBlocks && bl == 2 && !destInfo.copy_dest_array &&
+                    bool scaledWrite = !directShadowResolve && !source->scale.IsOne() && wholeBlocks && bl == 2 && !destInfo.copy_dest_array &&
                         EnsureScaledMemory() && source->scale == s_scaled.scale;
                     if (scaledWrite)
                     {
@@ -5700,6 +5745,12 @@ void main()
                                     siblings.push_back(q);
                     }
                     uint64_t written = writewatch::MarkWritten(rangeBase, rangeBytes, writewatch::Writer::kResolve, rc.destBase);
+                    if (directShadowResolve && !(s_exp & 2))
+                    {
+                        uint64_t writeSequence = writewatch::WriteSequence(rangeBase, rangeBytes);
+                        if (writeSequence)
+                            s_shadowTargetsByResolve[rc.destBase] = { source, writeSequence };
+                    }
                     // The fused texture holds this write: its pages' sequence
                     // now, and any write after it is newer (0: per-page
                     // sequences, NFSMW_WATCH_RANGES=0, so it is loaded again).
@@ -6865,12 +6916,15 @@ void main()
             const gpu::RenderScale old = s_renderScale;
             Flush();
             s_renderScale = scale;
+            s_shadowScale = gpu::ShadowScale(scale);
+            s_shadowTargetsByResolve.clear();
             PrewarmResolvePipelines(scale);
             size_t targets = 0;
             for (auto& [key, slot] : s_targets)
             {
                 RenderTarget& was = *slot;  // (keyed as before: the key has no scale)
-                if (!ScaledPitch(was.pitch) || was.scale == scale)
+                const gpu::RenderScale targetScale = was.depth && was.pitch == 1600 ? s_shadowScale : scale;
+                if (!ScaledTarget(was) || was.scale == targetScale)
                     continue;
                 // Clears still waiting for their target's next pass, in guest
                 // pixels (their host edges came from guest ones: GuestEdge
@@ -6892,7 +6946,7 @@ void main()
                 for (PendingClear& pc : moved)
                 {
                     pc.rt = slot.get();
-                    pc.rect = HostRect(scale, pc.rect.offset.x, pc.rect.offset.y, pc.rect.offset.x + int32_t(pc.rect.extent.width),
+                    pc.rect = HostRect(targetScale, pc.rect.offset.x, pc.rect.offset.y, pc.rect.offset.x + int32_t(pc.rect.extent.width),
                         pc.rect.offset.y + int32_t(pc.rect.extent.height));
                     s_pendingClears.push_back(pc);
                 }

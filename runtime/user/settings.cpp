@@ -256,7 +256,7 @@ namespace settings
               .env = "NFSMW_TEXTURE_MIPS", .defaultValue = 1 },
             { .id = Id::InternalResolution, .category = Category::Graphics, .type = Type::Enum, .apply = Apply::Live,
               .table = "video", .key = "internal_resolution", .label = "Internal Resolution",
-              .description = "Render the 3D scene above the 360's 720p. 1.5x is 1080p, a little over half the pixels of 2x. Auto: from the screen (1440p: 2x, or 3x2 filling an ultrawide).",
+              .description = "Render the 3D scene above the 360's 720p. Sun shadows follow this setting up to 2x. 1.5x is 1080p, a little over half the pixels of 2x. Auto: from the screen (1440p: 2x, or 3x2 filling an ultrawide).",
               .env = "NFSMW_RESOLUTION", .defaultValue = kResolutionAuto, .entries = kResolutionEntries },
             { .id = Id::WindowWidth, .category = Category::Display, .type = Type::Int, .apply = Apply::Restart, .hidden = true,
               .table = "video", .key = "window_width", .label = "Window Width",

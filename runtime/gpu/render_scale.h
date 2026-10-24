@@ -168,6 +168,12 @@ namespace gpu
         static RenderScale Whole(uint32_t sx, uint32_t sy) { return { { sx, 1 }, { sy, 1 } }; }
     };
 
+    inline RenderScale ShadowScale(const RenderScale& internal)
+    {
+        auto cap = [](AxisScale axis) { return axis.num > 2 * axis.den ? AxisScale{ 2, 1 } : axis; };
+        return { cap(internal.x), cap(internal.y) };
+    }
+
     // An axis from a number of half steps (2: 1x, 3: 1.5x, 4: 2x, 6: 3x),
     // reduced (4/2 is 2/1).
     inline AxisScale AxisFromHalves(uint32_t halves)
