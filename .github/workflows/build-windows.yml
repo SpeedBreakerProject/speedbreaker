@@ -24,32 +24,22 @@ jobs:
         shell: powershell
         run: Add-MpPreference -ExclusionPath "$env:GITHUB_WORKSPACE"
 
-      # 1. Setup MSVC Toolchain & Ninja
-      - name: Setup MSVC Toolchain
-        uses: ilammy/msvc-dev-cmd@v1
-        with:
-          arch: x64
-
-      - name: Install Ninja
-        shell: powershell
-        run: choco install ninja -y
-
-      # 2. Build XenonRecomp tool to generate source files
+      # 1. Build XenonRecomp tool to generate source files (using VS generator)
       - name: Build XenonRecomp
         shell: powershell
         run: |
           git clone --recursive https://github.com/hedge-dev/XenonRecomp.git temp-xenonrecomp
-          cmake -B temp-xenonrecomp/build -S temp-xenonrecomp -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=clang-cl -DCMAKE_CXX_COMPILER=clang-cl
+          cmake -B temp-xenonrecomp/build -S temp-xenonrecomp -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=Release
           cmake --build temp-xenonrecomp/build --config Release
 
-      # 3. Download default.xex using robust curl with redirect tracking
+      # 2. Download default.xex using robust curl with redirect tracking
       - name: Download Game Binary
         shell: powershell
         run: |
           curl.exe -L -o default.xex "https://github.com/rafidwayne/speedbreaker-private/releases/download/xex/default.xex"
           Write-Host "Successfully downloaded default.xex."
 
-      # 4. Run XenonRecomp dynamically to populate ppc/
+      # 3. Run XenonRecomp dynamically to populate ppc/
       - name: Generate PPC Sources via XenonRecomp
         shell: powershell
         run: |
@@ -57,17 +47,19 @@ jobs:
           Write-Host "Found XenonRecomp at: $recompExe"
           & $recompExe default.xex
 
-      # 5. Configure Main Project CMake cleanly without wrappers
+      # 4. Configure Main Project CMake cleanly with Visual Studio Generator
       - name: Configure CMake
         shell: powershell
-        run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+        run: |
+          Remove-Item -Recurse -Force build -ErrorAction SilentlyContinue
+          cmake -B build -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=Release
 
-      # 6. Build Project rapidly using all cores with Ninja
-      - name: Build with Ninja
+      # 5. Build Project rapidly using all CPU cores in parallel
+      - name: Build with Visual Studio
         shell: powershell
-        run: cmake --build build --config Release
+        run: cmake --build build --config Release --parallel
 
-      # 7. Package Artifacts
+      # 6. Package Artifacts
       - name: Prepare Artifacts
         shell: powershell
         run: |
