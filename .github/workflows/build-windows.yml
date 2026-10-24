@@ -111,48 +111,48 @@ jobs:
             C:\vcpkg\packages
           key: vcpkg-windows-cache-v4
 
-      # 7. Restore CMake Build Cache (Incremental progress kept)
-      - name: Restore CMake Build Cache
-        uses: actions/cache/restore@v4
-        with:
-          path: build
-          key: cmake-build-cache-${{ runner.os }}-${{ github.sha }}
-          restore-keys: |
-            cmake-build-cache-${{ runner.os }}-
-
-      # 8. Forcefully patch win_compat.h and guest_thread.h for native Windows compilation
+      # 7. Forcefully patch win_compat.h and guest_thread.h globally
       - name: Patch Windows Compatibility & Threads
         shell: powershell
         run: |
-          # 1. Fix win_compat.h (Ensure ssize_t, unistd, and Windows types exist)
           $winCompatPath = "runtime/compat/win/win_compat.h"
           if (Test-Path $winCompatPath) {
               $content = Get-Content $winCompatPath -Raw
               $content = $content -replace '#include <unistd.h>', "#include <io.h>`n#include <process.h>"
               $content = $content -replace '#include <pthread.h>', "// #include <pthread.h>"
               
-              if ($content -notmatch "ssize_t") {
-                  $headerInject = "#include <windows.h>`n#include <stdint.h>`n#ifndef _SSIZE_T_DEFINED`n#define _SSIZE_T_DEFINED`ntypedef intptr_t ssize_t;`n#endif`n`n"
-                  $content = $headerInject + $content
-              }
+              $prefix = @"
+          #ifndef WIN_COMPAT_H_INJECTED
+          #define WIN_COMPAT_H_INJECTED
+          #include <winsock2.h>
+          #include <windows.h>
+          #include <stdint.h>
+          #ifndef _SSIZE_T_DEFINED
+          #define _SSIZE_T_DEFINED
+          typedef intptr_t ssize_t;
+          #endif
+          #endif
+
+          "@
+              $content = $prefix + $content
               Set-Content -Path $winCompatPath -Value $content -Encoding UTF8
-              Write-Host "Successfully force-patched win_compat.h"
+              Write-Host "Successfully prepended Windows headers and ssize_t to win_compat.h"
           }
 
-          # 2. Fix guest_thread.h (Replace pthread_t with HANDLE for Windows)
           $guestThreadPath = "runtime/cpu/guest_thread.h"
           if (Test-Path $guestThreadPath) {
               $gtContent = Get-Content $guestThreadPath -Raw
               $gtContent = $gtContent -replace '#include <pthread.h>', "#include <windows.h>"
               $gtContent = $gtContent -replace 'pthread_t\s+thread;', "HANDLE thread;"
               Set-Content -Path $guestThreadPath -Value $gtContent -Encoding UTF8
-              Write-Host "Successfully force-patched guest_thread.h"
+              Write-Host "Successfully patched guest_thread.h"
           }
 
-      # 9. Configure Main Project CMake using Ninja + Clang
+      # 8. Configure Main Project CMake using Ninja + Clang (Clean build, no stale cache)
       - name: Configure Main CMake Project
         shell: powershell
         run: |
+          Remove-Item -Recurse -Force build -ErrorAction SilentlyContinue
           $vcpkgInstalled = "$env:VCPKG_INSTALLATION_ROOT\installed\x64-windows"
           
           $llvmPath = "C:\Program Files\LLVM\bin"
@@ -173,20 +173,20 @@ jobs:
             -DSWSCALE_LIBRARY="$vcpkgInstalled/lib/swscale.lib" `
             -DSWRESAMPLE_LIBRARY="$vcpkgInstalled/lib/swresample.lib"
 
-      # 10. Build Main Project with Ninja (Incrementally finishes remaining objects)
+      # 9. Build Main Project with Ninja from scratch
       - name: Build Main Project with Ninja
         shell: powershell
         run: cmake --build build --parallel
 
-      # 11. Save CMake Build Cache
-      - name: Save CMake Build Cache
+      # 10. Save Fresh Build Cache for future commits
+      - name: Save Clean CMake Build Cache
         uses: actions/cache/save@v4
         if: always()
         with:
           path: build
           key: cmake-build-cache-${{ runner.os }}-${{ github.sha }}
 
-      # 12. Package Artifacts & Required Runtime DLLs
+      # 11. Package Artifacts & Required Runtime DLLs
       - name: Prepare Artifacts
         shell: powershell
         run: |
