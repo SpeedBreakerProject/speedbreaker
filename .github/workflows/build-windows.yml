@@ -24,60 +24,55 @@ jobs:
         shell: powershell
         run: Add-MpPreference -ExclusionPath "$env:GITHUB_WORKSPACE"
 
-      # 1. Setup MSVC Toolchain
+      # 1. Setup MSVC Toolchain & Ninja
       - name: Setup MSVC Toolchain
         uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: x64
 
-      # 2. Remove conflicting Git Bash 'link' utility
-      - name: Remove Conflicting Unix Link Command
-        shell: powershell
-        run: Remove-Item "C:\Program Files\Git\usr\bin\link.exe" -ErrorAction SilentlyContinue
-
       - name: Install Ninja
         shell: powershell
         run: choco install ninja -y
 
-      # 3. Build XenonRecomp using Clang-cl
-      - name: Build XenonRecomp from Source
+      # 2. Build XenonRecomp tool to generate source files
+      - name: Build XenonRecomp
         shell: powershell
         run: |
           git clone --recursive https://github.com/hedge-dev/XenonRecomp.git temp-xenonrecomp
           cmake -B temp-xenonrecomp/build -S temp-xenonrecomp -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=clang-cl -DCMAKE_CXX_COMPILER=clang-cl
           cmake --build temp-xenonrecomp/build --config Release
 
-      # 4. Securely acquire your game binary (default.xex)
+      # 3. Download default.xex from your release link
       - name: Download Game Binary
         shell: powershell
         run: |
-          Write-Host "Insert command here to fetch your game binary (default.xex) if required for generation."
-          # Example: Invoke-WebRequest -Uri "${{ secrets.GAME_BINARY_URL }}" -OutFile "default.xex"
+          Invoke-WebRequest -Uri "https://github.com/rafidwayne/speedbreaker-private/releases/download/xex/default.xex" -OutFile "default.xex"
+          Write-Host "Successfully downloaded default.xex."
 
-      # 5. Run XenonRecomp Generation
-      - name: Run XenonRecomp Generation
+      # 4. Run XenonRecomp to populate ppc/
+      - name: Generate PPC Sources via XenonRecomp
         shell: powershell
         run: |
-          Write-Host "Running XenonRecomp generation..."
-          # .\temp-xenonrecomp\build\XenonRecomp\XenonRecomp.exe ...
+          Write-Host "Running XenonRecomp..."
+          .\temp-xenonrecomp\build\XenonRecomp\XenonRecomp.exe default.xex
 
-      # 6. Setup sccache for instant incremental builds
+      # 5. Setup sccache for instant future builds
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@v0.0.7
         with:
           version: v0.8.1
 
-      # 7. Configure Main Project CMake cleanly on a single line
+      # 6. Configure Main Project CMake
       - name: Configure CMake
         shell: powershell
         run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER_LAUNCHER=sccache -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
 
-      # 8. Build Main Project rapidly using all CPU cores
+      # 7. Build Project with Ninja using all cores
       - name: Build with Ninja
         shell: powershell
         run: cmake --build build --config Release
 
-      # 9. Package Artifacts
+      # 8. Package Artifacts
       - name: Prepare Artifacts
         shell: powershell
         run: |
