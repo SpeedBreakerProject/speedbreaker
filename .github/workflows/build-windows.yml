@@ -38,7 +38,8 @@ jobs:
           }
           
           $llvmPath = "C:\Program Files\LLVM\bin"
-          if (!(Test-Path $llvmPath)) {$llvmPath = "C:\Program Files (x86)\LLVM\bin"
+          if (!(Test-Path $llvmPath)) {
+              $llvmPath = "C:\Program Files (x86)\LLVM\bin"
           }
           echo "$llvmPath" >> $env:GITHUB_PATH
           
@@ -124,4 +125,80 @@ jobs:
         shell: powershell
         run: |
           # Patch win_compat.h
-          $winCompatPath
+          $winCompatPath = "runtime/compat/win/win_compat.h"
+          if (Test-Path $winCompatPath) {
+              $content = Get-Content $winCompatPath -Raw
+              $content = $content -replace '#include <unistd.h>', "#include <io.h>`n#include <process.h>"
+              $content = $content -replace '#include <pthread.h>', "// #include <pthread.h>"
+              
+              if ($content -notmatch "ssize_t") {
+                  $content = "#include <windows.h>`n#ifndef _SSIZE_T_DEFINED`n#define _SSIZE_T_DEFINED`ntypedef intptr_t ssize_t;`n#endif`n`n" + $content
+              }
+              Set-Content $winCompatPath $content
+              Write-Host "Patched win_compat.h successfully."
+          }
+
+          # Patch guest_thread.h to remove pthread dependency on Windows
+          $guestThreadPath = "runtime/cpu/guest_thread.h"
+          if (Test-Path $guestThreadPath) {
+              $gtContent = Get-Content $guestThreadPath -Raw
+              $gtContent = $gtContent -replace '#include <pthread.h>', "#include <windows.h>"
+              Set-Content $guestThreadPath $gtContent
+              Write-Host "Patched guest_thread.h successfully."
+          }
+
+      # 9. Configure Main Project CMake using Ninja + Clang
+      - name: Configure Main CMake Project
+        shell: powershell
+        run: |
+          $vcpkgInstalled = "$env:VCPKG_INSTALLATION_ROOT\installed\x64-windows"
+          
+          $llvmPath = "C:\Program Files\LLVM\bin"
+          if (!(Test-Path $llvmPath)) {
+              $llvmPath = "C:\Program Files (x86)\LLVM\bin"
+          }
+          echo "$llvmPath" >> $env:GITHUB_PATH
+          
+          cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release `
+            -DCMAKE_C_COMPILER=clang `
+            -DCMAKE_CXX_COMPILER=clang++ `
+            -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" `
+            -DFFMPEG_DIR="$vcpkgInstalled" `
+            -DFFMPEG_INCLUDE_DIR="$vcpkgInstalled/include" `
+            -DAVCODEC_LIBRARY="$vcpkgInstalled/lib/avcodec.lib" `
+            -DAVFORMAT_LIBRARY="$vcpkgInstalled/lib/avformat.lib" `
+            -DAVUTIL_LIBRARY="$vcpkgInstalled/lib/avutil.lib" `
+            -DSWSCALE_LIBRARY="$vcpkgInstalled/lib/swscale.lib" `
+            -DSWRESAMPLE_LIBRARY="$vcpkgInstalled/lib/swresample.lib"
+
+      # 10. Build Main Project with Ninja (Incrementally finishes remaining 30%)
+      - name: Build Main Project with Ninja
+        shell: powershell
+        run: cmake --build build --parallel
+
+      # 11. Save CMake Build Cache
+      - name: Save CMake Build Cache
+        uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: build
+          key: cmake-build-cache-${{ runner.os }}-${{ github.sha }}
+
+      # 12. Package Artifacts & Required Runtime DLLs
+      - name: Prepare Artifacts
+        shell: powershell
+        run: |
+          New-Item -ItemType Directory -Force -Path output
+          Get-ChildItem -Recurse -Filter "*.exe" build | Copy-Item -Destination output
+          Get-ChildItem -Recurse -Filter "*.dll" build | Copy-Item -Destination output -ErrorAction SilentlyContinue
+          
+          $vcpkgBin = "$env:VCPKG_INSTALLATION_ROOT\installed\x64-windows\bin"
+          if (Test-Path $vcpkgBin) {
+              Get-ChildItem -Filter "*.dll" $vcpkgBin | Copy-Item -Destination output -ErrorAction SilentlyContinue
+          }
+
+      - name: Upload Build Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: speedbreaker-windows-release
+          path: output/
