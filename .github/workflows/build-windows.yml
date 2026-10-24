@@ -47,16 +47,23 @@ jobs:
             
           cmake --build temp-xenonrecomp/build --config Release
 
-      # 2. Download default.xex and place it in both root and private/ folder
-      - name: Download Game Binary
+      # 2. Download default.xex and mirror it across all potential expected folders
+      - name: Download Game Binary & Mirror Paths
         shell: powershell
         run: |
           curl.exe -L -o default.xex "https://github.com/rafidwayne/speedbreaker-private/releases/download/xex/default.xex"
+          
           New-Item -ItemType Directory -Force -Path private
+          New-Item -ItemType Directory -Force -Path config
+          
           Copy-Item default.xex private/ -Force
-          Write-Host "Successfully downloaded and placed default.xex into root and private/."
+          Copy-Item default.xex config/ -Force
+          
+          Write-Host "Successfully downloaded and mirrored default.xex."
+          Write-Host "--- TOML Config Contents ---"
+          Get-Content config/nfsmw.toml
 
-      # 3. Run XenonRecomp with error catching and explicit directory handling
+      # 3. Run XenonRecomp with explicit path safety
       - name: Generate PPC Sources via XenonRecomp
         shell: powershell
         run: |
@@ -68,7 +75,6 @@ jobs:
           
           New-Item -ItemType Directory -Force -Path ppc
           
-          # Execute and capture output/exit code explicitly
           & $recompExe config/nfsmw.toml $contextHeader
           if ($LASTEXITCODE -ne 0) {
               Write-Error "XenonRecomp failed with exit code $LASTEXITCODE"
