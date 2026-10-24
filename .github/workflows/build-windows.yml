@@ -76,15 +76,27 @@ jobs:
           Write-Host "Contents of ppc directory after generation:"
           Get-ChildItem ppc
 
-      # 4. Download Precompiled FFmpeg (takes seconds instead of half an hour)
+      # 4. Download Precompiled FFmpeg & Map Libraries to satisfy CMake static expectations
       - name: Download Precompiled FFmpeg
         shell: powershell
         run: |
           Invoke-WebRequest -Uri "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip" -OutFile "ffmpeg.zip"
           Expand-Archive -Path "ffmpeg.zip" -DestinationPath "C:\ffmpeg"
           $ffmpegFolder = (Get-ChildItem -Path "C:\ffmpeg" -Filter "ffmpeg-*").FullName
+          
+          # Map .lib files to .a files so CMake's static finder picks them up instantly
+          $libDir = "$ffmpegFolder\lib"
+          if (Test-Path "$libDir\avcodec.lib") {
+              Copy-Item "$libDir\avcodec.lib" "$libDir\libavcodec.a" -Force
+              Copy-Item "$libDir\avformat.lib" "$libDir\libavformat.a" -Force
+              Copy-Item "$libDir\avutil.lib" "$libDir\libavutil.a" -Force
+              Copy-Item "$libDir\swscale.lib" "$libDir\libswscale.a" -Force
+              Copy-Item "$libDir\swresample.lib" "$libDir\libswresample.a" -Force
+          }
+          
           echo "FFMPEG_DIR=$ffmpegFolder" >> $env:GITHUB_ENV
-          Write-Host "Precompiled FFmpeg ready at: $ffmpegFolder"
+          echo "FFMPEG_ROOT=$ffmpegFolder" >> $env:GITHUB_ENV
+          Write-Host "Precompiled FFmpeg ready and mapped at: $ffmpegFolder"
 
       # 5. Cache smaller vcpkg packages (SDL3, Vulkan, glslang)
       - name: Cache vcpkg Packages
@@ -93,11 +105,11 @@ jobs:
           path: |
             C:\vcpkg\installed
             C:\vcpkg\packages
-          key: vcpkg-cache-${{ runner.os }}-sdl3-vulkan-v1
+          key: vcpkg-cache-${{ runner.os }}-no-ffmpeg-v1
           restore-keys: |
             vcpkg-cache-${{ runner.os }}-
 
-      # 6. Install smaller dependencies via vcpkg (no ffmpeg compilation!)
+      # 6. Install smaller dependencies via vcpkg (No FFmpeg source compilation!)
       - name: Install Dependencies
         shell: powershell
         run: |
@@ -109,13 +121,12 @@ jobs:
                         spirv-headers:x64-windows `
                         zlib:x64-windows
 
-      # 7. Configure Main Project CMake with explicit FFmpeg paths
+      # 7. Configure Main Project CMake with precompiled FFmpeg pointers
       - name: Configure Main CMake Project
         shell: powershell
         run: |
           Remove-Item -Recurse -Force build -ErrorAction SilentlyContinue
           $ffmpegPath = (Get-ChildItem -Path "C:\ffmpeg" -Filter "ffmpeg-*").FullName
-          Write-Host "Passing FFmpeg path to CMake: $ffmpegPath"
           
           cmake -B build -DCMAKE_BUILD_TYPE=Release `
             -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" `
