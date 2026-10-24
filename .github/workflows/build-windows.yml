@@ -109,14 +109,19 @@ jobs:
                         spirv-headers:x64-windows `
                         zlib:x64-windows
 
-      # 7. Configure Main Project CMake with vcpkg and precompiled FFmpeg pointer
+      # 7. Configure Main Project CMake with explicit FFmpeg paths
       - name: Configure Main CMake Project
         shell: powershell
         run: |
           Remove-Item -Recurse -Force build -ErrorAction SilentlyContinue
+          $ffmpegPath = (Get-ChildItem -Path "C:\ffmpeg" -Filter "ffmpeg-*").FullName
+          Write-Host "Passing FFmpeg path to CMake: $ffmpegPath"
+          
           cmake -B build -DCMAKE_BUILD_TYPE=Release `
             -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" `
-            -DFFMPEG_DIR="$env:FFMPEG_DIR"
+            -DFFMPEG_DIR="$ffmpegPath" `
+            -DFFMPEG_ROOT="$ffmpegPath" `
+            -DFFMPEG_INCLUDE_DIR="$ffmpegPath/include"
 
       # 8. Build Main Project rapidly in parallel using all CPU cores
       - name: Build Main Project with Visual Studio
