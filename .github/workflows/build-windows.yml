@@ -79,7 +79,7 @@ jobs:
           Write-Host "Contents of ppc directory after generation:"
           Get-ChildItem ppc
 
-      # 4. Restore vcpkg Cache
+      # 4. Restore vcpkg Cache (Restores in seconds)
       - name: Restore vcpkg Cache
         uses: actions/cache/restore@v4
         with:
@@ -111,15 +111,22 @@ jobs:
             C:\vcpkg\packages
           key: vcpkg-windows-cache-v4
 
-      # 7. Configure Main Project CMake with ClangCL toolset
+      # 7. Configure Main Project CMake using Ninja + Clang (supports Unix flags like -include)
       - name: Configure Main CMake Project
         shell: powershell
         run: |
           Remove-Item -Recurse -Force build -ErrorAction SilentlyContinue
           $vcpkgInstalled = "$env:VCPKG_INSTALLATION_ROOT\installed\x64-windows"
           
-          cmake -B build -DCMAKE_BUILD_TYPE=Release `
-            -T ClangCL `
+          $llvmPath = "C:\Program Files\LLVM\bin"
+          if (!(Test-Path $llvmPath)) {
+              $llvmPath = "C:\Program Files (x86)\LLVM\bin"
+          }
+          echo "$llvmPath" >> $env:GITHUB_PATH
+          
+          cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release `
+            -DCMAKE_C_COMPILER=clang `
+            -DCMAKE_CXX_COMPILER=clang++ `
             -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" `
             -DFFMPEG_DIR="$vcpkgInstalled" `
             -DFFMPEG_INCLUDE_DIR="$vcpkgInstalled/include" `
@@ -129,10 +136,10 @@ jobs:
             -DSWSCALE_LIBRARY="$vcpkgInstalled/lib/swscale.lib" `
             -DSWRESAMPLE_LIBRARY="$vcpkgInstalled/lib/swresample.lib"
 
-      # 8. Build Main Project rapidly in parallel
-      - name: Build Main Project with Visual Studio
+      # 8. Build Main Project with Ninja rapidly in parallel
+      - name: Build Main Project with Ninja
         shell: powershell
-        run: cmake --build build --config Release --parallel
+        run: cmake --build build --parallel
 
       # 9. Package Artifacts & Required Runtime DLLs
       - name: Prepare Artifacts
