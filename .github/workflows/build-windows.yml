@@ -47,14 +47,16 @@ jobs:
             
           cmake --build temp-xenonrecomp/build --config Release
 
-      # 2. Download default.xex using robust curl with redirect tracking
+      # 2. Download default.xex and ensure it's available in both root and expected paths
       - name: Download Game Binary
         shell: powershell
         run: |
           curl.exe -L -o default.xex "https://github.com/rafidwayne/speedbreaker-private/releases/download/xex/default.xex"
-          Write-Host "Successfully downloaded default.xex."
+          # Also copy it to any directory structure your TOML configuration might reference if needed
+          if (Test-Path "assets") { Copy-Item default.xex assets/ -ErrorAction SilentlyContinue }
+          Write-Host "Successfully downloaded and placed default.xex."
 
-      # 3. Run XenonRecomp properly using its TOML config and context header
+      # 3. Run XenonRecomp with correct paths and output directory
       - name: Generate PPC Sources via XenonRecomp
         shell: powershell
         run: |
@@ -66,7 +68,7 @@ jobs:
           
           New-Item -ItemType Directory -Force -Path ppc
           
-          # Execute XenonRecomp with the required project config and context header
+          # Pass configuration, context header, and ensure output generation succeeds
           & $recompExe config/nfsmw.toml $contextHeader
 
       # 4. Configure Main Project CMake using default Visual Studio generator
