@@ -63,10 +63,10 @@ jobs:
         with:
           version: v0.8.1
 
-      # 6. Configure Main Project CMake
+      # 6. Configure Main Project CMake with explicit MSVC compiler + sccache
       - name: Configure CMake
         shell: powershell
-        run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER_LAUNCHER=sccache -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
+        run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl -DCMAKE_C_COMPILER_LAUNCHER=sccache -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
 
       # 7. Build Project with Ninja using all cores
       - name: Build with Ninja
