@@ -111,14 +111,14 @@ jobs:
             C:\vcpkg\packages
           key: vcpkg-windows-cache-v4
 
-      # 7. Setup Windows Compatibility Layer & Robust PThread Win32 Stub
-      - name: Patch Windows Compatibility & PThread Stub
+      # 7. Setup Windows Compatibility Layer & POSIX Stubs (pthread.h & unistd.h)
+      - name: Patch Windows Compatibility & POSIX Stubs
         shell: powershell
         run: |
           $winCompatPath = "runtime/compat/win/win_compat.h"
           if (Test-Path $winCompatPath) {
               $content = Get-Content $winCompatPath -Raw
-              $content = $content -replace '#include <unistd.h>', "#include <io.h>`n#include <process.h>"
+              $content = $content -replace '#include <unistd.h>', "// #include <unistd.h>"
               $content = $content -replace '#include <pthread.h>', "// #include <pthread.h>"
               
               $prefix = @"
@@ -139,7 +139,7 @@ jobs:
               Write-Host "Successfully prepended Windows headers and ssize_t to win_compat.h"
           }
 
-          # Create a full robust pthread.h Win32 wrapper stub
+          # Create robust pthread.h Win32 wrapper stub
           $pthreadStubPath = "runtime/compat/win/pthread.h"
           $pthreadStubContent = @"
           #pragma once
@@ -212,7 +212,43 @@ jobs:
           }
           "@
           Set-Content -Path $pthreadStubPath -Value $pthreadStubContent -Encoding UTF8
-          Write-Host "Successfully created robust pthread.h compatibility stub."
+          Write-Host "Successfully created pthread.h compatibility stub."
+
+          # Create robust unistd.h Windows compatibility stub
+          $unistdStubPath = "runtime/compat/win/unistd.h"
+          $unistdStubContent = @"
+          #pragma once
+          #include <io.h>
+          #include <process.h>
+          #include <winsock2.h>
+          #include <windows.h>
+          #include <stdint.h>
+
+          #ifndef _SSIZE_T_DEFINED
+          #define _SSIZE_T_DEFINED
+          typedef intptr_t ssize_t;
+          #endif
+
+          #ifndef _USECONDS_T_DEFINED
+          #define _USECONDS_T_DEFINED
+          typedef unsigned int useconds_t;
+          #endif
+
+          #define F_OK 0
+          #define W_OK 2
+          #define R_OK 4
+          #define X_OK 0
+
+          inline int access(const char* path, int mode) { return _access(path, mode); }
+          inline int unlink(const char* path) { return _unlink(path); }
+          inline int rmdir(const char* path) { return _rmdir(path); }
+          inline int ftruncate(int fd, int64_t length) { return _chsize_s(fd, length); }
+          inline unsigned int sleep(unsigned int seconds) { Sleep(seconds * 1000); return 0; }
+          inline int usleep(useconds_t usec) { Sleep((DWORD)((usec + 999) / 1000)); return 0; }
+          inline int getpid() { return _getpid(); }
+          "@
+          Set-Content -Path $unistdStubPath -Value $unistdStubContent -Encoding UTF8
+          Write-Host "Successfully created unistd.h compatibility stub."
 
       # 8. Configure Main Project CMake using Ninja + Clang
       - name: Configure Main CMake Project
