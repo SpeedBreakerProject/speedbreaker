@@ -47,16 +47,17 @@ jobs:
             
           cmake --build temp-xenonrecomp/build --config Release
 
-      # 2. Download default.xex and place it in root and config folders
-      - name: Download Game Binary
+      # 2. Download default.xex and inspect TOML configuration paths
+      - name: Download Game Binary & Inspect Config
         shell: powershell
         run: |
           curl.exe -L -o default.xex "https://github.com/rafidwayne/speedbreaker-private/releases/download/xex/default.xex"
-          New-Item -ItemType Directory -Force -Path config
-          Copy-Item default.xex config/ -Force
-          Write-Host "Successfully downloaded and placed default.xex."
+          
+          Write-Host "=== Contents of config/nfsmw.toml ==="
+          Get-Content config/nfsmw.toml
+          Write-Host "====================================="
 
-      # 3. Run XenonRecomp from the config directory so relative paths resolve correctly
+      # 3. Run XenonRecomp from root with absolute path safeguards
       - name: Generate PPC Sources via XenonRecomp
         shell: powershell
         run: |
@@ -68,14 +69,12 @@ jobs:
           
           New-Item -ItemType Directory -Force -Path ppc
           
-          # Move into config folder context to satisfy relative paths in nfsmw.toml
-          Push-Location config
-          & $recompExe nfsmw.toml "$contextHeader"
+          # Run from repository root so relative paths inside nfsmw.toml resolve correctly
+          & $recompExe config/nfsmw.toml "$contextHeader"
           $recompExitCode = $LASTEXITCODE
-          Pop-Location
           
           if ($recompExitCode -ne 0) {
-              Write-Error "XenonRecomp failed with exit code $recompExitCode"
+              Write-Error "XenonRecomp crashed with exit code $recompExitCode"
               exit $recompExitCode
           }
           
@@ -96,7 +95,7 @@ jobs:
 
       # 6. Package Artifacts
       - name: Prepare Artifacts
-        shell: powershell,
+        shell: powershell
         run: |
           New-Item -ItemType Directory -Force -Path output
           Get-ChildItem -Recurse -Filter "*.exe" build | Copy-Item -Destination output
