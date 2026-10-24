@@ -57,23 +57,17 @@ jobs:
           Write-Host "Found XenonRecomp at: $recompExe"
           & $recompExe default.xex
 
-      # 5. Setup sccache for instant future builds
-      - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.7
-        with:
-          version: v0.8.1
-
-      # 6. Configure Main Project CMake with explicit MSVC compiler + sccache
+      # 5. Configure Main Project CMake cleanly without wrappers
       - name: Configure CMake
         shell: powershell
-        run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl -DCMAKE_C_COMPILER_LAUNCHER=sccache -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
+        run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 
-      # 7. Build Project with Ninja using all cores
+      # 6. Build Project rapidly using all cores with Ninja
       - name: Build with Ninja
         shell: powershell
         run: cmake --build build --config Release
 
-      # 8. Package Artifacts
+      # 7. Package Artifacts
       - name: Prepare Artifacts
         shell: powershell
         run: |
