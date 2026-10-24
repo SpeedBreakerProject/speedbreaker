@@ -1,195 +1,281 @@
-name: Build Windows (Optimized)
-
-on:
-  push:
-    branches: [ "windows", "main", "master" ]
-  workflow_dispatch:
-
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
-
-jobs:
-  build-windows:
-    runs-on: windows-latest
-    
-    steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 1
-          submodules: recursive
-
-      - name: Exclude Workspace from Windows Defender
-        shell: powershell
-        run: Add-MpPreference -ExclusionPath "$env:GITHUB_WORKSPACE"
-
-      - name: Install Ninja
-        shell: powershell
-        run: choco install ninja -y
-
-      # 1. Clone XenonRecomp directly into tools/XenonRecomp and build with Ninja + clang-cl
-      - name: Build XenonRecomp with Clang & Ninja
-        shell: powershell
-        run: |
-          New-Item -ItemType Directory -Force -Path "tools"
-          if (!(Test-Path "tools/XenonRecomp")) {
-              git clone --recursive https://github.com/hedge-dev/XenonRecomp.git tools/XenonRecomp
-          }
-          
-          $llvmPath = "C:\Program Files\LLVM\bin"
-          if (!(Test-Path $llvmPath)) {
-              $llvmPath = "C:\Program Files (x86)\LLVM\bin"
-          }
-          echo "$llvmPath" >> $env:GITHUB_PATH
-          
-          cmake -B tools/XenonRecomp/build -S tools/XenonRecomp -G Ninja `
-            -DCMAKE_C_COMPILER=clang-cl `
-            -DCMAKE_CXX_COMPILER=clang-cl `
-            -DCMAKE_BUILD_TYPE=Release
-            
-          cmake --build tools/XenonRecomp/build --config Release
-
-      # 2. Download default.xex into game/files/ where config/nfsmw.toml expects it
-      - name: Download Game Binary
-        shell: powershell
-        run: |
-          New-Item -ItemType Directory -Force -Path "game/files"
-          curl.exe -L -o "game/files/default.xex" "https://github.com/rafidwayne/speedbreaker-private/releases/download/xex/default.xex"
-          Write-Host "Successfully downloaded default.xex into game/files/."
-
-      # 3. Run XenonRecomp from tools/XenonRecomp
-      - name: Generate PPC Sources via XenonRecomp
-        shell: powershell
-        run: |
-          $recompExe = (Get-ChildItem -Recurse -Filter "XenonRecomp.exe" -Path tools/XenonRecomp).FullName
-          $contextHeader = (Get-ChildItem -Recurse -Filter "ppc_context.h" -Path tools/XenonRecomp).FullName
-          
-          Write-Host "Found XenonRecomp at: $recompExe"
-          Write-Host "Found PPC Context Header at: $contextHeader"
-          
-          New-Item -ItemType Directory -Force -Path ppc
-          
-          & $recompExe config/nfsmw.toml "$contextHeader"
-          if ($LASTEXITCODE -ne 0) {
-              Write-Error "XenonRecomp failed with exit code $LASTEXITCODE"
-              exit $LASTEXITCODE
-          }
-          
-          Write-Host "Contents of ppc directory after generation:"
-          Get-ChildItem ppc
-
-      # 4. Restore vcpkg Cache
-      - name: Restore vcpkg Cache
-        uses: actions/cache/restore@v4
-        with:
-          path: |
-            C:\vcpkg\installed
-            C:\vcpkg\packages
-          key: vcpkg-windows-cache-v4
-
-      # 5. Install Dependencies via vcpkg
-      - name: Install Dependencies
-        shell: powershell
-        run: |
-          vcpkg install sdl3:x64-windows `
-                        vulkan-headers:x64-windows `
-                        vulkan-loader:x64-windows `
-                        glslang:x64-windows `
-                        spirv-tools:x64-windows `
-                        spirv-headers:x64-windows `
-                        zlib:x64-windows `
-                        ffmpeg:x64-windows
-
-      # 6. Save vcpkg Cache immediately
-      - name: Save vcpkg Cache
-        uses: actions/cache/save@v4
-        if: always()
-        with:
-          path: |
-            C:\vcpkg\installed
-            C:\vcpkg\packages
-          key: vcpkg-windows-cache-v4
-
-      # 7. Restore CMake Build Cache (Incremental progress kept)
-      - name: Restore CMake Build Cache
-        uses: actions/cache/restore@v4
-        with:
-          path: build
-          key: cmake-build-cache-${{ runner.os }}-${{ github.sha }}
-          restore-keys: |
-            cmake-build-cache-${{ runner.os }}-
-
-      # 8. Patch win_compat.h to fix unistd, pthread, ssize_t, and Windows types
-      - name: Patch win_compat.h for Windows
-        shell: powershell
-        run: |
-          $winCompatPath = "runtime/compat/win/win_compat.h"
-          if (Test-Path $winCompatPath) {
-              $content = Get-Content $winCompatPath -Raw
-              $content = $content -replace '#include <unistd.h>', "#include <io.h>`n#include <process.h>"
-              $content = $content -replace '#include <pthread.h>', "// #include <pthread.h>"
-              
-              if ($content -notmatch "ssize_t") {
-                  $content = "`n#include <windows.h>`n#ifndef _SSIZE_T_DEFINED`n#define _SSIZE_T_DEFINED`ntypedef intptr_t ssize_t;`n#endif`n" + $content
-              }
-              
-              Set-Content $winCompatPath $content
-              Write-Host "Successfully patched win_compat.h with Windows type definitions."
-          }
-
-      # 9. Configure Main Project CMake using Ninja + Clang
-      - name: Configure Main CMake Project
-        shell: powershell
-        run: |
-          $vcpkgInstalled = "$env:VCPKG_INSTALLATION_ROOT\installed\x64-windows"
-          
-          $llvmPath = "C:\Program Files\LLVM\bin"
-          if (!(Test-Path $llvmPath)) {
-              $llvmPath = "C:\Program Files (x86)\LLVM\bin"
-          }
-          echo "$llvmPath" >> $env:GITHUB_PATH
-          
-          cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release `
-            -DCMAKE_C_COMPILER=clang `
-            -DCMAKE_CXX_COMPILER=clang++ `
-            -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" `
-            -DFFMPEG_DIR="$vcpkgInstalled" `
-            -DFFMPEG_INCLUDE_DIR="$vcpkgInstalled/include" `
-            -DAVCODEC_LIBRARY="$vcpkgInstalled/lib/avcodec.lib" `
-            -DAVFORMAT_LIBRARY="$vcpkgInstalled/lib/avformat.lib" `
-            -DAVUTIL_LIBRARY="$vcpkgInstalled/lib/avutil.lib" `
-            -DSWSCALE_LIBRARY="$vcpkgInstalled/lib/swscale.lib" `
-            -DSWRESAMPLE_LIBRARY="$vcpkgInstalled/lib/swresample.lib"
-
-      # 10. Build Main Project with Ninja (Incrementally finishes remaining 30%)
-      - name: Build Main Project with Ninja
-        shell: powershell
-        run: cmake --build build --parallel
-
-      # 11. Save CMake Build Cache
-      - name: Save CMake Build Cache
-        uses: actions/cache/save@v4
-        if: always()
-        with:
-          path: build
-          key: cmake-build-cache-${{ runner.os }}-${{ github.sha }}
-
-      # 12. Package Artifacts & Required Runtime DLLs
-      - name: Prepare Artifacts
-        shell: powershell
-        run: |
-          New-Item -ItemType Directory -Force -Path output
-          Get-ChildItem -Recurse -Filter "*.exe" build | Copy-Item -Destination output
-          Get-ChildItem -Recurse -Filter "*.dll" build | Copy-Item -Destination output -ErrorAction SilentlyContinue
-          
-          $vcpkgBin = "$env:VCPKG_INSTALLATION_ROOT\installed\x64-windows\bin"
-          if (Test-Path $vcpkgBin) {
-              Get-ChildItem -Filter "*.dll" $vcpkgBin | Copy-Item -Destination output -ErrorAction SilentlyContinue
-          }
-
-      - name: Upload Build Artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: speedbreaker-windows-release
-          path: output/
+[237/335] Building CXX object runtime/CMakeFiles/SpeedBreaker.dir/compat/win/win_compat.cpp.obj
+FAILED: [code=1] runtime/CMakeFiles/SpeedBreaker.dir/compat/win/win_compat.cpp.obj 
+"C:\Program Files\LLVM\bin\clang++.exe" -DNOMINMAX -DWIN32_LEAN_AND_MEAN -D_FILE_OFFSET_BITS=64 -D_WIN32_WINNT=0x0A00 -ID:/a/speedbreaker-windows-unofficial/speedbreaker-windows-unofficial/runtime/compat/win -ID:/a/speedbreaker-windows-unofficial/speedbreaker-windows-unofficial/runtime -ID:/a/speedbreaker-windows-unofficial/speedbreaker-windows-unofficial/runtime/kernel -ID:/a/speedbreaker-windows-unofficial/speedbreaker-windows-unofficial/build/runtime/generated -ID:/a/speedbreaker-windows-unofficial/speedbreaker-windows-unofficial/recomp/../ppc -ID:/a/speedbreaker-windows-unofficial/speedbreaker-windows-unofficial/recomp/../tools/XenonRecomp/XenonUtils -ID:/a/speedbreaker-windows-unofficial/speedbreaker-windows-unofficial/recomp/../tools/XenonRecomp/thirdparty/simde -ID:/a/speedbreaker-windows-unofficial/speedbreaker-windows-unofficial/runtime/../tools/XenonRecomp/XenonUtils -ID:/a/speedbreaker-windows-unofficial/speedbreaker-windows-unofficial/runtime/../tools/XenonRecomp/thirdparty/simde -ID:/a/speedbreaker-windows-unofficial/speedbreaker-windows-unofficial/runtime/thirdparty/o1heap -ID:/a/speedbreaker-windows-unofficial/speedbreaker-windows-unofficial/runtime/thirdparty/imgui -ID:/a/speedbreaker-windows-unofficial/speedbreaker-windows-unofficial/runtime/thirdparty/imgui/backends -isystem C:/vcpkg/installed/x64-windows/include -isystem D:/a/speedbreaker-windows-unofficial/speedbreaker-windows-unofficial/runtime/../tools/XenonRecomp/thirdparty/tomlplusplus/include -O3 -DNDEBUG -std=gnu++20 -D_DLL -D_MT -Xclang --dependent-lib=msvcrt -ffile-prefix-map=D:/a/speedbreaker-windows-unofficial/speedbreaker-windows-unofficial=. -include D:/a/speedbreaker-windows-unofficial/speedbreaker-windows-unofficial/runtime/compat/win/win_compat.h -Wno-unused-label -Wno-unused-variable -fno-strict-aliasing -UNDEBUG -march=x86-64-v3 -MD -MT runtime/CMakeFiles/SpeedBreaker.dir/compat/win/win_compat.cpp.obj -MF runtime\CMakeFiles\SpeedBreaker.dir\compat\win\win_compat.cpp.obj.d -o runtime/CMakeFiles/SpeedBreaker.dir/compat/win/win_compat.cpp.obj -c D:/a/speedbreaker-windows-unofficial/speedbreaker-windows-unofficial/runtime/compat/win/win_compat.cpp
+In file included from <built-in>:1:
+D:/a/speedbreaker-windows-unofficial/speedbreaker-windows-unofficial/runtime/compat/win/win_compat.h:113:40: warning: 'dup' is deprecated: The POSIX name for this item is deprecated. Instead, use the ISO C and C++ conformant name: _dup. See online help for details. [-Wdeprecated-declarations]
+  113 |     if (cmd == F_DUPFD_CLOEXEC) return dup(fd);
+      |                                        ^
+C:\Program Files (x86)\Windows Kits\10\Include\10.0.26100.0\ucrt\corecrt_io.h:471:24: note: 'dup' has been explicitly marked deprecated here
+  471 |         _Check_return_ _CRT_NONSTDC_DEPRECATE(_dup)
+      |                        ^
+C:\Program Files (x86)\Windows Kits\10\Include\10.0.26100.0\ucrt\corecrt.h:428:50: note: expanded from macro '_CRT_NONSTDC_DEPRECATE'
+  428 |         #define _CRT_NONSTDC_DEPRECATE(_NewName) _CRT_DEPRECATE_TEXT(             \
+      |                                                  ^
+C:\Program Files\Microsoft Visual Studio\18\Enterprise\VC\Tools\MSVC\14.51.36231\include\vcruntime.h:348:47: note: expanded from macro '_CRT_DEPRECATE_TEXT'
+  348 | #define _CRT_DEPRECATE_TEXT(_Text) __declspec(deprecated(_Text))
+      |                                               ^
+In file included from <built-in>:1:
+D:/a/speedbreaker-windows-unofficial/speedbreaker-windows-unofficial/runtime/compat/win/win_compat.h:118:69: warning: '_wopen' is deprecated: This function or variable may be unsafe. Consider using _wsopen_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details. [-Wdeprecated-declarations]
+  118 | inline int open(const wchar_t* p, int flags, int mode = 0) { return _wopen(p, flags | _O_BINARY, mode); }
+      |                                                                     ^
+C:\Program Files (x86)\Windows Kits\10\Include\10.0.26100.0\ucrt\corecrt_wio.h:223:33: note: '_wopen' has been explicitly marked deprecated here
+  223 |     extern "C++" _Check_return_ _CRT_INSECURE_DEPRECATE(_wsopen_s)
+      |                                 ^
+C:\Program Files\Microsoft Visual Studio\18\Enterprise\VC\Tools\MSVC\14.51.36231\include\vcruntime.h:358:55: note: expanded from macro '_CRT_INSECURE_DEPRECATE'
+  358 |         #define _CRT_INSECURE_DEPRECATE(_Replacement) _CRT_DEPRECATE_TEXT(    \
+      |                                                       ^
+C:\Program Files\Microsoft Visual Studio\18\Enterprise\VC\Tools\MSVC\14.51.36231\include\vcruntime.h:348:47: note: expanded from macro '_CRT_DEPRECATE_TEXT'
+  348 | #define _CRT_DEPRECATE_TEXT(_Text) __declspec(deprecated(_Text))
+      |                                               ^
+In file included from <built-in>:1:
+D:/a/speedbreaker-windows-unofficial/speedbreaker-windows-unofficial/runtime/compat/win/win_compat.h:119:66: warning: '_open' is deprecated: This function or variable may be unsafe. Consider using _sopen_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details. [-Wdeprecated-declarations]
+  119 | inline int open(const char* p, int flags, int mode = 0) { return _open(p, flags | _O_BINARY, mode); }
+      |                                                                  ^
+C:\Program Files (x86)\Windows Kits\10\Include\10.0.26100.0\ucrt\corecrt_io.h:391:37: note: '_open' has been explicitly marked deprecated here
+  391 |         extern "C++" _Check_return_ _CRT_INSECURE_DEPRECATE(_sopen_s)
+      |                                     ^
+C:\Program Files\Microsoft Visual Studio\18\Enterprise\VC\Tools\MSVC\14.51.36231\include\vcruntime.h:358:55: note: expanded from macro '_CRT_INSECURE_DEPRECATE'
+  358 |         #define _CRT_INSECURE_DEPRECATE(_Replacement) _CRT_DEPRECATE_TEXT(    \
+      |                                                       ^
+C:\Program Files\Microsoft Visual Studio\18\Enterprise\VC\Tools\MSVC\14.51.36231\include\vcruntime.h:348:47: note: expanded from macro '_CRT_DEPRECATE_TEXT'
+  348 | #define _CRT_DEPRECATE_TEXT(_Text) __declspec(deprecated(_Text))
+      |                                               ^
+In file included from <built-in>:1:
+D:/a/speedbreaker-windows-unofficial/speedbreaker-windows-unofficial/runtime/compat/win/win_compat.h:124:12: warning: '_wfopen' is deprecated: This function or variable may be unsafe. Consider using _wfopen_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details. [-Wdeprecated-declarations]
+  124 |     return _wfopen(p, w.c_str());
+      |            ^
+C:\Program Files (x86)\Windows Kits\10\Include\10.0.26100.0\ucrt\corecrt_wstdio.h:132:20: note: '_wfopen' has been explicitly marked deprecated here
+  132 |     _Check_return_ _CRT_INSECURE_DEPRECATE(_wfopen_s)
+      |                    ^
+C:\Program Files\Microsoft Visual Studio\18\Enterprise\VC\Tools\MSVC\14.51.36231\include\vcruntime.h:358:55: note: expanded from macro '_CRT_INSECURE_DEPRECATE'
+  358 |         #define _CRT_INSECURE_DEPRECATE(_Replacement) _CRT_DEPRECATE_TEXT(    \
+      |                                                       ^
+C:\Program Files\Microsoft Visual Studio\18\Enterprise\VC\Tools\MSVC\14.51.36231\include\vcruntime.h:348:47: note: expanded from macro '_CRT_DEPRECATE_TEXT'
+  348 | #define _CRT_DEPRECATE_TEXT(_Text) __declspec(deprecated(_Text))
+      |                                               ^
+In file included from <built-in>:1:
+D:/a/speedbreaker-windows-unofficial/speedbreaker-windows-unofficial/runtime/compat/win/win_compat.h:131:1: error: unknown type name 'ssize_t'
+  131 | ssize_t pread(int fd, void* buf, size_t count, long long offset);
+      | ^
+D:/a/speedbreaker-windows-unofficial/speedbreaker-windows-unofficial/runtime/compat/win/win_compat.h:132:1: error: unknown type name 'ssize_t'
+  132 | ssize_t pwrite(int fd, const void* buf, size_t count, long long offset);
+      | ^
+D:/a/speedbreaker-windows-unofficial/speedbreaker-windows-unofficial/runtime/compat/win/win_compat.cpp:136:1: error: unknown type name 'ssize_t'
+  136 | ssize_t pread(int fd, void* buf, size_t count, long long offset)
+      | ^
+D:/a/speedbreaker-windows-unofficial/speedbreaker-windows-unofficial/runtime/compat/win/win_compat.cpp:149:12: error: use of undeclared identifier 'ssize_t'
+  149 |     return ssize_t(got);
+      |            ^
+D:/a/speedbreaker-windows-unofficial/speedbreaker-windows-unofficial/runtime/compat/win/win_compat.cpp:152:1: error: unknown type name 'ssize_t'
+  152 | ssize_t pwrite(int fd, const void* buf, size_t count, long long offset)
+      | ^
+D:/a/speedbreaker-windows-unofficial/speedbreaker-windows-unofficial/runtime/compat/win/win_compat.cpp:161:12: error: use of undeclared identifier 'ssize_t'
+  161 |     return ssize_t(put);
+      |            ^
+D:/a/speedbreaker-windows-unofficial/speedbreaker-windows-unofficial/runtime/compat/win/win_compat.cpp:219:27: warning: 'fopen' is deprecated: This function or variable may be unsafe. Consider using fopen_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details. [-Wdeprecated-declarations]
+  219 |             if (FILE* f = fopen("SpeedBreaker-crash.txt", "a"))
+      |                           ^
+C:\Program Files (x86)\Windows Kits\10\Include\10.0.26100.0\ucrt\stdio.h:212:20: note: 'fopen' has been explicitly marked deprecated here
+  212 |     _Check_return_ _CRT_INSECURE_DEPRECATE(fopen_s)
+      |                    ^
+C:\Program Files\Microsoft Visual Studio\18\Enterprise\VC\Tools\MSVC\14.51.36231\include\vcruntime.h:358:55: note: expanded from macro '_CRT_INSECURE_DEPRECATE'
+  358 |         #define _CRT_INSECURE_DEPRECATE(_Replacement) _CRT_DEPRECATE_TEXT(    \
+      |                                                       ^
+C:\Program Files\Microsoft Visual Studio\18\Enterprise\VC\Tools\MSVC\14.51.36231\include\vcruntime.h:348:47: note: expanded from macro '_CRT_DEPRECATE_TEXT'
+  348 | #define _CRT_DEPRECATE_TEXT(_Text) __declspec(deprecated(_Text))
+      |                                               ^
+5 warnings and 6 errors generated.
+[238/335] Building CXX object runtime/CMakeFiles/imgui.dir/thirdparty/imgui/imgui_widgets.cpp.obj
+[239/335] Building CXX object runtime/CMakeFiles/SpeedBreaker.dir/apu/xma.cpp.obj
+FAILED: [code=1] runtime/CMakeFiles/SpeedBreaker.dir/apu/xma.cpp.obj 
+"C:\Program Files\LLVM\bin\clang++.exe" -DNOMINMAX -DWIN32_LEAN_AND_MEAN -D_FILE_OFFSET_BITS=64 -D_WIN32_WINNT=0x0A00 -ID:/a/speedbreaker-windows-unofficial/speedbreaker-windows-unofficial/runtime/compat/win -ID:/a/speedbreaker-windows-unofficial/speedbreaker-windows-unofficial/runtime -ID:/a/speedbreaker-windows-unofficial/speedbreaker-windows-unofficial/runtime/kernel -ID:/a/speedbreaker-windows-unofficial/speedbreaker-windows-unofficial/build/runtime/generated -ID:/a/speedbreaker-windows-unofficial/speedbreaker-windows-unofficial/recomp/../ppc -ID:/a/speedbreaker-windows-unofficial/speedbreaker-windows-unofficial/recomp/../tools/XenonRecomp/XenonUtils -ID:/a/speedbreaker-windows-unofficial/speedbreaker-windows-unofficial/recomp/../tools/XenonRecomp/thirdparty/simde -ID:/a/speedbreaker-windows-unofficial/speedbreaker-windows-unofficial/runtime/../tools/XenonRecomp/XenonUtils -ID:/a/speedbreaker-windows-unofficial/speedbreaker-windows-unofficial/runtime/../tools/XenonRecomp/thirdparty/simde -ID:/a/speedbreaker-windows-unofficial/speedbreaker-windows-unofficial/runtime/thirdparty/o1heap -ID:/a/speedbreaker-windows-unofficial/speedbreaker-windows-unofficial/runtime/thirdparty/imgui -ID:/a/speedbreaker-windows-unofficial/speedbreaker-windows-unofficial/runtime/thirdparty/imgui/backends -isystem C:/vcpkg/installed/x64-windows/include -isystem D:/a/speedbreaker-windows-unofficial/speedbreaker-windows-unofficial/runtime/../tools/XenonRecomp/thirdparty/tomlplusplus/include -O3 -DNDEBUG -std=gnu++20 -D_DLL -D_MT -Xclang --dependent-lib=msvcrt -ffile-prefix-map=D:/a/speedbreaker-windows-unofficial/speedbreaker-windows-unofficial=. -include D:/a/speedbreaker-windows-unofficial/speedbreaker-windows-unofficial/runtime/compat/win/win_compat.h -Wno-unused-label -Wno-unused-variable -fno-strict-aliasing -UNDEBUG -march=x86-64-v3 -MD -MT runtime/CMakeFiles/SpeedBreaker.dir/apu/xma.cpp.obj -MF runtime\CMakeFiles\SpeedBreaker.dir\apu\xma.cpp.obj.d -o runtime/CMakeFiles/SpeedBreaker.dir/apu/xma.cpp.obj -c D:/a/speedbreaker-windows-unofficial/speedbreaker-windows-unofficial/runtime/apu/xma.cpp
+In file included from <built-in>:1:
+D:/a/speedbreaker-windows-unofficial/speedbreaker-windows-unofficial/runtime/compat/win/win_compat.h:113:40: warning: 'dup' is deprecated: The POSIX name for this item is deprecated. Instead, use the ISO C and C++ conformant name: _dup. See online help for details. [-Wdeprecated-declarations]
+  113 |     if (cmd == F_DUPFD_CLOEXEC) return dup(fd);
+      |                                        ^
+C:\Program Files (x86)\Windows Kits\10\Include\10.0.26100.0\ucrt\corecrt_io.h:471:24: note: 'dup' has been explicitly marked deprecated here
+  471 |         _Check_return_ _CRT_NONSTDC_DEPRECATE(_dup)
+      |                        ^
+C:\Program Files (x86)\Windows Kits\10\Include\10.0.26100.0\ucrt\corecrt.h:428:50: note: expanded from macro '_CRT_NONSTDC_DEPRECATE'
+  428 |         #define _CRT_NONSTDC_DEPRECATE(_NewName) _CRT_DEPRECATE_TEXT(             \
+      |                                                  ^
+C:\Program Files\Microsoft Visual Studio\18\Enterprise\VC\Tools\MSVC\14.51.36231\include\vcruntime.h:348:47: note: expanded from macro '_CRT_DEPRECATE_TEXT'
+  348 | #define _CRT_DEPRECATE_TEXT(_Text) __declspec(deprecated(_Text))
+      |                                               ^
+In file included from <built-in>:1:
+D:/a/speedbreaker-windows-unofficial/speedbreaker-windows-unofficial/runtime/compat/win/win_compat.h:118:69: warning: '_wopen' is deprecated: This function or variable may be unsafe. Consider using _wsopen_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details. [-Wdeprecated-declarations]
+  118 | inline int open(const wchar_t* p, int flags, int mode = 0) { return _wopen(p, flags | _O_BINARY, mode); }
+      |                                                                     ^
+C:\Program Files (x86)\Windows Kits\10\Include\10.0.26100.0\ucrt\corecrt_wio.h:223:33: note: '_wopen' has been explicitly marked deprecated here
+  223 |     extern "C++" _Check_return_ _CRT_INSECURE_DEPRECATE(_wsopen_s)
+      |                                 ^
+C:\Program Files\Microsoft Visual Studio\18\Enterprise\VC\Tools\MSVC\14.51.36231\include\vcruntime.h:358:55: note: expanded from macro '_CRT_INSECURE_DEPRECATE'
+  358 |         #define _CRT_INSECURE_DEPRECATE(_Replacement) _CRT_DEPRECATE_TEXT(    \
+      |                                                       ^
+C:\Program Files\Microsoft Visual Studio\18\Enterprise\VC\Tools\MSVC\14.51.36231\include\vcruntime.h:348:47: note: expanded from macro '_CRT_DEPRECATE_TEXT'
+  348 | #define _CRT_DEPRECATE_TEXT(_Text) __declspec(deprecated(_Text))
+      |                                               ^
+In file included from <built-in>:1:
+D:/a/speedbreaker-windows-unofficial/speedbreaker-windows-unofficial/runtime/compat/win/win_compat.h:119:66: warning: '_open' is deprecated: This function or variable may be unsafe. Consider using _sopen_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details. [-Wdeprecated-declarations]
+  119 | inline int open(const char* p, int flags, int mode = 0) { return _open(p, flags | _O_BINARY, mode); }
+      |                                                                  ^
+C:\Program Files (x86)\Windows Kits\10\Include\10.0.26100.0\ucrt\corecrt_io.h:391:37: note: '_open' has been explicitly marked deprecated here
+  391 |         extern "C++" _Check_return_ _CRT_INSECURE_DEPRECATE(_sopen_s)
+      |                                     ^
+C:\Program Files\Microsoft Visual Studio\18\Enterprise\VC\Tools\MSVC\14.51.36231\include\vcruntime.h:358:55: note: expanded from macro '_CRT_INSECURE_DEPRECATE'
+  358 |         #define _CRT_INSECURE_DEPRECATE(_Replacement) _CRT_DEPRECATE_TEXT(    \
+      |                                                       ^
+C:\Program Files\Microsoft Visual Studio\18\Enterprise\VC\Tools\MSVC\14.51.36231\include\vcruntime.h:348:47: note: expanded from macro '_CRT_DEPRECATE_TEXT'
+  348 | #define _CRT_DEPRECATE_TEXT(_Text) __declspec(deprecated(_Text))
+      |                                               ^
+In file included from <built-in>:1:
+D:/a/speedbreaker-windows-unofficial/speedbreaker-windows-unofficial/runtime/compat/win/win_compat.h:124:12: warning: '_wfopen' is deprecated: This function or variable may be unsafe. Consider using _wfopen_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details. [-Wdeprecated-declarations]
+  124 |     return _wfopen(p, w.c_str());
+      |            ^
+C:\Program Files (x86)\Windows Kits\10\Include\10.0.26100.0\ucrt\corecrt_wstdio.h:132:20: note: '_wfopen' has been explicitly marked deprecated here
+  132 |     _Check_return_ _CRT_INSECURE_DEPRECATE(_wfopen_s)
+      |                    ^
+C:\Program Files\Microsoft Visual Studio\18\Enterprise\VC\Tools\MSVC\14.51.36231\include\vcruntime.h:358:55: note: expanded from macro '_CRT_INSECURE_DEPRECATE'
+  358 |         #define _CRT_INSECURE_DEPRECATE(_Replacement) _CRT_DEPRECATE_TEXT(    \
+      |                                                       ^
+C:\Program Files\Microsoft Visual Studio\18\Enterprise\VC\Tools\MSVC\14.51.36231\include\vcruntime.h:348:47: note: expanded from macro '_CRT_DEPRECATE_TEXT'
+  348 | #define _CRT_DEPRECATE_TEXT(_Text) __declspec(deprecated(_Text))
+      |                                               ^
+In file included from <built-in>:1:
+D:/a/speedbreaker-windows-unofficial/speedbreaker-windows-unofficial/runtime/compat/win/win_compat.h:131:1: error: unknown type name 'ssize_t'
+  131 | ssize_t pread(int fd, void* buf, size_t count, long long offset);
+      | ^
+D:/a/speedbreaker-windows-unofficial/speedbreaker-windows-unofficial/runtime/compat/win/win_compat.h:132:1: error: unknown type name 'ssize_t'
+  132 | ssize_t pwrite(int fd, const void* buf, size_t count, long long offset);
+      | ^
+In file included from D:/a/speedbreaker-windows-unofficial/speedbreaker-windows-unofficial/runtime/apu/xma.cpp:43:
+D:/a/speedbreaker-windows-unofficial/speedbreaker-windows-unofficial/runtime\cpu/guest_thread.h:13:10: fatal error: 'pthread.h' file not found
+   13 | #include <pthread.h>
+      |          ^~~~~~~~~~~
+4 warnings and 3 errors generated.
+[240/335] Building CXX object runtime/CMakeFiles/SpeedBreaker.dir/apu/audio.cpp.obj
+FAILED: [code=1] runtime/CMakeFiles/SpeedBreaker.dir/apu/audio.cpp.obj 
+"C:\Program Files\LLVM\bin\clang++.exe" -DNOMINMAX -DWIN32_LEAN_AND_MEAN -D_FILE_OFFSET_BITS=64 -D_WIN32_WINNT=0x0A00 -ID:/a/speedbreaker-windows-unofficial/speedbreaker-windows-unofficial/runtime/compat/win -ID:/a/speedbreaker-windows-unofficial/speedbreaker-windows-unofficial/runtime -ID:/a/speedbreaker-windows-unofficial/speedbreaker-windows-unofficial/runtime/kernel -ID:/a/speedbreaker-windows-unofficial/speedbreaker-windows-unofficial/build/runtime/generated -ID:/a/speedbreaker-windows-unofficial/speedbreaker-windows-unofficial/recomp/../ppc -ID:/a/speedbreaker-windows-unofficial/speedbreaker-windows-unofficial/recomp/../tools/XenonRecomp/XenonUtils -ID:/a/speedbreaker-windows-unofficial/speedbreaker-windows-unofficial/recomp/../tools/XenonRecomp/thirdparty/simde -ID:/a/speedbreaker-windows-unofficial/speedbreaker-windows-unofficial/runtime/../tools/XenonRecomp/XenonUtils -ID:/a/speedbreaker-windows-unofficial/speedbreaker-windows-unofficial/runtime/../tools/XenonRecomp/thirdparty/simde -ID:/a/speedbreaker-windows-unofficial/speedbreaker-windows-unofficial/runtime/thirdparty/o1heap -ID:/a/speedbreaker-windows-unofficial/speedbreaker-windows-unofficial/runtime/thirdparty/imgui -ID:/a/speedbreaker-windows-unofficial/speedbreaker-windows-unofficial/runtime/thirdparty/imgui/backends -isystem C:/vcpkg/installed/x64-windows/include -isystem D:/a/speedbreaker-windows-unofficial/speedbreaker-windows-unofficial/runtime/../tools/XenonRecomp/thirdparty/tomlplusplus/include -O3 -DNDEBUG -std=gnu++20 -D_DLL -D_MT -Xclang --dependent-lib=msvcrt -ffile-prefix-map=D:/a/speedbreaker-windows-unofficial/speedbreaker-windows-unofficial=. -include D:/a/speedbreaker-windows-unofficial/speedbreaker-windows-unofficial/runtime/compat/win/win_compat.h -Wno-unused-label -Wno-unused-variable -fno-strict-aliasing -UNDEBUG -march=x86-64-v3 -MD -MT runtime/CMakeFiles/SpeedBreaker.dir/apu/audio.cpp.obj -MF runtime\CMakeFiles\SpeedBreaker.dir\apu\audio.cpp.obj.d -o runtime/CMakeFiles/SpeedBreaker.dir/apu/audio.cpp.obj -c D:/a/speedbreaker-windows-unofficial/speedbreaker-windows-unofficial/runtime/apu/audio.cpp
+In file included from <built-in>:1:
+D:/a/speedbreaker-windows-unofficial/speedbreaker-windows-unofficial/runtime/compat/win/win_compat.h:113:40: warning: 'dup' is deprecated: The POSIX name for this item is deprecated. Instead, use the ISO C and C++ conformant name: _dup. See online help for details. [-Wdeprecated-declarations]
+  113 |     if (cmd == F_DUPFD_CLOEXEC) return dup(fd);
+      |                                        ^
+C:\Program Files (x86)\Windows Kits\10\Include\10.0.26100.0\ucrt\corecrt_io.h:471:24: note: 'dup' has been explicitly marked deprecated here
+  471 |         _Check_return_ _CRT_NONSTDC_DEPRECATE(_dup)
+      |                        ^
+C:\Program Files (x86)\Windows Kits\10\Include\10.0.26100.0\ucrt\corecrt.h:428:50: note: expanded from macro '_CRT_NONSTDC_DEPRECATE'
+  428 |         #define _CRT_NONSTDC_DEPRECATE(_NewName) _CRT_DEPRECATE_TEXT(             \
+      |                                                  ^
+C:\Program Files\Microsoft Visual Studio\18\Enterprise\VC\Tools\MSVC\14.51.36231\include\vcruntime.h:348:47: note: expanded from macro '_CRT_DEPRECATE_TEXT'
+  348 | #define _CRT_DEPRECATE_TEXT(_Text) __declspec(deprecated(_Text))
+      |                                               ^
+In file included from <built-in>:1:
+D:/a/speedbreaker-windows-unofficial/speedbreaker-windows-unofficial/runtime/compat/win/win_compat.h:118:69: warning: '_wopen' is deprecated: This function or variable may be unsafe. Consider using _wsopen_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details. [-Wdeprecated-declarations]
+  118 | inline int open(const wchar_t* p, int flags, int mode = 0) { return _wopen(p, flags | _O_BINARY, mode); }
+      |                                                                     ^
+C:\Program Files (x86)\Windows Kits\10\Include\10.0.26100.0\ucrt\corecrt_wio.h:223:33: note: '_wopen' has been explicitly marked deprecated here
+  223 |     extern "C++" _Check_return_ _CRT_INSECURE_DEPRECATE(_wsopen_s)
+      |                                 ^
+C:\Program Files\Microsoft Visual Studio\18\Enterprise\VC\Tools\MSVC\14.51.36231\include\vcruntime.h:358:55: note: expanded from macro '_CRT_INSECURE_DEPRECATE'
+  358 |         #define _CRT_INSECURE_DEPRECATE(_Replacement) _CRT_DEPRECATE_TEXT(    \
+      |                                                       ^
+C:\Program Files\Microsoft Visual Studio\18\Enterprise\VC\Tools\MSVC\14.51.36231\include\vcruntime.h:348:47: note: expanded from macro '_CRT_DEPRECATE_TEXT'
+  348 | #define _CRT_DEPRECATE_TEXT(_Text) __declspec(deprecated(_Text))
+      |                                               ^
+In file included from <built-in>:1:
+D:/a/speedbreaker-windows-unofficial/speedbreaker-windows-unofficial/runtime/compat/win/win_compat.h:119:66: warning: '_open' is deprecated: This function or variable may be unsafe. Consider using _sopen_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details. [-Wdeprecated-declarations]
+  119 | inline int open(const char* p, int flags, int mode = 0) { return _open(p, flags | _O_BINARY, mode); }
+      |                                                                  ^
+C:\Program Files (x86)\Windows Kits\10\Include\10.0.26100.0\ucrt\corecrt_io.h:391:37: note: '_open' has been explicitly marked deprecated here
+  391 |         extern "C++" _Check_return_ _CRT_INSECURE_DEPRECATE(_sopen_s)
+      |                                     ^
+C:\Program Files\Microsoft Visual Studio\18\Enterprise\VC\Tools\MSVC\14.51.36231\include\vcruntime.h:358:55: note: expanded from macro '_CRT_INSECURE_DEPRECATE'
+  358 |         #define _CRT_INSECURE_DEPRECATE(_Replacement) _CRT_DEPRECATE_TEXT(    \
+      |                                                       ^
+C:\Program Files\Microsoft Visual Studio\18\Enterprise\VC\Tools\MSVC\14.51.36231\include\vcruntime.h:348:47: note: expanded from macro '_CRT_DEPRECATE_TEXT'
+  348 | #define _CRT_DEPRECATE_TEXT(_Text) __declspec(deprecated(_Text))
+      |                                               ^
+In file included from <built-in>:1:
+D:/a/speedbreaker-windows-unofficial/speedbreaker-windows-unofficial/runtime/compat/win/win_compat.h:124:12: warning: '_wfopen' is deprecated: This function or variable may be unsafe. Consider using _wfopen_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details. [-Wdeprecated-declarations]
+  124 |     return _wfopen(p, w.c_str());
+      |            ^
+C:\Program Files (x86)\Windows Kits\10\Include\10.0.26100.0\ucrt\corecrt_wstdio.h:132:20: note: '_wfopen' has been explicitly marked deprecated here
+  132 |     _Check_return_ _CRT_INSECURE_DEPRECATE(_wfopen_s)
+      |                    ^
+C:\Program Files\Microsoft Visual Studio\18\Enterprise\VC\Tools\MSVC\14.51.36231\include\vcruntime.h:358:55: note: expanded from macro '_CRT_INSECURE_DEPRECATE'
+  358 |         #define _CRT_INSECURE_DEPRECATE(_Replacement) _CRT_DEPRECATE_TEXT(    \
+      |                                                       ^
+C:\Program Files\Microsoft Visual Studio\18\Enterprise\VC\Tools\MSVC\14.51.36231\include\vcruntime.h:348:47: note: expanded from macro '_CRT_DEPRECATE_TEXT'
+  348 | #define _CRT_DEPRECATE_TEXT(_Text) __declspec(deprecated(_Text))
+      |                                               ^
+In file included from <built-in>:1:
+D:/a/speedbreaker-windows-unofficial/speedbreaker-windows-unofficial/runtime/compat/win/win_compat.h:131:1: error: unknown type name 'ssize_t'
+  131 | ssize_t pread(int fd, void* buf, size_t count, long long offset);
+      | ^
+D:/a/speedbreaker-windows-unofficial/speedbreaker-windows-unofficial/runtime/compat/win/win_compat.h:132:1: error: unknown type name 'ssize_t'
+  132 | ssize_t pwrite(int fd, const void* buf, size_t count, long long offset);
+      | ^
+In file included from D:/a/speedbreaker-windows-unofficial/speedbreaker-windows-unofficial/runtime/apu/audio.cpp:33:
+D:/a/speedbreaker-windows-unofficial/speedbreaker-windows-unofficial/runtime/apu\audio_wait.h:120:9: error: unknown type name 'HANDLE'
+  120 |         HANDLE m_timer = nullptr;
+      |         ^
+D:/a/speedbreaker-windows-unofficial/speedbreaker-windows-unofficial/runtime/apu\audio_wait.h:121:9: error: unknown type name 'HANDLE'
+  121 |         HANDLE m_mmcss = nullptr;
+      |         ^
+D:/a/speedbreaker-windows-unofficial/speedbreaker-windows-unofficial/runtime/apu\audio_wait.h:52:103: error: use of undeclared identifier 'TIMER_ALL_ACCESS'
+   52 |             m_timer = CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
+      |                                                                                                       ^
+D:/a/speedbreaker-windows-unofficial/speedbreaker-windows-unofficial/runtime/apu\audio_wait.h:57:21: error: unknown type name 'HMODULE'
+   57 |                 if (HMODULE winmm = LoadLibraryW(L"winmm.dll"))
+      |                     ^
+D:/a/speedbreaker-windows-unofficial/speedbreaker-windows-unofficial/runtime/apu\audio_wait.h:57:37: error: use of undeclared identifier 'LoadLibraryW'
+   57 |                 if (HMODULE winmm = LoadLibraryW(L"winmm.dll"))
+      |                                     ^
+D:/a/speedbreaker-windows-unofficial/speedbreaker-windows-unofficial/runtime/apu\audio_wait.h:59:32: error: unknown type name 'UINT'
+   59 |                     using Fn = UINT(WINAPI*)(UINT);
+      |                                ^
+D:/a/speedbreaker-windows-unofficial/speedbreaker-windows-unofficial/runtime/apu\audio_wait.h:59:37: error: type-id cannot have a name
+   59 |                     using Fn = UINT(WINAPI*)(UINT);
+      |                                     ^~~~~~
+D:/a/speedbreaker-windows-unofficial/speedbreaker-windows-unofficial/runtime/apu\audio_wait.h:59:43: error: expected ')'
+   59 |                     using Fn = UINT(WINAPI*)(UINT);
+      |                                           ^
+D:/a/speedbreaker-windows-unofficial/speedbreaker-windows-unofficial/runtime/apu\audio_wait.h:59:36: note: to match this '('
+   59 |                     using Fn = UINT(WINAPI*)(UINT);
+      |                                    ^
+D:/a/speedbreaker-windows-unofficial/speedbreaker-windows-unofficial/runtime/apu\audio_wait.h:59:46: error: unknown type name 'UINT'
+   59 |                     using Fn = UINT(WINAPI*)(UINT);
+      |                                              ^
+D:/a/speedbreaker-windows-unofficial/speedbreaker-windows-unofficial/runtime/apu\audio_wait.h:60:55: error: unknown type name 'Fn'
+   60 |                     if (auto begin = reinterpret_cast<Fn>(reinterpret_cast<void*>(GetProcAddress(winmm, "timeBeginPeriod"))))
+      |                                                       ^
+D:/a/speedbreaker-windows-unofficial/speedbreaker-windows-unofficial/runtime/apu\audio_wait.h:66:17: error: unknown type name 'HMODULE'
+   66 |             if (HMODULE avrt = LoadLibraryW(L"avrt.dll"))
+      |                 ^
+D:/a/speedbreaker-windows-unofficial/speedbreaker-windows-unofficial/runtime/apu\audio_wait.h:66:32: error: use of undeclared identifier 'LoadLibraryW'
+   66 |             if (HMODULE avrt = LoadLibraryW(L"avrt.dll"))
+      |                                ^
+D:/a/speedbreaker-windows-unofficial/speedbreaker-windows-unofficial/runtime/apu\audio_wait.h:68:28: error: unknown type name 'HANDLE'
+   68 |                 using Fn = HANDLE(WINAPI*)(LPCWSTR, LPDWORD);
+      |                            ^
+D:/a/speedbreaker-windows-unofficial/speedbreaker-windows-unofficial/runtime/apu\audio_wait.h:68:35: error: type-id cannot have a name
+   68 |                 using Fn = HANDLE(WINAPI*)(LPCWSTR, LPDWORD);
+      |                                   ^~~~~~
+D:/a/speedbreaker-windows-unofficial/speedbreaker-windows-unofficial/runtime/apu\audio_wait.h:68:41: error: expected ')'
+   68 |                 using Fn = HANDLE(WINAPI*)(LPCWSTR, LPDWORD);
+      |                                         ^
+D:/a/speedbreaker-windows-unofficial/speedbreaker-windows-unofficial/runtime/apu\audio_wait.h:68:34: note: to match this '('
+   68 |                 using Fn = HANDLE(WINAPI*)(LPCWSTR, LPDWORD);
+      |                                  ^
+D:/a/speedbreaker-windows-unofficial/speedbreaker-windows-unofficial/runtime/apu\audio_wait.h:68:44: error: unknown type name 'LPCWSTR'
+   68 |                 using Fn = HANDLE(WINAPI*)(LPCWSTR, LPDWORD);
+      |                                            ^
+D:/a/speedbreaker-windows-unofficial/speedbreaker-windows-unofficial/runtime/apu\audio_wait.h:68:53: error: unknown type name 'LPDWORD'
+   68 |                 using Fn = HANDLE(WINAPI*)(LPCWSTR, LPDWORD);
+      |                                                     ^
+fatal error: too many errors emitted, stopping now [-ferror-limit=]
+4 warnings and 20 errors generated.
+[241/335] Building CXX object runtime/CMakeFiles/imgui.dir/thirdparty/imgui/imgui.cpp.obj
+[242/335] Building CXX object runtime/CMakeFiles/imgui.dir/thirdparty/imgui/imgui_draw.cpp.obj
+ninja: build stopped: subcommand failed.
+Process completed with exit code 1.
