@@ -455,8 +455,8 @@ switcher).
 | Aspect Ratio | Fill Screen / 16:9 | Fill Screen: wider screens get a wider view; 4:3, 3:2 and 16:10 screens (the Steam Deck, many Macs) a taller one. Since v0.1.9 the game renders the screen's own shape: a Steam Deck draws 1280x800 at 1x, a 1920x1200 screen 1920x1200 at 1.5x. 16:9 always shows the classic picture with bars. |
 | Brightness | -5 to +5 | 0, the picture as it is. Each step makes the shadows and mid-tones a little lighter or darker, like a TV's brightness; black and white stay put, and the menus never change. |
 | Xbox 360 Display Gamma | On / Off | On: the gamma ramp the game sets for a real Xbox 360's TV output, with slightly deeper shadows and slightly brighter mid-tones. Off: the flatter picture of v0.1.3 and earlier. |
-| HDR Output | On / Off | Off. Mac only: sends the picture to an HDR display with brighter highlights (extended dynamic range). The menus stay at standard brightness. On a standard-range display it looks the same as Off. |
-| HDR Format | Auto / Extended Linear / HDR10 (PQ) | Auto: Extended Linear when the display reports EDR headroom, HDR10 otherwise. HDR10 (PQ) sends the HDR10 signal and metadata that some monitors need to enter HDR mode. Mac only; used while HDR Output is on. |
+| HDR Output | On / Off | Off. Mac only: sends the picture to an HDR display with brighter highlights (extended dynamic range). The menus stay at standard brightness. With Auto on a standard-range display it looks the same as Off. |
+| HDR Format | Auto / Extended Linear / HDR10 (PQ) | Auto: Extended Linear on a display that reports HDR capability, otherwise standard range. HDR10 (PQ) sends the PQ signal and metadata; the display's HDR mode still follows macOS. Mac only; used while HDR Output is on. |
 
 The game's own Brightness slider, in the pause menu's Options > Video, works too while Xbox 360
 Display Gamma is on (with it off, it does nothing). Its middle is the default look; Y (Defaults),

@@ -4,6 +4,31 @@ What changed in each SpeedBreaker release, newest first. Each release's notes on
 its entry here, and the game shows the entry once, the first time a new version starts (offline:
 it's built into the game).
 
+## Unreleased
+
+### What's new
+
+- HDR output on a Mac with an HDR display (Settings > Display > HDR Output, off by default): the
+  game's highlights — the sun, headlights, lit signs — reach the display's extended dynamic range.
+  This settings overlay stays at standard brightness; the game's own front end and HUD are part of
+  the picture, so their whites follow the highlights too. HDR Format chooses Auto, Extended Linear,
+  or HDR10 (PQ); Auto uses Extended Linear where the screen reports HDR capability, and stays at
+  standard range where it doesn't. HDR10 sends PQ with BT.2020 primaries and metadata, but the
+  display's HDR mode still follows macOS. Implemented by @danielgpinheiro, from @DoubleDips's
+  idea (GitHub issue #25).
+
+### More about it
+
+- HDR Output uses either a 16-bit-float swapchain in extended linear sRGB (macOS EDR) or a 10-bit
+  swapchain in HDR10/PQ with static metadata; the log says "swapchain: HDR" or
+  "swapchain: HDR10" with the choice. The game renders into its usual 8-bit SDR surfaces first,
+  and the composite expands by Rec.709 luma rather than each channel, so bright colours keep their
+  hue. SDR white is 1.0 in EDR and 100 nits in HDR10; HDR10's peak is 400 nits (MaxCLL 400,
+  MaxFALL 100) so the game's own front-end and HUD white stay closer to SDR. EDR's current
+  headroom follows the display every frame. Bug-report screenshots and NFSMW_CHECK_PRESENT_SEC
+  captures stay standard-range; the PPM decodes PQ from BT.2020 back to Rec.709. NFSMW_HDR=1 and
+  NFSMW_HDR_FORMAT=auto|edr|hdr10 set them for a run; iOS and Linux don't offer them.
+
 ## v0.2.0
 
 ### What's new
@@ -82,13 +107,6 @@ it's built into the game).
   and Calibrate for other wheels. Tested with a G29 on a Mac; the steering feel is still being
   tuned, so feedback from wheel owners is very welcome. Thanks to byteofmydream, who wrote it
   (pull request #29).
-- HDR output on a Mac with an HDR display (Settings > Display > HDR Output, off by default): the
-  game's highlights — the sun, headlights, lit signs — reach the display's extended dynamic range,
-  while the menus stay at standard brightness. The picture keeps its SDR shadows and mid-tones;
-  only the top of the range opens up. HDR Format chooses Auto, Extended Linear, or HDR10 (PQ);
-  Auto uses Extended Linear when macOS reports EDR headroom and HDR10 otherwise, and HDR10 sends
-  the PQ signal and metadata some monitors need to enter HDR mode. Thanks to @DoubleDips for the
-  idea (GitHub issue #25).
 
 ### Fixed
 
@@ -113,13 +131,6 @@ it's built into the game).
   position, G27, G25, Driving Force GT and Pro; not a G29 in its PS4 position, a G920 or a G923).
   On SteamOS and Linux the wheel should steer as on a Mac; force feedback there isn't tested yet.
 - The log now says when the game's sound code would have dropped sounds, at most once a minute.
-- HDR Output uses either a 16-bit-float swapchain in extended linear sRGB (macOS EDR) or a 10-bit
-  swapchain in HDR10/PQ with Rec.2020 primaries and static metadata; the log says
-  "swapchain: HDR" or "swapchain: HDR10" with the choice. SDR white stays at the menus'
-  brightness: 1.0 in EDR, 100 nits in HDR10 (whose highlights reach 1000 nits). The game renders
-  into its usual 8-bit SDR surfaces first, so bug-report screenshots and NFSMW_CHECK_PRESENT_SEC
-  captures stay standard-range; the PPM decodes PQ back to SDR. NFSMW_HDR=1 and
-  NFSMW_HDR_FORMAT=auto|edr|hdr10 set them for a run; iOS and Linux don't offer them.
 - Updating keeps your saves, settings and the installed game, and needs no disc image: on a Mac,
   drag the new app into Applications and choose Replace, then Open Anyway once more; on SteamOS,
   unpack the new download over the old folder.

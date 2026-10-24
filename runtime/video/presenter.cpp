@@ -98,7 +98,8 @@ namespace video
         bool s_hdrMetadataExt = false;          // VK_EXT_hdr_metadata enabled
         PFN_vkSetHdrMetadataEXT s_setHdrMetadata = nullptr;
         float s_hdrHeadroom = 1.0f;
-        float s_hdrPeak = 1.0f;                 // EDR: video::hdr::PeakForHeadroom(s_hdrHeadroom); PQ: 10
+        float s_hdrPeak = 1.0f;                 // EDR: video::hdr::PeakForHeadroom(s_hdrHeadroom); PQ: 4
+        std::string s_hdrStatus = "Standard range";  // for the settings help
 
         // The format every picture/UI pass renders into: the swapchain itself
         // in SDR, or the 8-bit offscreen targets in HDR.
@@ -399,7 +400,7 @@ namespace video
             m.maxLuminance = hdr::kHdr10PeakNits;
             m.minLuminance = 0.005f;
             m.maxContentLightLevel = hdr::kHdr10PeakNits;
-            m.maxFrameAverageLightLevel = 400.0f;
+            m.maxFrameAverageLightLevel = hdr::kHdr10MaxFallNits;
             return m;
         }
 
@@ -986,10 +987,13 @@ namespace video
             if (pq == formats.end())
                 pq = pick(VK_FORMAT_R16G16B16A16_SFLOAT, VK_COLOR_SPACE_HDR10_ST2084_EXT);
             const bool hdrPossible = s_hdrSetting && kHdrOffered && s_swapchainColorspaceExt;
-            float headroom = 1.0f;
+            float headroom = 1.0f, potential = 1.0f;
 #if defined(__APPLE__) && !TARGET_OS_IOS
             if (hdrPossible)
+            {
                 headroom = platform::macos::DisplayHeadroom(s_window);
+                potential = platform::macos::DisplayPotentialHeadroom(s_window);
+            }
 #endif
             bool wantEdr = false, wantPq = false;
             if (hdrPossible)
@@ -999,13 +1003,13 @@ namespace video
                 else if (s_hdrFormat == 2)
                     wantPq = true;
                 else
-                {
-                    // Auto: EDR where the display offers headroom; otherwise
-                    // try the PQ signal a third-party HDR monitor waits for.
-                    wantEdr = headroom > 1.01f;
-                    wantPq = !wantEdr;
-                }
+                    // Auto: EDR where the screen can show it at all (its
+                    // potential headroom), even while the current headroom is
+                    // still 1 until EDR content is up; standard range where it
+                    // cannot. HDR10 stays an explicit choice.
+                    wantEdr = potential > 1.01f;
             }
+            const bool autoNoHdr = hdrPossible && s_hdrFormat == 0 && potential <= 1.01f;
             if (wantEdr && (edr == formats.end() || s_edrUnavailable))
             {
                 if (!s_edrUnavailable)
@@ -1023,7 +1027,7 @@ namespace video
                 s_pqUnavailable = true;
                 wantPq = false;
             }
-            if (!wantEdr && !wantPq && hdrPossible)
+            if (!wantEdr && !wantPq && hdrPossible && !autoNoHdr)
                 wantEdr = edr != formats.end() && !s_edrUnavailable;
             auto chosen = wantEdr ? edr : wantPq ? pq : formats.end();
             if (chosen == formats.end())
@@ -1044,8 +1048,8 @@ namespace video
             {
                 lastAuto = autoChoice;
                 fprintf(stderr, "[video] HDR: Auto chose %s\n",
-                    wantEdr ? std::format("Extended Linear (display headroom {:.2f})", headroom).c_str()
-                    : wantPq ? "HDR10 (the display reports no EDR headroom)" : "standard range");
+                    wantEdr ? std::format("Extended Linear (potential headroom {:.2f})", potential).c_str()
+                    : wantPq ? "HDR10 (Extended Linear is unavailable)" : "standard range (the display reports no HDR)");
             }
             if (s_swapHdr && (!EnsureHdrTargets() || !EnsureHdrPipeline()))
             {
@@ -1065,6 +1069,8 @@ namespace video
                 s_hdrHeadroom = 1.0f;
                 s_hdrPeak = 1.0f;
             }
+            s_hdrStatus = s_swapPq ? std::format("HDR10 (PQ), {:.0f}-{:.0f} nits", hdr::kSdrWhiteNits, hdr::kHdr10PeakNits)
+                : s_swapHdr ? std::format("Extended Linear (EDR), headroom {:.2f}", s_hdrHeadroom) : "Standard range";
             static VkFormat loggedFormat = VK_FORMAT_UNDEFINED;
             static VkColorSpaceKHR loggedColorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
             if (s_swapFormat != loggedFormat || s_swapColorSpace != loggedColorSpace)
@@ -1073,7 +1079,7 @@ namespace video
                 loggedColorSpace = s_swapColorSpace;
                 fprintf(stderr, "[video] swapchain: %s (%s, %s%s)\n", s_swapPq ? "HDR10" : s_swapHdr ? "HDR" : "SDR",
                     FormatName(s_swapFormat), ColorSpaceName(s_swapColorSpace),
-                    s_swapPq ? ", 100-1000 nits"
+                    s_swapPq ? std::format(", {:.0f}-{:.0f} nits", hdr::kSdrWhiteNits, hdr::kHdr10PeakNits).c_str()
                     : s_swapHdr ? std::format(", display headroom {:.2f}", s_hdrHeadroom).c_str() : "");
             }
 
@@ -1700,7 +1706,20 @@ vec3 srgbToLinear(vec3 c)
 
 vec3 expand(vec3 v)
 {
-    return v + (p.peak - 1.0) * pow(v, vec3(6.0));
+    // Expand the light, not each channel: the ratio between channels (hue
+    // and saturation) stays.
+    const vec3 luma = vec3(0.2126, 0.7152, 0.0722);
+    float l = dot(v, luma);
+    float e = l + (p.peak - 1.0) * pow(l, 8.0);
+    return l > 0.0 ? v * (e / l) : v;
+}
+
+vec3 rec709ToRec2020(vec3 c)
+{
+    return vec3(
+        0.6274040 * c.r + 0.3292820 * c.g + 0.0433136 * c.b,
+        0.0690970 * c.r + 0.9195400 * c.g + 0.0113612 * c.b,
+        0.0163916 * c.r + 0.0880132 * c.g + 0.8955950 * c.b);
 }
 
 vec3 nitsToPq(vec3 nits)
@@ -1724,7 +1743,7 @@ void main()
     vec3 uiLinear = srgbToLinear(uiStraight) * ui.a;
     vec3 outLinear = scene * (1.0 - ui.a) + uiLinear;
     if (p.pq != 0u)
-        outLinear = nitsToPq(outLinear * p.sdrWhiteNits);
+        outLinear = nitsToPq(rec709ToRec2020(outLinear) * p.sdrWhiteNits);
     color = vec4(outLinear, 1.0);
 }
 )";
@@ -3355,6 +3374,7 @@ void main()
             portability |= strcmp(e.extensionName, VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME) == 0;
         if (portability)
             exts.push_back(VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME);
+#if defined(__APPLE__) && !TARGET_OS_IOS
         for (const VkExtensionProperties& e : instanceExts)
             if (strcmp(e.extensionName, VK_EXT_SWAPCHAIN_COLOR_SPACE_EXTENSION_NAME) == 0)
             {
@@ -3362,6 +3382,7 @@ void main()
                     exts.push_back(VK_EXT_SWAPCHAIN_COLOR_SPACE_EXTENSION_NAME);
                 s_swapchainColorspaceExt = true;
             }
+#endif
 
         VkApplicationInfo app{ VK_STRUCTURE_TYPE_APPLICATION_INFO };
         app.pApplicationName = "SpeedBreaker";
@@ -3429,11 +3450,15 @@ void main()
             shadingRate |= strcmp(e.extensionName, VK_KHR_FRAGMENT_SHADING_RATE_EXTENSION_NAME) == 0;
             presentId |= strcmp(e.extensionName, VK_KHR_PRESENT_ID_EXTENSION_NAME) == 0;
             presentWait |= strcmp(e.extensionName, VK_KHR_PRESENT_WAIT_EXTENSION_NAME) == 0;
+#if defined(__APPLE__) && !TARGET_OS_IOS
             hdrMetadata |= strcmp(e.extensionName, VK_EXT_HDR_METADATA_EXTENSION_NAME) == 0;
+#endif
         }
         s_hdrMetadataExt = hdrMetadata;
+#if defined(__APPLE__) && !TARGET_OS_IOS
         if (hdrMetadata)
             devExts.push_back(VK_EXT_HDR_METADATA_EXTENSION_NAME);
+#endif
         // Present timing (the guest vblank lock), where the device has it.
         // NFSMW_PRESENT_TIMING=0 leaves it off, should a driver object to the
         // waits beside presents: no lock, and no repeat counts.
@@ -4484,6 +4509,21 @@ void main()
             SDL_Delay(16);
             return true;
         }
+#if defined(__APPLE__) && !TARGET_OS_IOS
+        if (s_swapHdr && !s_swapPq)
+        {
+            // The current headroom follows the brightness slider and rises
+            // once EDR content is up; the composite's push constant takes it
+            // every frame.
+            const float headroom = platform::macos::DisplayHeadroom(s_window);
+            if (std::abs(headroom - s_hdrHeadroom) > 0.01f)
+            {
+                s_hdrHeadroom = headroom;
+                s_hdrPeak = hdr::PeakForHeadroom(headroom);
+                s_hdrStatus = std::format("Extended Linear (EDR), headroom {:.2f}", s_hdrHeadroom);
+            }
+        }
+#endif
 
         // Held until the frame that uses the renderer's image is submitted
         // (ReleaseFrontImage waits for it before that image is destroyed).
@@ -5324,7 +5364,14 @@ void main()
                 fprintf(out, "P6\n%u %u\n255\n", s_swapExtent.width, s_swapExtent.height);
                 std::vector<uint8_t> rgb(size_t(s_swapExtent.width) * s_swapExtent.height * 3);
                 auto sdr = [](float linear) {
-                    return uint8_t(std::lround(hdr::LinearToSrgb(linear) * 255.0f));
+                    return uint8_t(std::lround(hdr::LinearToSrgb(std::clamp(linear, 0.0f, 1.0f)) * 255.0f));
+                };
+                auto pqToSdr = [&](float r, float g, float b) {
+                    r = hdr::PqToNits(r) / hdr::kSdrWhiteNits;
+                    g = hdr::PqToNits(g) / hdr::kSdrWhiteNits;
+                    b = hdr::PqToNits(b) / hdr::kSdrWhiteNits;
+                    hdr::Rec2020ToRec709(r, g, b);
+                    return std::array<uint8_t, 3>{ sdr(r), sdr(g), sdr(b) };
                 };
                 if (s_swapFormat == VK_FORMAT_A2B10G10R10_UNORM_PACK32)
                 {
@@ -5332,20 +5379,29 @@ void main()
                     for (size_t i = 0; i < rgb.size() / 3; i++)
                     {
                         const uint32_t v = px[i];
-                        rgb[i * 3 + 0] = sdr(hdr::PqToNits(float(v & 0x3FF) / 1023.0f) / hdr::kSdrWhiteNits);
-                        rgb[i * 3 + 1] = sdr(hdr::PqToNits(float((v >> 10) & 0x3FF) / 1023.0f) / hdr::kSdrWhiteNits);
-                        rgb[i * 3 + 2] = sdr(hdr::PqToNits(float((v >> 20) & 0x3FF) / 1023.0f) / hdr::kSdrWhiteNits);
+                        const auto c = pqToSdr(float(v & 0x3FF) / 1023.0f, float((v >> 10) & 0x3FF) / 1023.0f,
+                            float((v >> 20) & 0x3FF) / 1023.0f);
+                        rgb[i * 3 + 0] = c[0];
+                        rgb[i * 3 + 1] = c[1];
+                        rgb[i * 3 + 2] = c[2];
                     }
                 }
                 else if (s_swapFormat == VK_FORMAT_R16G16B16A16_SFLOAT)
                 {
                     const uint16_t* px = static_cast<const uint16_t*>(mapped);
-                    for (size_t i = 0; i < rgb.size() / 3; i++)
-                        for (int k = 0; k < 3; k++)
+                    if (s_swapPq)
+                        for (size_t i = 0; i < rgb.size() / 3; i++)
                         {
-                            const float value = tone::FromHalf(px[i * 4 + k]);
-                            rgb[i * 3 + k] = sdr(s_swapPq ? hdr::PqToNits(value) / hdr::kSdrWhiteNits : value);
+                            const auto c = pqToSdr(tone::FromHalf(px[i * 4 + 0]), tone::FromHalf(px[i * 4 + 1]),
+                                tone::FromHalf(px[i * 4 + 2]));
+                            rgb[i * 3 + 0] = c[0];
+                            rgb[i * 3 + 1] = c[1];
+                            rgb[i * 3 + 2] = c[2];
                         }
+                    else
+                        for (size_t i = 0; i < rgb.size() / 3; i++)
+                            for (int k = 0; k < 3; k++)
+                                rgb[i * 3 + k] = sdr(tone::FromHalf(px[i * 4 + k]));
                 }
                 else
                 {
@@ -5427,6 +5483,11 @@ void main()
     PresentStats GetPresentStats()
     {
         return { s_dropped.load(std::memory_order_relaxed), s_repeated.load(std::memory_order_relaxed), s_shown.load(std::memory_order_relaxed) };
+    }
+
+    const char* HdrStatus()
+    {
+        return s_hdrStatus.c_str();
     }
 
     VblankLock& GuestVblank()

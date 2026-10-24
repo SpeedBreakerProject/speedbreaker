@@ -50,8 +50,29 @@ int main()
     // SDR white reaches the peak; black stays black; the known points.
     CHECK(Expand(0.0f, 2.0f) == 0.0f, "%.6f", Expand(0.0f, 2.0f));
     CHECK(Expand(1.0f, 2.0f) == 2.0f, "%.6f", Expand(1.0f, 2.0f));
-    CHECK(Near(Expand(0.5f, 2.0f), 0.515625f, 1e-6f), "%.9f", Expand(0.5f, 2.0f));
-    CHECK(Near(Expand(0.9f, 4.0f), 2.494323f, 1e-6f), "%.9f", Expand(0.9f, 4.0f));
+    CHECK(Near(Expand(0.5f, 2.0f), 0.50390625f, 1e-6f), "%.9f", Expand(0.5f, 2.0f));
+    CHECK(Near(Expand(0.9f, 4.0f), 2.19140163f, 1e-5f), "%.9f", Expand(0.9f, 4.0f));
+
+    // Expanding by luma keeps the channels' ratios (hue); gray stays gray.
+    {
+        float r = 1.0f, g = 0.0f, b = 0.0f;
+        ExpandRgb(r, g, b, 4.0f);
+        CHECK(g == 0.0f && b == 0.0f && r > 1.0f && r < 4.0f, "%.6f %.6f %.6f", r, g, b);
+        float gr = 0.5f, gg = 0.5f, gb = 0.5f;
+        ExpandRgb(gr, gg, gb, 4.0f);
+        CHECK(Near(gr, gg, 1e-6f) && Near(gr, gb, 1e-6f) && Near(gr, Expand(0.5f, 4.0f), 1e-6f),
+            "%.6f %.6f %.6f", gr, gg, gb);
+    }
+
+    // Rec.709 <-> Rec.2020, BT.2087.
+    {
+        float r = 1.0f, g = 0.0f, b = 0.0f;
+        Rec709ToRec2020(r, g, b);
+        CHECK(Near(r, 0.6274040f, 1e-5f) && Near(g, 0.0690970f, 1e-5f) && Near(b, 0.0163916f, 1e-5f),
+            "%.7f %.7f %.7f", r, g, b);
+        Rec2020ToRec709(r, g, b);
+        CHECK(Near(r, 1.0f, 1e-4f) && Near(g, 0.0f, 1e-4f) && Near(b, 0.0f, 1e-4f), "%.7f %.7f %.7f", r, g, b);
+    }
 
     // Out-of-range inputs are clamped, not wrapped.
     CHECK(Expand(-1.0f, 2.0f) == 0.0f, "%.6f", Expand(-1.0f, 2.0f));
@@ -83,7 +104,8 @@ int main()
     }
 
     // PQ: HDR10's absolute scale.
-    CHECK(kSdrWhiteNits == 100.0f && kHdr10PeakNits == 1000.0f, "%.1f %.1f", kSdrWhiteNits, kHdr10PeakNits);
+    CHECK(kSdrWhiteNits == 100.0f && kHdr10PeakNits == 400.0f && kHdr10MaxFallNits == 100.0f, "%.1f %.1f %.1f",
+        kSdrWhiteNits, kHdr10PeakNits, kHdr10MaxFallNits);
     CHECK(NitsToPq(0.0f) <= 1e-6f, "%.9f", NitsToPq(0.0f));
     CHECK(Near(NitsToPq(100.0f), 0.508078f, 1e-5f), "%.9f", NitsToPq(100.0f));
     CHECK(Near(NitsToPq(203.0f), 0.580689f, 1e-5f), "%.9f", NitsToPq(203.0f));

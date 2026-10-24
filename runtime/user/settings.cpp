@@ -291,7 +291,7 @@ namespace settings
               .env = "NFSMW_HDR", .defaultValue = 0 },
             { .id = Id::HdrFormat, .category = Category::Display, .type = Type::Enum, .apply = Apply::Live, .hidden = kHdrHidden,
               .table = "video", .key = "hdr_format", .label = "HDR Format",
-              .description = "How HDR is sent. Auto: Extended Linear on a display with EDR headroom, HDR10 otherwise. HDR10 (PQ) can wake a monitor that ignores Extended Linear.",
+              .description = "How HDR is sent. Auto: Extended Linear on a display that reports HDR capability, otherwise standard range. HDR10 (PQ) sends the PQ signal and metadata; the display's HDR mode still follows macOS.",
               .env = "NFSMW_HDR_FORMAT", .defaultValue = 0, .entries = kHdrFormatEntries },
             { .id = Id::Sharpening, .category = Category::Graphics, .type = Type::Float, .apply = Apply::Live,
               .table = "video", .key = "sharpening", .label = "Sharpening",

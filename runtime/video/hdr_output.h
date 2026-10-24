@@ -19,12 +19,13 @@ namespace video::hdr
     }
 
     // v: an SDR value in linear light (0 is black, 1 is SDR white). SDR white
-    // becomes `peak`; the curve is steep (v^6), so shadows and mid-tones stay
-    // where the SDR picture put them and only highlights reach the headroom.
+    // becomes `peak`; the curve is steep (v^8), so shadows and mid-tones stay
+    // where the SDR picture put them and only bright highlights reach the
+    // headroom.
     inline float Expand(float v, float peak)
     {
         v = std::clamp(v, 0.0f, 1.0f);
-        return v + (std::max(peak, 1.0f) - 1.0f) * std::pow(v, 6.0f);
+        return v + (std::max(peak, 1.0f) - 1.0f) * std::pow(v, 8.0f);
     }
 
     // IEC 61966-2-1, the values k/255 of the game's 8-bit picture.
@@ -39,9 +40,55 @@ namespace video::hdr
         return v <= 0.0031308f ? v * 12.92f : 1.055f * std::pow(v, 1.0f / 2.4f) - 0.055f;
     }
 
-    // HDR10's absolute scale: SDR white, and the peak the metadata declares.
+    // HDR10's absolute scale: SDR white, the peak the metadata declares, and
+    // a conservative frame-average light level. 400 nits keeps the game's own
+    // front-end/HUD white from jumping to a display's full EDR range; the
+    // highlight curve still opens above SDR.
     constexpr float kSdrWhiteNits = 100.0f;
-    constexpr float kHdr10PeakNits = 1000.0f;
+    constexpr float kHdr10PeakNits = 400.0f;
+    constexpr float kHdr10MaxFallNits = 100.0f;
+
+    // Rec.709 luma, for expanding light rather than each channel (which would
+    // shift the hue of bright colours).
+    inline float Luma709(float r, float g, float b)
+    {
+        return 0.2126f * r + 0.7152f * g + 0.0722f * b;
+    }
+
+    // Expands an RGB triplet by its Rec.709 luma: the ratio between the
+    // channels stays, so saturation and hue do not move.
+    inline void ExpandRgb(float& r, float& g, float& b, float peak)
+    {
+        r = std::clamp(r, 0.0f, 1.0f);
+        g = std::clamp(g, 0.0f, 1.0f);
+        b = std::clamp(b, 0.0f, 1.0f);
+        const float luma = Luma709(r, g, b);
+        if (luma <= 0.0f)
+            return;
+        const float expanded = Expand(luma, peak);
+        const float scale = expanded / luma;
+        r *= scale;
+        g *= scale;
+        b *= scale;
+    }
+
+    // Linear-light RGB between Rec.709 and Rec.2020 (BT.2087). HDR10's
+    // metadata and PQ signal are BT.2020; the game's SDR colours are Rec.709.
+    inline void Rec709ToRec2020(float& r, float& g, float& b)
+    {
+        const float r0 = r, g0 = g, b0 = b;
+        r = 0.6274040f * r0 + 0.3292820f * g0 + 0.0433136f * b0;
+        g = 0.0690970f * r0 + 0.9195400f * g0 + 0.0113612f * b0;
+        b = 0.0163916f * r0 + 0.0880132f * g0 + 0.8955950f * b0;
+    }
+
+    inline void Rec2020ToRec709(float& r, float& g, float& b)
+    {
+        const float r0 = r, g0 = g, b0 = b;
+        r = 1.6604910f * r0 - 0.5876411f * g0 - 0.0728499f * b0;
+        g = -0.1245505f * r0 + 1.1328999f * g0 - 0.0083494f * b0;
+        b = -0.0181508f * r0 - 0.1005789f * g0 + 1.1187297f * b0;
+    }
 
     // SMPTE ST 2084 (PQ), the transfer function HDR10 uses. Nits are cd/m^2,
     // the PQ code is 0..1.

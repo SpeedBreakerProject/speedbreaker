@@ -56,6 +56,11 @@ namespace platform::macos
     // screen), for HDR Output's highlight range. Main thread.
     float DisplayHeadroom(SDL_Window* window);
 
+    // The screen's potential EDR headroom: what it can show once an EDR layer
+    // is up, even while the current headroom is still 1. 1 without a screen
+    // or on a standard-range display. Main thread.
+    float DisplayPotentialHeadroom(SDL_Window* window);
+
     // Before SDL_DestroyWindow: stops watching the window.
     void ForgetWindow(SDL_Window* window);
 }

@@ -196,6 +196,16 @@ namespace platform::macos
         return headroom > 1.0 ? float(headroom) : 1.0f;
     }
 
+    float DisplayPotentialHeadroom(SDL_Window* window)
+    {
+        NSWindow* w = CocoaWindow(window);
+        NSScreen* screen = w ? w.screen : nil;
+        if (!screen)
+            return 1.0f;
+        const CGFloat headroom = screen.maximumPotentialExtendedDynamicRangeColorComponentValue;
+        return headroom > 1.0 ? float(headroom) : 1.0f;
+    }
+
     void ForgetWindow(SDL_Window*)
     {
         for (id token in s_observers)
