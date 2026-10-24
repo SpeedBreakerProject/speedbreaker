@@ -76,19 +76,25 @@ jobs:
           Write-Host "Contents of ppc directory after generation:"
           Get-ChildItem ppc
 
-      # 4. Configure Main Project CMake using default Visual Studio generator
+      # 4. Install SDL3 using runner's built-in vcpkg
+      - name: Install SDL3 Dependency
+        shell: powershell
+        run: |
+          vcpkg install sdl3:x64-windows
+
+      # 5. Configure Main Project CMake with vcpkg toolchain integration
       - name: Configure Main CMake Project
         shell: powershell
         run: |
           Remove-Item -Recurse -Force build -ErrorAction SilentlyContinue
-          cmake -B build -DCMAKE_BUILD_TYPE=Release
+          cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"
 
-      # 5. Build Main Project rapidly in parallel using all CPU cores
+      # 6. Build Main Project rapidly in parallel using all CPU cores
       - name: Build Main Project with Visual Studio
         shell: powershell
         run: cmake --build build --config Release --parallel
 
-      # 6. Package Artifacts
+      # 7. Package Artifacts
       - name: Prepare Artifacts
         shell: powershell
         run: |
