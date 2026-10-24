@@ -111,7 +111,7 @@ jobs:
             C:\vcpkg\packages
           key: vcpkg-windows-cache-v4
 
-      # 7. Setup Windows Compatibility Layer & PThread Stub for MSVC/Clang on Windows
+      # 7. Setup Windows Compatibility Layer & Robust PThread Win32 Stub
       - name: Patch Windows Compatibility & PThread Stub
         shell: powershell
         run: |
@@ -139,17 +139,80 @@ jobs:
               Write-Host "Successfully prepended Windows headers and ssize_t to win_compat.h"
           }
 
-          # Create a pthread.h compatibility stub inside win compat folder so guest_thread.cpp compiles smoothly
+          # Create a full robust pthread.h Win32 wrapper stub
           $pthreadStubPath = "runtime/compat/win/pthread.h"
           $pthreadStubContent = @"
           #pragma once
           #include <windows.h>
-          typedef struct { int dummy; } pthread_attr_t;
+          #include <process.h>
+
           typedef HANDLE pthread_t;
-          inline int pthread_detach(pthread_t thread) { CloseHandle(thread); return 0; }
+
+          typedef struct {
+              size_t stack_size;
+          } pthread_attr_t;
+
+          inline int pthread_attr_init(pthread_attr_t* attr) {
+              if (!attr) return -1;
+              attr->stack_size = 0;
+              return 0;
+          }
+
+          inline int pthread_attr_destroy(pthread_attr_t* attr) {
+              return 0;
+          }
+
+          inline int pthread_attr_setstacksize(pthread_attr_t* attr, size_t stack_size) {
+              if (!attr) return -1;
+              attr->stack_size = stack_size;
+              return 0;
+          }
+
+          inline int pthread_create(pthread_t* thread, const pthread_attr_t* attr, void* (*start_routine) (void*), void* arg) {
+              if (!thread) return -1;
+              SIZE_T stackSize = (attr && attr->stack_size > 0) ? attr->stack_size : 0;
+              
+              struct Param {
+                  void* (*func)(void*);
+                  void* arg;
+              };
+              Param* p = new Param{start_routine, arg};
+
+              auto winThreadFunc = [](LPVOID lpParam) -> DWORD {
+                  Param* p = static_cast<Param*>(lpParam);
+                  auto func = p->func;
+                  void* arg = p->arg;
+                  delete p;
+                  func(arg);
+                  return 0;
+              };
+
+              HANDLE hThread = CreateThread(NULL, stackSize, winThreadFunc, p, 0, NULL);
+              if (hThread == NULL) {
+                  delete p;
+                  return -1;
+              }
+
+              *thread = hThread;
+              return 0;
+          }
+
+          inline int pthread_join(pthread_t thread, void** retval) {
+              if (WaitForSingleObject(thread, INFINITE) != WAIT_OBJECT_0) {
+                  return -1;
+              }
+              CloseHandle(thread);
+              if (retval) *retval = nullptr;
+              return 0;
+          }
+
+          inline int pthread_detach(pthread_t thread) {
+              CloseHandle(thread);
+              return 0;
+          }
           "@
           Set-Content -Path $pthreadStubPath -Value $pthreadStubContent -Encoding UTF8
-          Write-Host "Successfully created pthread.h compatibility stub."
+          Write-Host "Successfully created robust pthread.h compatibility stub."
 
       # 8. Configure Main Project CMake using Ninja + Clang
       - name: Configure Main CMake Project
