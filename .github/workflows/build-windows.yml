@@ -76,40 +76,16 @@ jobs:
           Write-Host "Contents of ppc directory after generation:"
           Get-ChildItem ppc
 
-      # 4. Download Precompiled FFmpeg & Map Libraries to satisfy CMake static expectations
-      - name: Download Precompiled FFmpeg
-        shell: powershell
-        run: |
-          Invoke-WebRequest -Uri "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip" -OutFile "ffmpeg.zip"
-          Expand-Archive -Path "ffmpeg.zip" -DestinationPath "C:\ffmpeg"
-          $ffmpegFolder = (Get-ChildItem -Path "C:\ffmpeg" -Filter "ffmpeg-*").FullName
-          
-          # Map .lib files to .a files so CMake's static finder picks them up instantly
-          $libDir = "$ffmpegFolder\lib"
-          if (Test-Path "$libDir\avcodec.lib") {
-              Copy-Item "$libDir\avcodec.lib" "$libDir\libavcodec.a" -Force
-              Copy-Item "$libDir\avformat.lib" "$libDir\libavformat.a" -Force
-              Copy-Item "$libDir\avutil.lib" "$libDir\libavutil.a" -Force
-              Copy-Item "$libDir\swscale.lib" "$libDir\libswscale.a" -Force
-              Copy-Item "$libDir\swresample.lib" "$libDir\libswresample.a" -Force
-          }
-          
-          echo "FFMPEG_DIR=$ffmpegFolder" >> $env:GITHUB_ENV
-          echo "FFMPEG_ROOT=$ffmpegFolder" >> $env:GITHUB_ENV
-          Write-Host "Precompiled FFmpeg ready and mapped at: $ffmpegFolder"
-
-      # 5. Cache smaller vcpkg packages (SDL3, Vulkan, glslang)
-      - name: Cache vcpkg Packages
-        uses: actions/cache@v4
+      # 4. Restore vcpkg Cache (Restores instantly if cache exists)
+      - name: Restore vcpkg Cache
+        uses: actions/cache/restore@v4
         with:
           path: |
             C:\vcpkg\installed
             C:\vcpkg\packages
-          key: vcpkg-cache-${{ runner.os }}-no-ffmpeg-v1
-          restore-keys: |
-            vcpkg-cache-${{ runner.os }}-
+          key: vcpkg-windows-cache-v4
 
-      # 6. Install smaller dependencies via vcpkg (No FFmpeg source compilation!)
+      # 5. Install Dependencies via vcpkg (Restores from cache in seconds if hit)
       - name: Install Dependencies
         shell: powershell
         run: |
@@ -119,27 +95,49 @@ jobs:
                         glslang:x64-windows `
                         spirv-tools:x64-windows `
                         spirv-headers:x64-windows `
-                        zlib:x64-windows
+                        zlib:x64-windows `
+                        ffmpeg:x64-windows
 
-      # 7. Configure Main Project CMake with precompiled FFmpeg pointers
+      # 6. Save vcpkg Cache immediately (GUARANTEED to save even if later steps fail!)
+      - name: Save vcpkg Cache
+        uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: |
+            C:\vcpkg\installed
+            C:\vcpkg\packages
+          key: vcpkg-windows-cache-v4
+
+      # 7. Patch runtime/CMakeLists.txt to accept standard Windows FFmpeg library names
+      - name: Patch CMake for Windows FFmpeg
+        shell: powershell
+        run: |
+          $cmakePath = "runtime/CMakeLists.txt"
+          if (Test-Path $cmakePath) {
+              $content = Get-Content $cmakePath -Raw
+              # Replace strict .a static expectations with standard library resolution
+              $content = $content -replace 'libavcodec\.a', 'avcodec'
+              $content = $content -replace 'libavformat\.a', 'avformat'
+              $content = $content -replace 'libavutil\.a', 'avutil'
+              $content = $content -replace 'libswscale\.a', 'swscale'
+              $content = $content -replace 'libswresample\.a', 'swresample'
+              Set-Content $cmakePath $content
+              Write-Host "Successfully patched runtime/CMakeLists.txt for Windows library names."
+          }
+
+      # 8. Configure Main Project CMake with vcpkg toolchain integration
       - name: Configure Main CMake Project
         shell: powershell
         run: |
           Remove-Item -Recurse -Force build -ErrorAction SilentlyContinue
-          $ffmpegPath = (Get-ChildItem -Path "C:\ffmpeg" -Filter "ffmpeg-*").FullName
-          
-          cmake -B build -DCMAKE_BUILD_TYPE=Release `
-            -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" `
-            -DFFMPEG_DIR="$ffmpegPath" `
-            -DFFMPEG_ROOT="$ffmpegPath" `
-            -DFFMPEG_INCLUDE_DIR="$ffmpegPath/include"
+          cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"
 
-      # 8. Build Main Project rapidly in parallel using all CPU cores
+      # 9. Build Main Project rapidly in parallel using all CPU cores
       - name: Build Main Project with Visual Studio
         shell: powershell
         run: cmake --build build --config Release --parallel
 
-      # 9. Package Artifacts
+      # 10. Package Artifacts
       - name: Prepare Artifacts
         shell: powershell
         run: |
