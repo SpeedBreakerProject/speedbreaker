@@ -79,7 +79,7 @@ jobs:
           Write-Host "Contents of ppc directory after generation:"
           Get-ChildItem ppc
 
-      # 4. Restore vcpkg Cache (Restores in seconds)
+      # 4. Restore vcpkg Cache
       - name: Restore vcpkg Cache
         uses: actions/cache/restore@v4
         with:
@@ -111,7 +111,7 @@ jobs:
             C:\vcpkg\packages
           key: vcpkg-windows-cache-v4
 
-      # 7. Configure Main Project CMake using Clang-CL
+      # 7. Configure Main Project CMake with ClangCL toolset
       - name: Configure Main CMake Project
         shell: powershell
         run: |
@@ -119,8 +119,7 @@ jobs:
           $vcpkgInstalled = "$env:VCPKG_INSTALLATION_ROOT\installed\x64-windows"
           
           cmake -B build -DCMAKE_BUILD_TYPE=Release `
-            -DCMAKE_C_COMPILER=clang-cl `
-            -DCMAKE_CXX_COMPILER=clang-cl `
+            -T ClangCL `
             -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" `
             -DFFMPEG_DIR="$vcpkgInstalled" `
             -DFFMPEG_INCLUDE_DIR="$vcpkgInstalled/include" `
