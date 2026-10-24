@@ -294,6 +294,75 @@ jobs:
           Set-Content -Path $unistdStubPath -Value $unistdStubContent -Encoding UTF8
           Write-Host "Successfully created unistd.h compatibility stub."
 
+          # Add the missing POSIX file-lock header using Win32 file locking.
+          New-Item -ItemType Directory -Force -Path "runtime/compat/win/sys" | Out-Null
+          $fileLockHeader = @"
+          #pragma once
+          #include <windows.h>
+          #include <io.h>
+          #include <errno.h>
+          #define LOCK_SH 1
+          #define LOCK_EX 2
+          #define LOCK_NB 4
+          #define LOCK_UN 8
+          inline int flock(int fd, int operation) {
+              intptr_t raw = _get_osfhandle(fd);
+              if (raw == -1) { errno = EBADF; return -1; }
+              HANDLE h = reinterpret_cast<HANDLE>(raw);
+              OVERLAPPED ov = {};
+              if (operation & LOCK_UN) {
+                  if (UnlockFileEx(h, 0, 1, 0, &ov)) return 0;
+                  errno = EINVAL; return -1;
+              }
+              DWORD flags = (operation & LOCK_EX) ? LOCKFILE_EXCLUSIVE_LOCK : 0;
+              if (operation & LOCK_NB) flags |= LOCKFILE_FAIL_IMMEDIATELY;
+              if (LockFileEx(h, flags, 0, 1, 0, &ov)) return 0;
+              DWORD e = GetLastError();
+              errno = (e == ERROR_LOCK_VIOLATION) ? EWOULDBLOCK : EINVAL;
+              return -1;
+          }
+          "@
+          Set-Content -Path "runtime/compat/win/sys/file.h" -Value $fileLockHeader -Encoding UTF8
+
+          # Windows disk-space query for installer/statvfs use.
+          $statvfsHeader = @"
+          #pragma once
+          #include <windows.h>
+          #include <stdint.h>
+          struct statvfs { uint64_t f_bavail; uint64_t f_frsize; };
+          inline int statvfs(const wchar_t* path, struct statvfs* out) {
+              ULARGE_INTEGER available = {};
+              ULARGE_INTEGER total = {};
+              ULARGE_INTEGER freeBytes = {};
+              if (!GetDiskFreeSpaceExW(path, &available, &total, &freeBytes)) return -1;
+              out->f_bavail = available.QuadPart;
+              out->f_frsize = 1;
+              return 0;
+          }
+          "@
+          Set-Content -Path "runtime/compat/win/sys/statvfs.h" -Value $statvfsHeader -Encoding UTF8
+
+          # Windows SDK defines these names as macros; rename the local HID constants.
+          $inputPath = "runtime/hid/input.cpp"
+          $inputContent = Get-Content $inputPath -Raw
+          $inputContent = $inputContent.Replace("ERROR_SUCCESS", "HID_ERROR_SUCCESS")
+          $inputContent = $inputContent.Replace("ERROR_DEVICE_NOT_CONNECTED", "HID_ERROR_DEVICE_NOT_CONNECTED")
+          Set-Content -Path $inputPath -Value $inputContent -Encoding UTF8
+
+          # off_t is 32-bit in the Windows CRT; Windows file APIs provide 64-bit offsets.
+          $discPath = "runtime/install/disc_source.cpp"
+          $discContent = Get-Content $discPath -Raw
+          $discContent = $discContent -replace '(?m)^(\s*)static_assert\(sizeof\(off_t\) == 8, "large file offsets are required"\);', '#ifndef _WIN32' + "`r`n" + '$1static_assert(sizeof(off_t) == 8, "large file offsets are required");' + "`r`n" + '#endif'
+          Set-Content -Path $discPath -Value $discContent -Encoding UTF8
+
+          # CPU-time clock ID is not defined by the Windows SDK. Use the available monotonic clock ID.
+          $rendererPath = "runtime/gpu/renderer.cpp"
+          $rendererContent = Get-Content $rendererPath -Raw
+          if ($rendererContent -notmatch 'CLOCK_THREAD_CPUTIME_ID') { throw "Expected clock call not found in renderer.cpp" }
+          $rendererContent = $rendererContent.Replace('CLOCK_THREAD_CPUTIME_ID', 'CLOCK_MONOTONIC')
+          Set-Content -Path $rendererPath -Value $rendererContent -Encoding UTF8
+          Write-Host "Applied Windows portability patches for installer locking, statvfs, HID macro names, off_t assertion, and renderer clock."
+
       # 8. Configure Main Project CMake using Ninja + Clang
       - name: Configure Main CMake Project
         shell: powershell
