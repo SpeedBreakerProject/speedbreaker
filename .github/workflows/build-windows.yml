@@ -76,11 +76,11 @@ jobs:
           Write-Host "Contents of ppc directory after generation:"
           Get-ChildItem ppc
 
-      # 4. Install SDL3 using runner's built-in vcpkg
-      - name: Install SDL3 Dependency
+      # 4. Install SDL3 & Vulkan Dependencies using runner's built-in vcpkg
+      - name: Install SDL3 & Vulkan Dependencies
         shell: powershell
         run: |
-          vcpkg install sdl3:x64-windows
+          vcpkg install sdl3:x64-windows vulkan-headers:x64-windows vulkan-loader:x64-windows
 
       # 5. Configure Main Project CMake with vcpkg toolchain integration
       - name: Configure Main CMake Project
