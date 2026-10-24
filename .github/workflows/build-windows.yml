@@ -120,11 +120,11 @@ jobs:
           restore-keys: |
             cmake-build-cache-${{ runner.os }}-
 
-      # 8. Patch Windows compatibility headers and types robustly
-      - name: Patch Windows Compatibility Headers
+      # 8. Forcefully patch win_compat.h and guest_thread.h for native Windows compilation
+      - name: Patch Windows Compatibility & Threads
         shell: powershell
         run: |
-          # Patch win_compat.h
+          # 1. Fix win_compat.h (Ensure ssize_t, unistd, and Windows types exist)
           $winCompatPath = "runtime/compat/win/win_compat.h"
           if (Test-Path $winCompatPath) {
               $content = Get-Content $winCompatPath -Raw
@@ -132,19 +132,21 @@ jobs:
               $content = $content -replace '#include <pthread.h>', "// #include <pthread.h>"
               
               if ($content -notmatch "ssize_t") {
-                  $content = "#include <windows.h>`n#ifndef _SSIZE_T_DEFINED`n#define _SSIZE_T_DEFINED`ntypedef intptr_t ssize_t;`n#endif`n`n" + $content
+                  $headerInject = "#include <windows.h>`n#include <stdint.h>`n#ifndef _SSIZE_T_DEFINED`n#define _SSIZE_T_DEFINED`ntypedef intptr_t ssize_t;`n#endif`n`n"
+                  $content = $headerInject + $content
               }
-              Set-Content $winCompatPath $content
-              Write-Host "Patched win_compat.h successfully."
+              Set-Content -Path $winCompatPath -Value $content -Encoding UTF8
+              Write-Host "Successfully force-patched win_compat.h"
           }
 
-          # Patch guest_thread.h to remove pthread dependency on Windows
+          # 2. Fix guest_thread.h (Replace pthread_t with HANDLE for Windows)
           $guestThreadPath = "runtime/cpu/guest_thread.h"
           if (Test-Path $guestThreadPath) {
               $gtContent = Get-Content $guestThreadPath -Raw
               $gtContent = $gtContent -replace '#include <pthread.h>', "#include <windows.h>"
-              Set-Content $guestThreadPath $gtContent
-              Write-Host "Patched guest_thread.h successfully."
+              $gtContent = $gtContent -replace 'pthread_t\s+thread;', "HANDLE thread;"
+              Set-Content -Path $guestThreadPath -Value $gtContent -Encoding UTF8
+              Write-Host "Successfully force-patched guest_thread.h"
           }
 
       # 9. Configure Main Project CMake using Ninja + Clang
@@ -171,7 +173,7 @@ jobs:
             -DSWSCALE_LIBRARY="$vcpkgInstalled/lib/swscale.lib" `
             -DSWRESAMPLE_LIBRARY="$vcpkgInstalled/lib/swresample.lib"
 
-      # 10. Build Main Project with Ninja (Incrementally finishes remaining 30%)
+      # 10. Build Main Project with Ninja (Incrementally finishes remaining objects)
       - name: Build Main Project with Ninja
         shell: powershell
         run: cmake --build build --parallel
