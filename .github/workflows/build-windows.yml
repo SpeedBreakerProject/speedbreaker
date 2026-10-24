@@ -76,7 +76,28 @@ jobs:
           Write-Host "Contents of ppc directory after generation:"
           Get-ChildItem ppc
 
-      # 4. Install All Required Dependencies using vcpkg (including FFmpeg)
+      # 4. Download Precompiled FFmpeg (takes seconds instead of half an hour)
+      - name: Download Precompiled FFmpeg
+        shell: powershell
+        run: |
+          Invoke-WebRequest -Uri "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip" -OutFile "ffmpeg.zip"
+          Expand-Archive -Path "ffmpeg.zip" -DestinationPath "C:\ffmpeg"
+          $ffmpegFolder = (Get-ChildItem -Path "C:\ffmpeg" -Filter "ffmpeg-*").FullName
+          echo "FFMPEG_DIR=$ffmpegFolder" >> $env:GITHUB_ENV
+          Write-Host "Precompiled FFmpeg ready at: $ffmpegFolder"
+
+      # 5. Cache smaller vcpkg packages (SDL3, Vulkan, glslang)
+      - name: Cache vcpkg Packages
+        uses: actions/cache@v4
+        with:
+          path: |
+            C:\vcpkg\installed
+            C:\vcpkg\packages
+          key: vcpkg-cache-${{ runner.os }}-sdl3-vulkan-v1
+          restore-keys: |
+            vcpkg-cache-${{ runner.os }}-
+
+      # 6. Install smaller dependencies via vcpkg (no ffmpeg compilation!)
       - name: Install Dependencies
         shell: powershell
         run: |
@@ -86,22 +107,23 @@ jobs:
                         glslang:x64-windows `
                         spirv-tools:x64-windows `
                         spirv-headers:x64-windows `
-                        zlib:x64-windows `
-                        ffmpeg:x64-windows
+                        zlib:x64-windows
 
-      # 5. Configure Main Project CMake with vcpkg toolchain integration
+      # 7. Configure Main Project CMake with vcpkg and precompiled FFmpeg pointer
       - name: Configure Main CMake Project
         shell: powershell
         run: |
           Remove-Item -Recurse -Force build -ErrorAction SilentlyContinue
-          cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"
+          cmake -B build -DCMAKE_BUILD_TYPE=Release `
+            -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" `
+            -DFFMPEG_DIR="$env:FFMPEG_DIR"
 
-      # 6. Build Main Project rapidly in parallel using all CPU cores
+      # 8. Build Main Project rapidly in parallel using all CPU cores
       - name: Build Main Project with Visual Studio
         shell: powershell
         run: cmake --build build --config Release --parallel
 
-      # 7. Package Artifacts
+      # 9. Package Artifacts
       - name: Prepare Artifacts
         shell: powershell
         run: |
