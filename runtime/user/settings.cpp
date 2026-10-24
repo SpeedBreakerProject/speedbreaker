@@ -287,7 +287,7 @@ namespace settings
               .env = "NFSMW_DISPLAY_GAMMA", .defaultValue = 1 },
             { .id = Id::Hdr, .category = Category::Display, .type = Type::Bool, .apply = Apply::Live, .hidden = kHdrHidden,
               .table = "video", .key = "hdr", .label = "HDR Output",
-              .description = "Brighter highlights on an HDR display (extended dynamic range). The menus stay at standard brightness. Off: the standard-range picture.",
+              .description = "Brighter highlights on an HDR display (extended dynamic range). The game's own picture, including its front end, follows the highlights; this settings overlay stays at standard brightness. Off: the standard-range picture.",
               .env = "NFSMW_HDR", .defaultValue = 0 },
             { .id = Id::HdrFormat, .category = Category::Display, .type = Type::Enum, .apply = Apply::Live, .hidden = kHdrHidden,
               .table = "video", .key = "hdr_format", .label = "HDR Format",
