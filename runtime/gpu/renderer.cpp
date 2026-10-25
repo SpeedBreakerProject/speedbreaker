@@ -141,6 +141,7 @@ namespace gpu::renderer
         }();
         uint32_t s_shadowResolveTraceCount = 0;
         std::unordered_set<uint64_t> s_shadowSampleTraceStates;
+        std::unordered_set<uint64_t> s_shadowTextureTraceStates;
         // Fewer render passes and texture reloads (NFSMW_PASS_MERGE,
         // NFSMW_CLEAR_FLUSH_RECT, NFSMW_DIRECT_CUBE, NFSMW_FUSE_PARTIAL): on
         // by default where passes cost most, the tile GPUs: under MoltenVK
@@ -4907,6 +4908,29 @@ void main()
                         cube ? VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT : 0, t.levels);
             }
             Texture& t = *slotRef;
+            if (s_traceShadowScale && !cube && !volume && format == 22 && width == 1600 && height == 1600 &&
+                maxLevel == 0 && s_shadowTextureTraceStates.size() < 32)
+            {
+                uint64_t traceKey = base;
+                auto mix = [&](uint64_t value) { traceKey ^= value + 0x9E3779B97F4A7C15ull + (traceKey << 6) + (traceKey >> 2); };
+                mix(uint64_t(s_shadowScale.x.num) << 48 | uint64_t(s_shadowScale.x.den) << 32 |
+                    uint64_t(s_shadowScale.y.num) << 16 | uint64_t(s_shadowScale.y.den));
+                mix(uint64_t(scaled));
+                mix(uint64_t(scaledCandidate));
+                if (s_shadowTextureTraceStates.insert(traceKey).second)
+                {
+                    const char* reason = scaled ? "scaled texture selected"
+                        : !s_drawScaled ? "draw is not using a scaled target"
+                        : !s_scaled.enabled ? "scaled memory unavailable"
+                        : !scaledCandidate ? "texture is not a scaled candidate"
+                        : "no current scaled copy";
+                    fprintf(stderr, "[shadow-scale] texture lookup base %08X: %s; candidate %s, draw-scaled %s, "
+                        "scaled memory %s, guest %ux%u, selected %s %ux%u (tiled %u pitch %u endian %u swizzle %03X)\n",
+                        base, reason, scaledCandidate ? "yes" : "no", s_drawScaled ? "yes" : "no",
+                        s_scaled.enabled ? "enabled" : "disabled", width, height, t.scaled ? "scaled" : "1x",
+                        t.width, t.height, uint32_t(f.tiled), pitchTexels, uint32_t(f.endianness), f.swizzle);
+                }
+            }
             {
                 // No page written anywhere since the last check: still valid
                 // (a draw binds ~7,500 textures a frame; writes are rare).
@@ -8091,6 +8115,7 @@ void main()
             {
                 s_shadowResolveTraceCount = 0;
                 s_shadowSampleTraceStates.clear();
+                s_shadowTextureTraceStates.clear();
                 fprintf(stderr, "[shadow-scale] internal %s -> %s; shadow scale %s\n",
                     gpu::ScaleName(old).c_str(), gpu::ScaleName(scale).c_str(), gpu::ScaleName(s_shadowScale).c_str());
             }

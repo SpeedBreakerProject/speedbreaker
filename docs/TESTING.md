@@ -129,10 +129,13 @@ between their GPU timestamps and are not exclusive shader-core time; compare
 them across runs with the same route, settings, and capture duration.
 
 To verify shadow-resolution scaling, launch with `NFSMW_TRACE_SHADOW_SCALE=1`.
-The `[shadow-scale]` lines distinguish eligible full-map resolves, registration
-of a resolved image, and subsequent sampling from the scaled target versus
-fallback to the guest-memory copy (with the failed condition). The trace is
-off by default and reports distinct states as the scale changes. For a useful
+The `[shadow-scale]` lines report full-map resolve eligibility, direct
+depth-target sampling, and the later generic texture-cache lookup. The
+`texture lookup` line says whether the scaled cached texture or the 1x texture
+was selected, its dimensions, and why scaling was unavailable when applicable.
+`sample fallback` only means direct depth-target sampling was not used; it does
+not by itself mean the selected cached texture is 1x. The trace is off by
+default and reports distinct states as the scale changes. For a useful
 comparison, start in a scene with visible shadows, then try 1x and 2x Internal
 Resolution and attach `last-run.log`.
 
