@@ -11,13 +11,30 @@ function(sb_test name)
     add_executable(${name} ${CMAKE_CURRENT_SOURCE_DIR}/${name}.cpp ${T_SOURCES})
     target_include_directories(${name} PRIVATE ${RT})
     target_link_libraries(${name} PRIVATE Threads::Threads)
-    target_compile_options(${name} PRIVATE -O2 -UNDEBUG)
+    if(SB_MSVC_FRONTEND)
+        target_compile_options(${name} PRIVATE /O2 -UNDEBUG)
+    else()
+        target_compile_options(${name} PRIVATE -O2 -UNDEBUG)
+    endif()
     add_test(NAME ${name} COMMAND ${name} ${T_ARGS})
 endfunction()
+
+# user/settings.cpp makes its file calls through the platform layer
+# (platform/file_io.h, the Windows port's): each test that links it links
+# that layer as well (Windows: its folders too, with their system libraries).
+if(WIN32)
+    set(SB_SETTINGS_SOURCES ${RT}/user/settings.cpp ${RT}/platform/win32/file_io.cpp ${RT}/platform/win32/folders.cpp)
+    set(SB_SETTINGS_LIBS shell32 ole32)
+else()
+    set(SB_SETTINGS_SOURCES ${RT}/user/settings.cpp ${RT}/platform/posix/file_io.cpp)
+    set(SB_SETTINGS_LIBS)
+endif()
 
 sb_test(block_ranges_test)
 # Where guest memory and the upload ring go (gpu/memory_plan.h, header only).
 sb_test(memory_plan_test)
+# A discrete GPU's PCIe link for the logs (gpu/pcie_link.h, header only; issue #40).
+sb_test(pcie_link_test)
 sb_test(zpd_report_test)
 # The resolve shader's 24-bit depth pack (gpu/depth24_glsl.h), header only;
 # renderer.cpp is read to check its resolve shader uses it.
@@ -60,6 +77,10 @@ sb_test(covers_test)
 # line that says so (gpu/pipeline_cache_header.h, header only).
 sb_test(pipeline_cache_header_test)
 sb_test(picture_fit_test SOURCES ${RT}/video/picture_fit.cpp)
+# GitHub #34's native rows and columns (video::NativeShape, AutoNativeScale):
+# a Steam Deck's 1280x800 at 1x renders 1280x800, 16:9 pictures keep their
+# scale exactly, Auto takes the native shape within its budget.
+sb_test(native_rows_test SOURCES ${RT}/video/picture_fit.cpp)
 # Which Vulkan device the presenter draws with, and its log line
 # (video/gpu_choice.h, header only).
 sb_test(gpu_choice_test)
@@ -93,7 +114,8 @@ endif()
 # Upscaling's values in settings.toml (user/settings.cpp as the game links
 # it): "fsr1" read, saved and read back, the environment's override, an
 # unknown value; in a scratch folder.
-sb_test(settings_scaling_test SOURCES ${RT}/user/settings.cpp ARGS ${CMAKE_CURRENT_BINARY_DIR}/settings_scaling_scratch)
+sb_test(settings_scaling_test SOURCES ${SB_SETTINGS_SOURCES} ARGS ${CMAKE_CURRENT_BINARY_DIR}/settings_scaling_scratch)
+target_link_libraries(settings_scaling_test PRIVATE ${SB_SETTINGS_LIBS})
 # Internal Resolution Auto's budget on iPhones and iPads, chip by chip
 # (video/scale_budget.cpp), and the scale it makes on the phones' screens.
 sb_test(scale_budget_test SOURCES ${RT}/video/scale_budget.cpp ${RT}/video/picture_fit.cpp)
@@ -106,13 +128,24 @@ sb_test(display_tone_test ARGS ${RT}/video/presenter.cpp ${RT}/user/settings.cpp
 # The display's refresh measured from present completions, at 60 Hz and at
 # whole multiples of it (video/refresh_fit.cpp, video/refresh_multiple.h).
 sb_test(refresh_fit_test SOURCES ${RT}/video/refresh_fit.cpp)
+# The [perf] "repeated" count in the panel's own refreshes (video/repeats.h,
+# header only; the Windows presenter's).
+sb_test(repeats_test)
 # The one-time notice on a screen whose rate 60 fps can't divide evenly (90,
 # 144, 165 Hz): when it shows (variable refresh, Game Mode, a Mac's ProMotion,
 # dismissed, the moment), its words, the grid check under it, and the
 # dismissal in settings.toml, in a scratch folder (video/refresh_notice.h,
 # user/settings.cpp).
-sb_test(refresh_notice_test SOURCES ${RT}/video/refresh_fit.cpp ${RT}/user/settings.cpp
+sb_test(refresh_notice_test SOURCES ${RT}/video/refresh_fit.cpp ${SB_SETTINGS_SOURCES}
     ARGS ${CMAKE_CURRENT_BINARY_DIR}/refresh_notice_scratch)
+target_link_libraries(refresh_notice_test PRIVATE ${SB_SETTINGS_LIBS})
+# The one-time note that an Xbox controller by USB on a Mac takes no rumble
+# (hid/rumble_note.h): a wired Xbox pad on a Mac gets it once, a DualSense
+# wired, an Xbox pad over Bluetooth and other platforms never; the dismissal
+# in settings.toml, in a scratch folder (user/settings.cpp).
+sb_test(rumble_note_test SOURCES ${SB_SETTINGS_SOURCES}
+    ARGS ${CMAKE_CURRENT_BINARY_DIR}/rumble_note_scratch)
+target_link_libraries(rumble_note_test PRIVATE ${SB_SETTINGS_LIBS})
 # How late the guest vblank's thread wakes on this machine, alone and with
 # every core busy (video/vblank_timer.cpp; checked on macOS, where its
 # scheduling changed in v0.1.4).
@@ -159,6 +192,9 @@ sb_test(hfr_blend_test)
 sb_test(hfr_schedule_test)
 sb_test(hfr_grid_test)
 sb_test(guest_time_test SOURCES ${RT}/cpu/guest_time.cpp)
+if(WIN32)
+    target_link_libraries(guest_time_test PRIVATE winmm)  # timeBeginPeriod
+endif()
 # When the mouse cursor shows over the game (ui/cursor_idle.h, header only),
 # and how ui.cpp drives it.
 sb_test(cursor_idle_test ARGS ${RT}/ui/ui.cpp)
@@ -170,15 +206,50 @@ if(Python3_FOUND)
         ${CMAKE_CURRENT_BINARY_DIR}/report_zip_out)
     set_tests_properties(report_zip_check PROPERTIES DEPENDS report_zip_test)
 endif()
+# Crash and hang reports: which symbols are recompiled functions, and the
+# home folder scrubbed from a bug report (both header only).
+sb_test(symbol_names_test)
+sb_test(scrub_test)
+if(WIN32)
+    # Windows' stacks and names (platform/stack.h: DbgHelp, StackWalk64,
+    # another thread's stack), against this test's own PDB: its main file
+    # with debug information, and a file of functions shaped as the
+    # recompiled ones without any, as ppc/ is built.
+    sb_test(win_stack_test SOURCES ${RT}/platform/win32/stack.cpp ${CMAKE_CURRENT_SOURCE_DIR}/win_stack_test_guest.cpp)
+    set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/win_stack_test.cpp ${RT}/platform/win32/stack.cpp PROPERTIES
+        COMPILE_OPTIONS /Z7)
+    target_link_options(win_stack_test PRIVATE /DEBUG /OPT:REF /OPT:NOICF)
+    target_link_libraries(win_stack_test PRIVATE dbghelp)
+endif()
+# Where the per-user folders go, and the platform layer's file calls.
+sb_test(paths_test)
+if(WIN32)
+    sb_test(file_io_test SOURCES ${RT}/platform/win32/file_io.cpp ARGS ${CMAKE_CURRENT_BINARY_DIR}/file_io_out)
+    target_sources(paths_test PRIVATE ${RT}/platform/win32/folders.cpp)
+    target_link_libraries(paths_test PRIVATE shell32 ole32)
+else()
+    sb_test(file_io_test SOURCES ${RT}/platform/posix/file_io.cpp ARGS ${CMAKE_CURRENT_BINARY_DIR}/file_io_out)
+endif()
+# Settings: a device's own defaults, before and after Load.
+if(WIN32)
+    sb_test(settings_test SOURCES ${RT}/user/settings.cpp ${RT}/platform/win32/file_io.cpp ${RT}/platform/win32/folders.cpp
+        ARGS ${CMAKE_CURRENT_BINARY_DIR}/settings_out)
+    target_link_libraries(settings_test PRIVATE shell32 ole32)
+else()
+    sb_test(settings_test SOURCES ${RT}/user/settings.cpp ${RT}/platform/posix/file_io.cpp
+        ARGS ${CMAKE_CURRENT_BINARY_DIR}/settings_out)
+endif()
+target_include_directories(settings_test SYSTEM PRIVATE ${ROOT}/tools/XenonRecomp/thirdparty/tomlplusplus/include)
 # "Choose a folder..." in the installer (install/placement.h): where the game
 # goes in a picked folder and what is refused, on planted facts and in a
-# scratch folder with a sandbox HOME. POSIX only (mkdtemp, chmod, ACLs and
+# scratch folder with a sandbox HOME (the installer's file calls through the
+# platform layer, platform/file_io.h). POSIX only (mkdtemp, chmod, ACLs and
 # links in its disk checks); the screen hides the entry on Windows until
 # placement.cpp is ported there.
 if(NOT WIN32)
     sb_test(install_folder_test SOURCES ${RT}/install/placement.cpp ${RT}/install/installer.cpp ${RT}/install/locate.cpp
         ${RT}/install/manifest.cpp ${RT}/install/result.cpp ${RT}/install/disc_source.cpp ${RT}/install/sha256.cpp
-        ${RT}/user/portable.cpp
+        ${RT}/user/portable.cpp ${RT}/platform/posix/file_io.cpp
         ARGS ${CMAKE_BINARY_DIR}/install_folder_scratch)  # not beside the test: that's its "own folder", refused
     # Portable mode (user/portable.h) and --portable on|off
     # (install/portable_switch.h): the layout, the records that move with
@@ -186,7 +257,7 @@ if(NOT WIN32)
     # the copies (a stand-in copies the game), in a scratch folder.
     sb_test(portable_test SOURCES ${RT}/user/portable.cpp ${RT}/install/portable_switch.cpp ${RT}/install/placement.cpp
         ${RT}/install/installer.cpp ${RT}/install/locate.cpp ${RT}/install/manifest.cpp ${RT}/install/result.cpp
-        ${RT}/install/disc_source.cpp ${RT}/install/sha256.cpp
+        ${RT}/install/disc_source.cpp ${RT}/install/sha256.cpp ${RT}/platform/posix/file_io.cpp
         ARGS ${CMAKE_BINARY_DIR}/portable_scratch)
     if(APPLE AND NOT IOS)
         target_link_libraries(install_folder_test PRIVATE "-framework CoreFoundation")  # placement.cpp's iCloud check
@@ -228,8 +299,15 @@ set_target_properties(key_names_test PROPERTIES SKIP_BUILD_RPATH OFF)
 # The Key options (Settings > Controls): the table, the [keys] names in the
 # file, and what Set accepts (user/settings.cpp and the toml++ XenonRecomp
 # vendors; no SDL).
-sb_test(settings_keys_test SOURCES ${RT}/user/settings.cpp)
+sb_test(settings_keys_test SOURCES ${SB_SETTINGS_SOURCES})
+target_link_libraries(settings_keys_test PRIVATE ${SB_SETTINGS_LIBS})
 target_include_directories(settings_keys_test SYSTEM PRIVATE ${ROOT}/tools/XenonRecomp/thirdparty/tomlplusplus/include)
+# Settings > Game > Language (game/language.h, header only, and the option in
+# user/settings.cpp): English untouched for every caller, the game's ten
+# languages, the movie suffix by the files present, what the files give.
+sb_test(language_test SOURCES ${SB_SETTINGS_SOURCES})
+target_link_libraries(language_test PRIVATE ${SB_SETTINGS_LIBS})
+target_include_directories(language_test SYSTEM PRIVATE ${ROOT}/tools/XenonRecomp/thirdparty/tomlplusplus/include)
 # The keyboard's controls and how held keys become a pad (hid/key_map.h), header only.
 sb_test(key_map_test)
 # A USB steering wheel as the pad (hid/wheel_map.h, header only): which
@@ -260,7 +338,7 @@ endif()
 # Performance Tuning labels, GitHub issue #8) as the guest dispatches them.
 sb_test(switch_tables_test ARGS ${ROOT}/config/switch_tables.toml ${ROOT}/config/nfsmw.toml)
 # The write watch around CPU write faults, on physical memory mapped as the
-# runtime maps it.
+# runtime maps it (three windows of one shared object).
 sb_test(write_watch_test SOURCES ${RT}/kernel/write_watch.cpp ${RT}/cpu/guest_time.cpp)
 target_include_directories(write_watch_test PRIVATE ${RT}/kernel ${RT}/thirdparty/o1heap ${ROOT}/ppc
     ${ROOT}/tools/XenonRecomp/XenonUtils ${ROOT}/tools/XenonRecomp/thirdparty/simde)
@@ -268,9 +346,17 @@ target_include_directories(write_watch_test PRIVATE ${RT}/kernel ${RT}/thirdpart
 # (16 KB on Apple): only whole host pages remapped, so a 4 KB-page heap's
 # neighbouring allocation in the same host page survives (kernel/vmem.cpp; the
 # host page size injected, so 16 and 64 KB are checked on any host).
+if(NOT WIN32)  # POSIX mappings; Windows' host pages are 4 KB (guest pages)
 sb_test(vmem_host_pages_test SOURCES ${RT}/kernel/vmem.cpp)
 target_include_directories(vmem_host_pages_test PRIVATE ${RT}/kernel ${RT}/thirdparty/o1heap ${ROOT}/ppc
     ${ROOT}/tools/XenonRecomp/XenonUtils ${ROOT}/tools/XenonRecomp/thirdparty/simde)
+endif()
+if(WIN32)
+    # The mirrors (platform/win32/memory.cpp) and the page protection.
+    target_sources(write_watch_test PRIVATE ${RT}/platform/win32/memory.cpp ${RT}/platform/win32/os.cpp)
+    # The process-wide settings main makes first (platform/startup.h).
+    sb_test(startup_test SOURCES ${RT}/platform/win32/startup.cpp)
+endif()
 # The guest vblank lock's closed-loop simulation (a tool more than a test).
 add_executable(vblank_lock_sim ${CMAKE_CURRENT_SOURCE_DIR}/vblank_lock_sim.cpp ${RT}/video/refresh_fit.cpp ${RT}/video/vblank_lock.cpp)
 target_include_directories(vblank_lock_sim PRIVATE ${RT})

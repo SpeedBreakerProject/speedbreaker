@@ -1,0 +1,38 @@
+{
+    "version": 3,
+    "cmakeMinimumRequired": {
+        "major": 3,
+        "minor": 21,
+        "patch": 0
+    },
+    "configurePresets": [
+        {
+            "name": "windows-clang",
+            "displayName": "Windows x64: clang-cl, lld-link, static CRT, Release",
+            "description": "From a vcvars64 environment (MSVC's headers and libraries, the Windows SDK, rc.exe) with LLVM's clang-cl 19 or newer on PATH; CMake takes lld-link and llvm-lib from clang-cl's folder. Pass the dependency prefix (SDL3, glslang, FFmpeg-XMA, all /MT): -DCMAKE_PREFIX_PATH=<prefix> -DFFMPEG_XMA=<prefix>.",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/build/windows",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release",
+                "CMAKE_C_COMPILER": "clang-cl",
+                "CMAKE_CXX_COMPILER": "clang-cl"
+            },
+            "condition": {
+                "type": "equals",
+                "lhs": "${hostSystemName}",
+                "rhs": "Windows"
+            }
+        },
+        {
+            "name": "windows-clang-tester",
+            "inherits": "windows-clang",
+            "displayName": "Windows x64 beta for testers: no console window, labelled",
+            "description": "windows-clang for builds that go to testers (scripts/windows/make_zip.py): linked for the Windows subsystem (no console window; the session log has everything) and labelled, so logs, Settings > Advanced and bug-report names say 'SpeedBreaker v<version> Windows beta <date> (<commit>)'.",
+            "binaryDir": "${sourceDir}/build/windows-tester",
+            "cacheVariables": {
+                "SB_WINDOWS_GUI": "ON",
+                "SB_BUILD_LABEL": "Windows beta"
+            }
+        }
+    ]
+}

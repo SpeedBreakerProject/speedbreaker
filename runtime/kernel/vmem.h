@@ -44,7 +44,7 @@ namespace vmem
     // Remaps [host, host+bytes) to fresh zero-filled pages: whole host pages,
     // an address and length aligned to them. False when it failed.
     using RemapFn = bool (*)(void* host, size_t bytes);
-    bool RemapAnon(void* host, size_t bytes);  // mmap(MAP_FIXED | MAP_ANON | MAP_PRIVATE)
+    bool RemapAnon(void* host, size_t bytes);  // mmap(MAP_FIXED | MAP_ANON | MAP_PRIVATE); Windows: decommit + commit
     // Returns [host, host+bytes) to zero: the whole host pages (`hostPage`, a
     // power of two) inside it remapped (lazy and cheap even for hundreds of
     // megabytes; cleared in place if that fails), the partial head and tail

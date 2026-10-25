@@ -24,7 +24,15 @@
 // keeps its crash marker, and the next launch logs that it ended without
 // quitting.
 //
-// Header only (tests/clean_exit_test.cpp).
+// Windows has no sigaction and no SIGHUP, and nothing there sends SIGTERM:
+// its C runtime turns Ctrl+C in the console into SIGINT and Ctrl+Break into
+// SIGBREAK, which a console build (the development one) catches here. The
+// Windows-subsystem build (the testers') has no console, so its clean ends
+// are the window's: the close button, Alt+F4 and Quit Game (SDL's quit
+// event). A session Windows ends without asking it, or Task Manager's End
+// task, keeps its crash marker, as SIGKILL's does.
+//
+// Header only (tests/clean_exit_test.cpp, POSIX only).
 #pragma once
 #include <atomic>
 #include <csignal>
@@ -40,9 +48,29 @@ namespace quitsignals
         {
             int none = 0;
             g_requested.compare_exchange_strong(none, sig, std::memory_order_relaxed);
+#ifdef _WIN32
+            // The C runtime resets a signal to its default before calling
+            // the handler: another Ctrl+C while quitting changes nothing, as
+            // elsewhere.
+            std::signal(sig, Handle);
+#endif
         }
     }
 
+#ifdef _WIN32
+    // The signals a player ends a console build with (the C runtime's).
+    inline constexpr int kSignals[] = { SIGINT, SIGBREAK };
+
+    // Main thread, before SDL starts (video::Initialize).
+    inline void Install()
+    {
+        for (int sig : kSignals)
+        {
+            if (std::signal(sig, detail::Handle) == SIG_IGN)
+                std::signal(sig, SIG_IGN);  // ignored at the start: it stays so
+        }
+    }
+#else
     // The signals a player or the system ends the game with.
     inline constexpr int kSignals[] = { SIGTERM, SIGINT, SIGHUP };
 
@@ -63,6 +91,7 @@ namespace quitsignals
             sigaction(sig, &sa, nullptr);
         }
     }
+#endif
 
     // The signal that asked the game to quit, 0 if none has. Any thread.
     inline int Requested()
@@ -77,7 +106,11 @@ namespace quitsignals
         {
         case SIGTERM: return "SIGTERM";
         case SIGINT: return "SIGINT";
+#ifdef _WIN32
+        case SIGBREAK: return "SIGBREAK";
+#else
         case SIGHUP: return "SIGHUP";
+#endif
         default: return "a signal";
         }
     }

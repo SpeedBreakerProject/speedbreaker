@@ -1,14 +1,25 @@
 // SpeedBreaker runtime. GPL-3.0-or-later (see COPYING).
 #include "../stdafx.h"
 #include "vmem.h"
+#ifdef _WIN32
+#include <platform/memory.h>
+#endif
 
+#ifndef _WIN32
 #include <unistd.h>
+#endif
 
 namespace vmem
 {
     bool RemapAnon(void* host, size_t bytes)
     {
+#ifdef _WIN32
+        // Windows: decommit and commit again (platform/memory.h). Its pages
+        // are 4 KB, a guest page, so every range is whole host pages.
+        return platform::ResetPrivatePages(host, bytes);
+#else
         return mmap(host, bytes, PROT_READ | PROT_WRITE, MAP_FIXED | MAP_ANON | MAP_PRIVATE, -1, 0) != MAP_FAILED;
+#endif
     }
 
     void ResetHostRange(void* host, size_t bytes, size_t hostPage, RemapFn remap)

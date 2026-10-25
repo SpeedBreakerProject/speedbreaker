@@ -17,7 +17,9 @@ uint32_t NtClose(uint32_t handle);
 
 constexpr uint32_t CURRENT_PROCESS_PSEUDO = 0xFFFFFFFF;
 constexpr uint32_t CURRENT_THREAD_PSEUDO = 0xFFFFFFFE;
+#ifndef DUPLICATE_CLOSE_SOURCE  // (<windows.h> has it, with the same value)
 constexpr uint32_t DUPLICATE_CLOSE_SOURCE = 0x1;
+#endif
 
 uint32_t NtDuplicateObject(uint32_t sourceHandle, be<uint32_t>* targetHandle, uint32_t options)
 {

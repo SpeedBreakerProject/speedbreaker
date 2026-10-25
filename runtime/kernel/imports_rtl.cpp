@@ -6,6 +6,12 @@
 #include <stdafx.h>
 #include "function.h"
 
+#ifdef _WIN32
+// <windows.h> declares Windows' own RtlCompareMemory: the guest's gets its
+// own name, or the hook below can't tell which one it means.
+#define RtlCompareMemory GuestRtlCompareMemory
+#endif
+
 uint32_t RtlCompareMemory(const uint8_t* a, const uint8_t* b, uint32_t length)
 {
     uint32_t n = 0;

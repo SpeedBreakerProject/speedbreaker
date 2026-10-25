@@ -24,6 +24,7 @@
 
 #include <kernel/vmem.h>
 #include <kernel/write_watch.h>
+#include <report/report.h>
 #include <video/presenter.h>
 #include <video/picture_fit.h>
 #include <video/scale_budget.h>
@@ -46,11 +47,78 @@
 #include <mutex>
 #include <set>
 #include <thread>
+#ifndef _WIN32
 #include <sys/resource.h>
+#endif
 #include <time.h>
+#ifndef _WIN32
 #include <unistd.h>
+#endif
 #include <memory>
 #include <unordered_map>
+
+// swapWord(v, e) in the compute shaders: a guest word in Xenos endianness e
+// (0 none, 1 8in16, 2 8in32, 3 16in32; the resolve's 4 and up: 8in32) as a
+// host uint. On Windows as selects, like the vertex and pixel shaders'
+// gpuSwap (shader_translator.cpp): Intel's Windows driver compiled the
+// early-return chain wrongly. In the compute shaders it showed in races: a
+// black starburst over the middle of the picture. Elsewhere as before.
+// The select forms equal the chains for every e (the plain swapWord leaves
+// 4 and up unswapped, as its chain does).
+//
+// The same shape elsewhere in the compute shaders gets the same treatment
+// on Windows, whether or not it has shown yet: the resolve's bppLog2 (a run
+// of early returns) and the front image's swap (an else-if chain on
+// p.endian). Intel's 101.2135 merged one branch's value into the default;
+// nothing here shows whether it does so for any other chain.
+#ifdef _WIN32
+#define GLSL_SWAP_WORD R"(uint swapWord(uint v, uint e)
+{
+    uint s8 = ((v << 8) & 0xFF00FF00u) | ((v >> 8) & 0x00FF00FFu);
+    v = (e == 1u || e == 2u) ? s8 : v;
+    return (e == 2u || e == 3u) ? (v >> 16) | (v << 16) : v;
+})"
+#define GLSL_SWAP_WORD_RESOLVE R"(uint swapWord(uint v, uint e)
+{
+    uint s8 = ((v << 8) & 0xFF00FF00u) | ((v >> 8) & 0x00FF00FFu);
+    v = (e == 1u || e == 2u || e >= 4u) ? s8 : v;
+    return e >= 2u ? (v >> 16) | (v << 16) : v;
+})"
+#define GLSL_BPP_LOG2 R"(uint bppLog2(uint f)
+{
+    uint b = (f == 26u || f == 32u || f == 34u || f == 37u) ? 3u : 2u;   // 64, else 32
+    b = (f == 3u || f == 4u || f == 10u || f == 15u || f == 24u || f == 30u) ? 1u : b;
+    return f == 2u ? 0u : b;                                             // 8
+})"
+#define GLSL_FRONT_SWAP R"(    uint s8 = ((v << 8) & 0xFF00FF00u) | ((v >> 8) & 0x00FF00FFu);
+    v = (p.endian == 1u || p.endian == 2u) ? s8 : v;
+    v = (p.endian == 2u || p.endian == 3u) ? (v >> 16) | (v << 16) : v;)"
+#else
+#define GLSL_BPP_LOG2 R"(uint bppLog2(uint f)
+{
+    if (f == 2u) return 0u;                                  // 8
+    if (f == 3u || f == 4u || f == 10u || f == 15u || f == 24u || f == 30u) return 1u;
+    if (f == 26u || f == 32u || f == 34u || f == 37u) return 3u;
+    return 2u;
+})"
+#define GLSL_FRONT_SWAP R"(    if (p.endian == 1u) v = ((v << 8) & 0xFF00FF00u) | ((v >> 8) & 0x00FF00FFu);
+    else if (p.endian == 2u) v = (v << 24) | ((v << 8) & 0x00FF0000u) | ((v >> 8) & 0x0000FF00u) | (v >> 24);
+    else if (p.endian == 3u) v = (v >> 16) | (v << 16);)"
+#define GLSL_SWAP_WORD R"(uint swapWord(uint v, uint e)
+{
+    if (e == 1u) return ((v << 8) & 0xFF00FF00u) | ((v >> 8) & 0x00FF00FFu);
+    if (e == 2u) return (v << 24) | ((v << 8) & 0x00FF0000u) | ((v >> 8) & 0x0000FF00u) | (v >> 24);
+    if (e == 3u) return (v >> 16) | (v << 16);
+    return v;
+})"
+#define GLSL_SWAP_WORD_RESOLVE R"(uint swapWord(uint v, uint e)
+{
+    if (e == 1u) return ((v << 8) & 0xFF00FF00u) | ((v >> 8) & 0x00FF00FFu);
+    if (e == 2u || e >= 4u) return (v << 24) | ((v << 8) & 0x00FF0000u) | ((v >> 8) & 0x0000FF00u) | (v >> 24);
+    if (e == 3u) return (v >> 16) | (v << 16);
+    return v;
+})"
+#endif
 
 namespace gpu::renderer
 {
@@ -76,7 +144,16 @@ namespace gpu::renderer
         // Lighter passes (NFSMW_UNTILED_AREA, NFSMW_PASS_BARRIER): Apple only.
         // On the Frame the smaller area cost +0.3 ms (Turnip chooses tiled
         // or direct rendering by the area) and the barrier changed nothing.
-        // Each variable overrides.
+        // Windows: both on an Intel integrated GPU, chosen by the device in
+        // Initialize (PassDefaultsForDevice), but for the pass barrier (see
+        // s_passBarrierLevel: the untiled area alone there). On a UHD 620
+        // (Intel's driver), GPU-bound at ~20 fps in a race at 1x: lighter
+        // +1.15 fps (3 of 3 runs; the barrier's share of it measured later at
+        // ~0.1), fewer +0.55 (+0.10 to +0.81), together with occlusion
+        // counting +1.8 (-4.0 ms GPU); no artifact seen in the parked race's
+        // captures (by eye: they aren't the same game frame). AMD's APUs
+        // and discrete GPUs there are unmeasured: off. Each variable
+        // overrides.
 #if defined(__APPLE__) || (defined(__linux__) && defined(__aarch64__))
         constexpr bool kFewerPasses = true;
 #else
@@ -86,6 +163,14 @@ namespace gpu::renderer
         constexpr bool kLighterPasses = true;
 #else
         constexpr bool kLighterPasses = false;
+#endif
+        // What follows kFewerPasses and kLighterPasses: constants of the
+        // build, but on Windows PassDefaultsForDevice sets them once, before
+        // the first frame, where their variables are unset.
+#ifdef _WIN32
+#define PASS_CONST
+#else
+#define PASS_CONST const
 #endif
 
         // Where a frame's time went, for hitch reports (renderer::HitchReport).
@@ -617,6 +702,14 @@ namespace gpu::renderer
             // here, harvested at completion, then the END reports, in order.
             std::vector<ZpdSegment> zpdSegments;
             std::vector<ZpdEnd> zpdEnds;
+#ifdef _WIN32
+            // NFSMW_BLACK_CHECK=1: the present whose front image this
+            // submission probes (its entry in s_black.host, else -1).
+            int32_t blackEntry = -1;
+            uint64_t blackFrame = 0;
+            double blackSec = 0;
+            uint32_t blackDraws = 0, blackWaiting = 0, blackResolves = 0;  // the game's work for that frame
+#endif
         };
         // NFSMW_FENCE_EVENTS=0 disables mid-buffer fence publication.
         const bool s_fenceEvents = [] { const char* v = std::getenv("NFSMW_FENCE_EVENTS"); return !v || v[0] != '0'; }();
@@ -970,6 +1063,66 @@ namespace gpu::renderer
                 (unsigned long long)raw, count, ms, lost ? std::format(" ({} segments lost)", lost).c_str() : "");
         }
 
+#ifdef _WIN32
+        // NFSMW_BLACK_CHECK=1: a black-frame count over every present, not a
+        // capture now and then (P3's black frames came from Intel's driver
+        // and hit a third of all frames; captures cost ~0.5 s each here).
+        // After each present's front image is written a compute pass counts
+        // its texels with any red, green or blue (RecordBlackProbe); the
+        // completion thread reads the count once that submission is done and
+        // logs every present whose front image is all zero, with a summary
+        // every 600 presents. The game's own cuts to black count too (the
+        // intro cinematic has some). Each line gives the frame, the time and
+        // the game's work for that frame (draws since the last present, how
+        // many waited for a pipeline still compiling, resolves): a cut the
+        // game makes has the same counts on the Mac at the same point, while
+        // a high draw count alone proves nothing (a fade from black draws the
+        // whole scene under it). Only whole black frames are seen, not a pass
+        // missing under the HUD.
+        struct BlackCheck
+        {
+            bool on = false;
+            VkBuffer buffer = VK_NULL_HANDLE;
+            VkDeviceMemory memory = VK_NULL_HANDLE;
+            const volatile uint32_t* host = nullptr;
+            VkPipeline pipeline = VK_NULL_HANDLE;
+            VkPipelineLayout layout = VK_NULL_HANDLE;
+            VkDescriptorSetLayout setLayout = VK_NULL_HANDLE;
+            std::chrono::steady_clock::time_point start;
+            uint32_t next = 0;  // command processor
+            uint64_t drawsAt = 0, resolvesAt = 0;  // command processor: at the last present
+            uint64_t presents = 0, black = 0, windowBlack = 0, logged = 0;  // completion thread
+        };
+        BlackCheck s_black;
+        // Entries are reused in turn. One outlives its submission: more
+        // entries than slots, and a slot's next recording waits for its last
+        // submission to be retired, harvest included.
+        constexpr uint32_t kBlackEntries = 4 * kSlots;
+
+        // Completion thread: `sub` (which carries a probe) is done.
+        void BlackHarvest(Submission& sub)
+        {
+            uint32_t lit = s_black.host[sub.blackEntry];
+            s_black.presents++;
+            if (lit == 0)
+            {
+                s_black.black++;
+                s_black.windowBlack++;
+                if (s_black.logged++ < 2000)
+                    fprintf(stderr, "[black] frame %llu, %.2f s: the front image is all zero; the game's frame: %u draws (%u waiting for a "
+                        "pipeline), %u resolves\n", (unsigned long long)sub.blackFrame, sub.blackSec, sub.blackDraws, sub.blackWaiting,
+                        sub.blackResolves);
+            }
+            if (s_black.presents % 600 == 0)
+            {
+                fprintf(stderr, "[black] %llu of the last 600 presents black, %llu of %llu since the first\n",
+                    (unsigned long long)s_black.windowBlack, (unsigned long long)s_black.black, (unsigned long long)s_black.presents);
+                s_black.windowBlack = 0;
+            }
+            sub.blackEntry = -1;
+        }
+#endif
+
         void CompletionThread()
         {
 #ifdef __APPLE__
@@ -1068,6 +1221,10 @@ namespace gpu::renderer
                 }
                 if (!sub.zpdSegments.empty())
                     ZpdHarvest(slot, sub);
+#ifdef _WIN32
+                if (sub.blackEntry >= 0)
+                    BlackHarvest(sub);
+#endif
                 {
                     // Writes run under the lock so QueueWrite can't append to
                     // a submission that is being retired.
@@ -1160,7 +1317,18 @@ namespace gpu::renderer
         // [perf] window, off in the rest: one run, the same content in both
         // arms. Each window's [barrier] line names the level it ran at.
         // Default 2 with kLighterPasses (Apple: iPad Pro M2 GPU-bound at 2x,
-        // same-run windows: executing -0.5 ms), else 0.
+        // same-run windows: executing -0.5 ms), else 0. Windows on an Intel
+        // integrated GPU keeps 0 with the rest of the lighter passes: on a UHD
+        // 620, GPU-bound at ~23 fps in a race, level 2 against 0 in the same
+        // runs (the ALT above, 15 race window pairs in 2 runs) was -0.10 ms
+        // of GPU busy (median -0.30), within noise; and no scene on any
+        // device has needed a vertex barrier, so the validation layer has
+        // never seen the path that keeps level 2 safe where a vertex shader
+        // reads what a resolve wrote. Rechecked with Windows' Best
+        // performance power mode (the chip at ~25 W, ~27 fps in the race):
+        // the ALT's 18 race window pairs -0.04 ms, and in whole runs (2
+        // against 2) level 2 was no faster (race -1.3 fps, cinematic -0.5,
+        // inside that mode's run-to-run spread of about 1 fps).
         const uint32_t s_passBarrierLevel = [] { const char* v = std::getenv("NFSMW_PASS_BARRIER"); return v ? uint32_t(std::clamp(std::atoi(v), 0, 3)) : kLighterPasses ? 2u : 0u; }();
         const bool s_passBarrierAlt = [] { const char* v = std::getenv("NFSMW_PASS_BARRIER_ALT"); return v && v[0] == '1'; }() && s_passBarrierLevel;
         uint32_t s_passBarrier = s_passBarrierAlt ? 0u : s_passBarrierLevel;
@@ -1475,7 +1643,7 @@ namespace gpu::renderer
             if (!s_shaderCacheEnabled)
                 return CompileGlslUncached(source, stage, log, preamble);
             std::filesystem::path file = ShaderCacheFile(source, stage, preamble);
-            if (FILE* f = fopen(file.c_str(), "rb"))
+            if (FILE* f = fopen(file.string().c_str(), "rb"))
             {
                 std::vector<uint32_t> spirv;
                 fseek(f, 0, SEEK_END);
@@ -1502,7 +1670,7 @@ namespace gpu::renderer
                 // Unique per thread: two workers may compile the same source.
                 std::filesystem::path temp = file;
                 temp += std::format(".{}.tmp", std::hash<std::thread::id>{}(std::this_thread::get_id()));
-                if (FILE* f = fopen(temp.c_str(), "wb"))
+                if (FILE* f = fopen(temp.string().c_str(), "wb"))
                 {
                     bool ok = fwrite(spirv.data(), 4, spirv.size(), f) == spirv.size();
                     ok = fclose(f) == 0 && ok;
@@ -1567,7 +1735,7 @@ namespace gpu::renderer
         {
             std::vector<uint8_t> data;
             if (s_shaderCacheEnabled)
-                if (FILE* f = fopen((GetCachePath() / "pipelines.bin").c_str(), "rb"))
+                if (FILE* f = fopen((GetCachePath() / "pipelines.bin").string().c_str(), "rb"))
                 {
                     fseek(f, 0, SEEK_END);
                     long size = ftell(f);
@@ -1641,7 +1809,7 @@ namespace gpu::renderer
             std::filesystem::create_directories(GetCachePath(), ec);
             std::filesystem::path file = GetCachePath() / "pipelines.bin", temp = file;
             temp += ".tmp";
-            if (FILE* f = fopen(temp.c_str(), "wb"))
+            if (FILE* f = fopen(temp.string().c_str(), "wb"))
             {
                 bool ok = fwrite(data.data(), 1, size, f) == size;
                 ok = fclose(f) == 0 && ok;
@@ -1716,6 +1884,25 @@ namespace gpu::renderer
         VkDescriptorSetLayout s_set0Layout = VK_NULL_HANDLE;
         VkDescriptorPool s_descriptorPool = VK_NULL_HANDLE;
         VkDescriptorSet s_set0 = VK_NULL_HANDLE;
+#ifdef _WIN32
+        // Intel's Windows driver (UHD 620, 101.2135) reads zeros through a
+        // dynamic uniform or storage buffer descriptor wherever the dynamic
+        // offset plus the read's place in the range reaches 128 MB (2^27);
+        // a descriptor whose own offset is that far in reads right (P3's
+        // uborepro). The draws' constants are a dynamic uniform buffer in
+        // the 192 MB upload ring: draws whose constants landed in slots 8-11
+        // read zeros, their vertices collapsed to w = 0, and every primitive
+        // was clipped. A third of all frames were black (the title, menus,
+        // races) or lost whole passes (a black world under the HUD). Here
+        // set 0 is one set per ring slot with the constants at the slot's
+        // start, so the dynamic offset is the offset in the slot (under 16
+        // MB). Elsewhere one set, as before. NFSMW_SLOT_SETS=0 binds the one
+        // set instead (to see whether a newer driver still has the bug:
+        // NFSMW_BLACK_CHECK=1 counts the black frames it brings back).
+        VkDescriptorPool s_slotDescriptorPool = VK_NULL_HANDLE;
+        VkDescriptorSet s_slotSet0[kSlots] = {};
+        bool s_slotSets = true;
+#endif
         VkSampler s_sampler = VK_NULL_HANDLE;
         Image s_dummy[3];  // 2D, 3D, cube: until the texture cache (M4)
         Image s_dummyStorage;  // R32_UINT 1x1: a resolve's texture binding when it stores into none
@@ -1889,7 +2076,7 @@ namespace gpu::renderer
         // and each shader pair keeping the whole target, once.
         // On by default with kLighterPasses (Apple: iPad Pro M2 GPU-bound at
         // 2x, same-run windows: executing -1.0 ms), else off; =0 turns it off.
-        const uint32_t s_untiledArea = [] {
+        PASS_CONST uint32_t s_untiledArea = [] {
             const char* v = std::getenv("NFSMW_UNTILED_AREA");
             return !v ? (kLighterPasses ? 1u : 0u) : v[0] == '1' ? 1u : strcmp(v, "alt") == 0 ? 2u : 0u;
         }();
@@ -1915,8 +2102,12 @@ namespace gpu::renderer
         // guest pixel's host pixels down into guest memory (depth takes one
         // sample), so the game and the texture cache see 1x data as before.
         // The scale is a ratio on each axis (gpu/render_scale.h): 1, 1.5
-        // (3 host pixels for every 2 guest ones: 1920x1080), 2, 3, 4.
-        // NFSMW_RENDER_SCALE=<n> or <sx>x<sy> (1, 1.5, 2, 3 or 4; default 1).
+        // (3 host pixels for every 2 guest ones: 1920x1080), 2, 3, 4, and on
+        // the axis a Vert+ or Hor+ picture extends, the screen's own rows or
+        // columns at that density (video::NativeShape: 1x10/9 on a Steam
+        // Deck's 1280x800, GitHub #34).
+        // NFSMW_RENDER_SCALE=<n> or <sx>x<sy> (1, 1.5, 2, 3 or 4, or a ratio
+        // such as 10/9; default 1): exactly that, no native rows or columns.
         // The setting applies live (ApplyLiveSettings): every scaled target,
         // the scaled resolve memory and the scaled textures are made again at
         // the new scale between two frames, and Auto follows the picture's
@@ -1926,18 +2117,30 @@ namespace gpu::renderer
         uint32_t s_scalePitchMin = 640, s_scalePitchMax = 1280;
         uint32_t s_scaleBudget = 6;  // Auto's most host pixels per guest pixel
         bool s_scaleFixed = false;   // NFSMW_RENDER_SCALE: no live changes
+        // Native rows and columns on a Vert+ or Hor+ picture (video::NativeShape);
+        // NFSMW_NATIVE_SHAPE=0 keeps the setting's scale on both axes, as
+        // before (an A/B switch).
+        const bool s_nativeShape = [] {
+            const char* v = std::getenv("NFSMW_NATIVE_SHAPE");
+            return !(v && v[0] == '0');
+        }();
 
         // What the Internal Resolution setting asks for with the picture
         // covering `regionW` x `regionH` of the swapchain.
         // The setting's value is the scale in half steps (settings.h: 2 is
-        // 1x, 3 is 1.5x, 4 is 2x, 6 is 3x). Auto (whole scales only, for
-        // now: video::AutoRenderScale) could pick 1.5x by returning one.
+        // 1x, 3 is 1.5x, 4 is 2x, 6 is 3x): that many host pixels for each
+        // guest one across a Vert+ picture (down a Hor+ one), and on the axis
+        // it extends the picture's own shape at that density, 1:1 on the
+        // screen at 1x on a Steam Deck (video::NativeShape). A 16:9 picture
+        // gets the setting's scale both ways, as before. Auto (whole scales
+        // only, for now: video::AutoRenderScale) could pick 1.5x by returning
+        // one.
         gpu::RenderScale WantedRenderScale(int32_t setting, uint32_t regionW, uint32_t regionH)
         {
             if (setting > 0)
             {
                 gpu::AxisScale a = gpu::AxisFromHalves(uint32_t(std::clamp(setting, 2, 6)));
-                return { a, a };
+                return s_nativeShape ? video::NativeShape(a, regionW, regionH) : gpu::RenderScale{ a, a };
             }
             uint32_t sx = 1, sy = 1;
             // Auto: enough host pixels to cover the screen area the frame
@@ -1961,16 +2164,37 @@ namespace gpu::renderer
                 return gpu::RenderScale::Whole(sx, sy);
             }
             video::AutoRenderScale(regionW, regionH, s_scaleBudget, sx, sy);
-            return gpu::RenderScale::Whole(sx, sy);
+            // A Vert+ or Hor+ picture's own rows or columns at that scale,
+            // within the budget too (video::NativeAuto: the Deck's 1x10/9).
+            return s_nativeShape ? video::NativeAuto(sx, sy, regionW, regionH, s_scaleBudget) : gpu::RenderScale::Whole(sx, sy);
         }
 
         std::string ScaleReason(int32_t setting, uint32_t regionW, uint32_t regionH)
         {
             if (s_scaleFixed)
                 return "NFSMW_RENDER_SCALE";
+            // Native rows or columns: unlike the setting's (Auto's) scale on its own.
+            gpu::RenderScale plain;
             if (setting > 0)
-                return "setting";
-            return std::format("auto for a {}x{} picture{}", regionW, regionH, hfr::Enabled() && video::HfrOffered() ? ", half the budget for Smooth Motion's two pictures a step" : "");
+            {
+                const gpu::AxisScale a = gpu::AxisFromHalves(uint32_t(std::clamp(setting, 2, 6)));
+                plain = { a, a };
+            }
+            else
+            {
+                uint32_t sx = 1, sy = 1;
+                const bool hfrAuto = hfr::Enabled() && video::HfrOffered();
+                video::AutoRenderScale(regionW, regionH, hfrAuto ? std::max(1u, s_scaleBudget / 2) : s_scaleBudget, sx, sy);
+                if (hfrAuto)
+                    sx = sy = std::min(sx, sy);
+                plain = gpu::RenderScale::Whole(sx, sy);
+            }
+            const gpu::RenderScale want = WantedRenderScale(setting, regionW, regionH);
+            const char* native = want == plain ? "" : !(want.y == plain.y) ? ", the picture's own rows" : ", the picture's own columns";
+            if (setting > 0)
+                return std::format("setting{}{}", native, *native ? std::format(" for a {}x{} picture", regionW, regionH) : "");
+            return std::format("auto for a {}x{} picture{}{}", regionW, regionH, native,
+                               hfr::Enabled() && video::HfrOffered() ? ", half the budget for Smooth Motion's two pictures a step" : "");
         }
 
         void ReadRenderScale(const VkPhysicalDeviceProperties& props)
@@ -1978,6 +2202,14 @@ namespace gpu::renderer
             // Settings > Video > Internal Resolution; NFSMW_RENDER_SCALE
             // (<n> or <sx>x<sy>, developer override) wins.
             s_scaleBudget = props.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU ? 6 : 4;
+#ifdef _WIN32
+            // An Intel integrated GPU on Windows renders at 1x, as iOS does:
+            // a UHD 620 runs a race at 1x at ~20 fps, GPU-bound, and Auto
+            // would pick 2x2 for a maximized window or a 1080p screen
+            // (presenter.cpp, IntegratedGpuDefaults).
+            if (s_vk->integratedGpuDefaults)
+                s_scaleBudget = 1;
+#endif
 #if defined(__APPLE__) && TARGET_OS_IOS
             // iPhones and iPads: chip by chip (video/scale_budget), more than
             // 1x1 only where a chip was measured to hold a race at 60 fps with
@@ -2020,7 +2252,8 @@ namespace gpu::renderer
             else
             {
                 if (fixed)
-                    fprintf(stderr, "[renderer] NFSMW_RENDER_SCALE=%s ignored: each axis takes 1, 1.5, 2, 3 or 4 (\"1.5\", \"3x2\")\n", fixed);
+                    fprintf(stderr, "[renderer] NFSMW_RENDER_SCALE=%s ignored: each axis takes 1, 1.5, 2, 3 or 4 or a ratio (\"1.5\", \"3x2\", "
+                        "\"1x10/9\")\n", fixed);
                 video::FrameRegion(regionW, regionH);
                 s_renderScale = WantedRenderScale(setting, regionW, regionH);
             }
@@ -2054,6 +2287,29 @@ namespace gpu::renderer
         struct RecentTarget { uint64_t key = ~0ull; RenderTarget* target = nullptr; };
         RecentTarget s_recentTargets[16];
 
+#ifdef _WIN32
+        // EDRAM is one memory: a depth target the game first uses at a base
+        // where it drew with another layout holds, on the console, what that
+        // EDRAM was last cleared to (the game clears depth as it resolves).
+        // The race's first frame does this (depth at base 1312 with pitch
+        // 1280, after pitch 640 with 2x MSAA in the cinematic) and draws with
+        // LEQUAL before any clear of its own: from zero every draw failed and
+        // the frame was black (P3: in every laptop run where that target was
+        // first made at the race start, and whenever it was made anew there
+        // on purpose). So a new depth target starts from the last depth clear
+        // at its base (ClearRect records it), or from zero where there was
+        // none, as before. Limits: the same base only (other overlapping
+        // layouts aren't modelled), and a new target only: one that exists
+        // keeps its own contents after another layout's newer clear at its
+        // base. Every such reuse the review counted (drive and long scripts)
+        // found the target's own last clear, the same 1.0, nothing drawn
+        // since. Windows only for now, though the cause is this renderer, not
+        // a driver: Linux (same pass defaults) can hit it whenever its timing
+        // makes that target at the race start. No Mac run made it there: with
+        // the Mac's defaults it was never made, with Windows defaults in the
+        // cut before the cinematic or not at all.
+        std::unordered_map<uint32_t, VkClearDepthStencilValue> s_lastDepthClear;
+#endif
         // A new target, at the current scale if its pitch is a scaled one,
         // cleared to zero (new EDRAM contents).
         std::unique_ptr<RenderTarget> CreateTarget(uint32_t base, uint32_t format, bool depth, uint32_t pitch, bool wide)
@@ -2110,6 +2366,14 @@ namespace gpu::renderer
             if (depth)
             {
                 VkClearDepthStencilValue v{ 0.0f, 0 };
+#ifdef _WIN32
+                if (auto it = s_lastDepthClear.find(base); it != s_lastDepthClear.end())
+                {
+                    v = it->second;
+                    fprintf(stderr, "[renderer] EDRAM target at base %u (pitch %u) starts at the depth last cleared there: %g, stencil %u\n", base,
+                        pitch, v.depth, v.stencil);
+                }
+#endif
                 vkCmdClearDepthStencilImage(s_cmd, rt->image.image, VK_IMAGE_LAYOUT_GENERAL, &v, 1, &range);
             }
             else
@@ -2163,7 +2427,7 @@ namespace gpu::renderer
         // view's pass in three: 10 of the 46 passes of an iPad race frame's
         // profile. Expected ~0.4-0.5 ms of its GPU time (bit 1 ~0.2, bit 2
         // ~0.15-0.25: the glow and flare draws still run).
-        const uint32_t s_passMerge = [] { const char* v = std::getenv("NFSMW_PASS_MERGE"); return v ? uint32_t(std::atoi(v)) : kFewerPasses ? 3u : 0u; }();
+        PASS_CONST uint32_t s_passMerge = [] { const char* v = std::getenv("NFSMW_PASS_MERGE"); return v ? uint32_t(std::atoi(v)) : kFewerPasses ? 3u : 0u; }();
 
         void EndPass()
         {
@@ -2262,7 +2526,7 @@ namespace gpu::renderer
         // tile bands, ~0.2-0.3 ms of the iPad's GPU time. The clears kept
         // wait for the next pass on their target, which must hold them
         // (BeginPass logs one that reaches past its pass).
-        const bool s_clearFlushRect = [] { const char* v = std::getenv("NFSMW_CLEAR_FLUSH_RECT"); return v ? v[0] == '1' : kFewerPasses; }();
+        PASS_CONST bool s_clearFlushRect = [] { const char* v = std::getenv("NFSMW_CLEAR_FLUSH_RECT"); return v ? v[0] == '1' : kFewerPasses; }();
 
         void BeginPass(RenderTarget* const color[4], RenderTarget* depth, VkRect2D area)
         {
@@ -2821,6 +3085,9 @@ namespace gpu::renderer
                 auto build = [job, key, layout, vs, ps] {
                     auto start = std::chrono::steady_clock::now();
                     VkPipeline pipeline = BuildPipeline(key, layout, *vs, *ps);
+                    // Progress for the hang watchdog: a cold cache's compiles
+                    // can hold a frame for 20 s on a slow driver (Windows).
+                    report::g_pipelinesBuilt.fetch_add(1, std::memory_order_relaxed);
                     {
                         std::lock_guard lock(job->mutex);
                         job->pipeline = pipeline;
@@ -3402,16 +3669,23 @@ namespace gpu::renderer
             VkDeviceSize poolBytes = 0, tableBytes = 0, scratchBytes = 0;  // allocated (the [perf] line's memory)
             std::vector<uint32_t> pageSlot;  // slot + 1; 0: none
             std::vector<uint64_t> pageSeq;   // write sequence after the page's last scaled resolve; 0: none or stale
+            // The cached scaled texture (a Texture) that alone holds the page's
+            // samples: its last scaled resolve stored them there and not in
+            // the pool (see Resolve). Null: the pool has them (if current).
+            std::vector<const void*> pageHeld;
             std::vector<uint32_t> slotPage;  // page + 1; 0: free
             std::vector<uint8_t> slotRef;    // clock bit (used since the hand last passed)
             uint32_t clock = 0;
             std::vector<uint32_t> dirty;     // pages whose table entry changed
             uint64_t allocations = 0, evictions = 0, textures = 0, fallbacks = 0;
             uint64_t loads = 0, untiledBytes = 0, resolvedBytes = 0;  // for the [perf] line
+            uint64_t hosted = 0;  // scaled resolves that stored into their scaled texture too
             uint32_t hostPageGuestPages = 1;  // guest pages per host page (write sequences are per host page)
         } s_scaled;
 
         bool EnsureScaledMemory();
+        bool ScaledWanted(uint32_t base, uint32_t size);
+        bool ScaledWanted(uint32_t base, uint32_t size, uint32_t exceptBase, uint32_t exceptSize, uint64_t exceptSig);
         void FillFreshSlots(const std::vector<std::pair<uint32_t, uint32_t>>& fresh);
 
         // The page's slot, allocated (clock replacement) if it has none.
@@ -3442,6 +3716,7 @@ namespace gpu::renderer
                 uint32_t old = s_scaled.slotPage[slot] - 1;
                 s_scaled.pageSlot[old] = 0;
                 s_scaled.pageSeq[old] = 0;
+                s_scaled.pageHeld[old] = nullptr;
                 s_scaled.dirty.push_back(old);
                 s_scaled.evictions++;
                 break;
@@ -3479,11 +3754,17 @@ namespace gpu::renderer
             FullBarrier();
         }
 
-        // The page's scaled copy is current (see above).
+        // The page's scaled copy is current (see above) and in the pool.
         bool ScaledPageValid(uint32_t page)
         {
             uint64_t seq = s_scaled.pageSeq[page];
-            return seq != 0 && s_scaled.pageSlot[page] != 0 && writewatch::WriteSequence(page << 12, 4096) == seq;
+            return seq != 0 && s_scaled.pageSlot[page] != 0 && !s_scaled.pageHeld[page] && writewatch::WriteSequence(page << 12, 4096) == seq;
+        }
+        // ... current, but only in the scaled texture holding it (pageHeld).
+        bool ScaledPageHeld(uint32_t page)
+        {
+            uint64_t seq = s_scaled.pageSeq[page];
+            return seq != 0 && s_scaled.pageSlot[page] != 0 && s_scaled.pageHeld[page] && writewatch::WriteSequence(page << 12, 4096) == seq;
         }
 
         // Every page of [base, base + size) has a current scaled copy.
@@ -3546,13 +3827,7 @@ uint tiled2D(uint x, uint y, uint pitch, uint bppLog2)
         (((oi >> 5) & 7u) << 8) | ((oi >> 8) << 12);
 }
 
-uint swapWord(uint v, uint e)
-{
-    if (e == 1u) return ((v << 8) & 0xFF00FF00u) | ((v >> 8) & 0x00FF00FFu);
-    if (e == 2u) return (v << 24) | ((v << 8) & 0x00FF0000u) | ((v >> 8) & 0x0000FF00u) | (v >> 24);
-    if (e == 3u) return (v >> 16) | (v << 16);
-    return v;
-}
+)" GLSL_SWAP_WORD R"(
 
 uint addr(uint bx, uint by)
 {
@@ -3640,7 +3915,7 @@ void main()
         // untiles, six copies and a split render pass a frame (two in heavy
         // scenes). A device that turns the image or a view down keeps the
         // staging path for that format.
-        const bool s_directCube = [] { const char* v = std::getenv("NFSMW_DIRECT_CUBE"); return v ? v[0] == '1' : kFewerPasses; }();
+        PASS_CONST bool s_directCube = [] { const char* v = std::getenv("NFSMW_DIRECT_CUBE"); return v ? v[0] == '1' : kFewerPasses; }();
         // fi.vk -> a storable R32_UINT view is allowed (2D; cube compatible, with six layers)
         std::unordered_map<VkFormat, bool> s_directFormats, s_directCubeFormats;
 
@@ -3681,6 +3956,8 @@ void main()
             uint32_t levels = 1;
             uint32_t mipStart = 0, mipSize = 0;  // the mip levels' guest memory (size 0: none)
             bool scaled = false;  // host resolution, from the scaled resolve memory
+            uint32_t guestWidth = 0, guestHeight = 0;  // scaled: its guest size (width, height are the host's)
+            uint64_t scaledSig = 0;  // scaled: ScaledSignature
             VkImageView storeView = VK_NULL_HANDLE;  // scaled: R32_UINT, stored into by the untile (if the device can)
             // The same, a 2D view of each layer: [0] is storeView, and a
             // direct cube (NFSMW_DIRECT_CUBE) has one per face.
@@ -3698,7 +3975,62 @@ void main()
             uint64_t verifyFrame = 0;
         };
         void LoadScaledTexture(Texture& t, uint32_t base, uint32_t pitchBlocks, uint32_t endian);
-        bool ScaledTextureValid(uint32_t base, uint32_t size);
+        bool ScaledTextureValid(uint32_t base, uint32_t size, uint64_t sig);
+        // A scaled texture's surface: its guest format, size, pitch and
+        // endianness (with its first byte and guest size, its cache key's
+        // fields for a scaled texture).
+        uint64_t ScaledSignature(uint32_t format, uint32_t width, uint32_t height, uint32_t pitch, uint32_t endian)
+        {
+            uint64_t h = 0x9E3779B97F4A7C15ull;
+            for (uint64_t v : { uint64_t(format), uint64_t(width), uint64_t(height), uint64_t(pitch), uint64_t(endian) })
+                h = (h ^ v) * 0x100000001B3ull;
+            return h | 1;  // (never 0: no texture)
+        }
+
+        // Every page of the surface [base, base + size) has current samples
+        // for the scaled texture `sig` there: in the pool, or held by that
+        // very texture (pageHeld) while it is current (nothing written there
+        // since its load or its last resolve). A held page is never current
+        // for any other reader (the pool's copy of it is old).
+        bool ScaledSurfaceValid(uint32_t base, uint32_t size, uint64_t sig)
+        {
+            if (!s_scaled.enabled || size == 0)
+                return false;
+            uint32_t first = base >> 12, last = std::min<uint32_t>((base + size - 1) >> 12, kGuestPages - 1);
+            const void* checked = nullptr;
+            for (uint32_t page = first; page <= last; page++)
+            {
+                if (ScaledPageValid(page))
+                    continue;
+                if (!ScaledPageHeld(page))
+                    return false;
+                const void* holder = s_scaled.pageHeld[page];
+                if (holder != checked)
+                {
+                    const Texture& t = *static_cast<const Texture*>(holder);
+                    if (!sig || !t.scaled || t.scaledSig != sig || t.guestStart != base || t.guestSize != size || !t.uploaded ||
+                        writewatch::WrittenSince(t.guestStart, t.guestSize, t.loadedSequence))
+                        return false;
+                    checked = holder;
+                }
+            }
+            for (uint32_t page = first; page <= last; page++)
+                s_scaled.slotRef[s_scaled.pageSlot[page] - 1] = 1;
+            return true;
+        }
+        // A page held by `t` no longer is: its samples are gone (`t` dropped).
+        void ReleaseHeldPages(const void* t, uint32_t base, uint32_t size)
+        {
+            if (!s_scaled.enabled || size == 0 || s_scaled.pageHeld.empty())
+                return;
+            uint32_t first = base >> 12, last = std::min<uint32_t>((base + size - 1) >> 12, kGuestPages - 1);
+            for (uint32_t page = first; page <= last; page++)
+                if (s_scaled.pageHeld[page] == t)
+                {
+                    s_scaled.pageHeld[page] = nullptr;
+                    s_scaled.pageSeq[page] = 0;
+                }
+        }
         std::unordered_map<uint64_t, std::unique_ptr<Texture>> s_textures;
         // Direct 1x 2D textures by guest address (the latest made there), for
         // resolves that store into them too (DestroyTexture drops its entry).
@@ -3706,6 +4038,12 @@ void main()
         // Resolves store into such a texture too when it is exactly their
         // surface (see Resolve); NFSMW_RESOLVE_TO_TEXTURE=0 turns it off.
         const bool s_resolveToTexture = [] { const char* v = std::getenv("NFSMW_RESOLVE_TO_TEXTURE"); return !v || v[0] != '0'; }();
+        // ... also from a scaled resolve (its 1x words); NFSMW_SCALED_FUSE=0
+        // turns that off (and the scaled textures' own, see Resolve).
+        const bool s_scaledFuse = [] { const char* v = std::getenv("NFSMW_SCALED_FUSE"); return !v || v[0] != '0'; }();
+        // ... and then only there, where no other reader asks (see Resolve);
+        // NFSMW_SCALED_HOLD=0: into the pool as well, always.
+        const bool s_scaledHold = [] { const char* v = std::getenv("NFSMW_SCALED_HOLD"); return !v || v[0] != '0'; }();
         // NFSMW_FUSE_PARTIAL=1 (default kFewerPasses; 0: only a resolve
         // covering the whole texture stores into it): a resolve into whole 32x32 tiles
         // inside a direct texture (or a cube's face) stores there too, at
@@ -3713,13 +4051,18 @@ void main()
         // (1280x720) are each resolved in three strips, a predicated tile
         // each, and were untiled again between passes every frame (3.7 MB
         // each), on every platform.
-        const bool s_fusePartial = [] { const char* v = std::getenv("NFSMW_FUSE_PARTIAL"); return v ? v[0] == '1' : kFewerPasses; }();
+        PASS_CONST bool s_fusePartial = [] { const char* v = std::getenv("NFSMW_FUSE_PARTIAL"); return v ? v[0] == '1' : kFewerPasses; }();
         // Direct textures by their first guest byte (the latest made there),
         // for resolves into part of one (Resolve): every one with
         // NFSMW_FUSE_PARTIAL, the cubes with NFSMW_DIRECT_CUBE alone; and the
         // largest one's guest size, how far before an address one holding
         // it can start.
         std::map<uint32_t, Texture*> s_directByStart;
+        // Scaled textures stored into directly, by their first guest byte (the
+        // latest made there), for scaled resolves into them (Resolve); the
+        // largest one's guest size.
+        std::map<uint32_t, Texture*> s_scaledByStart;
+        uint32_t s_maxScaledSize = 0;
         uint32_t s_maxDirectSize = 0;
 
         // NFSMW_LOG_UPLOADS=<first>[,<last>]: in those frames (s_frame, as
@@ -4023,6 +4366,7 @@ void main()
             Texture* texture = nullptr;
             uint32_t base = 0, size = 0, mipBase = 0, mipSize = 0;
             bool scaledCandidate = false;  // a draw into scaled targets may take the scaled path
+            uint64_t sig = 0;              // ScaledSignature
         };
 
         // The full lookup (GetTexture below keeps its results).
@@ -4155,10 +4499,13 @@ void main()
             bool scaledCandidate = !cube && !volume && f.tiled && layers == 1 && !f.stacked &&
                 ScaledFormat(fi) && offX == 0 && offY == 0 && maxLevel == 0 && s_scaled.scale.Exact(width, height) &&
                 s_scaled.scale.HostPixels(width, height) * 4 <= s_scaled.scratchSize;
-            bool scaled = s_drawScaled && s_scaled.enabled && scaledCandidate && ScaledTextureValid(base, size);
+            // Which scaled texture this is (its cache key's surface fields):
+            // pages only a scaled texture holds are current for it alone.
+            const uint64_t sig = ScaledSignature(format, width, height, pitchAligned, uint32_t(f.endianness));
+            bool scaled = s_drawScaled && s_scaled.enabled && scaledCandidate && ScaledTextureValid(base, size, sig);
             sampler = GetSampler(f, maxLevel);
             if (out)
-                *out = { nullptr, base, size, mipBase, mipSize, scaledCandidate };
+                *out = { nullptr, base, size, mipBase, mipSize, scaledCandidate, sig };
 
             uint64_t key = scaled ? 0x5CA1ED5CA1EDull : 0xCBF29CE484222325ull;
             for (uint64_t v : { uint64_t(base), uint64_t(format), uint64_t(width), uint64_t(height), uint64_t(f.tiled),
@@ -4187,6 +4534,9 @@ void main()
                 {
                     t.width = s_scaled.scale.x.Size(width);
                     t.height = s_scaled.scale.y.Size(height);
+                    t.guestWidth = width;
+                    t.guestHeight = height;
+                    t.scaledSig = sig;
                     s_scaled.textures++;
                 }
                 // A 1x texture the untile can store directly (see
@@ -4261,6 +4611,17 @@ void main()
                             s_directByStart[base] = &t;
                             s_maxDirectSize = std::max(s_maxDirectSize, t.guestSize);
                         }
+                    }
+                    else
+                    {
+                        // A scaled texture a scaled resolve can store into
+                        // as its untile would (Resolve; NFSMW_SCALED_FUSE).
+                        t.tiled = true;
+                        t.pitch = pitchAligned;
+                        t.bpbLog2 = 2;
+                        t.endian = uint32_t(f.endianness);
+                        s_scaledByStart[base] = &t;
+                        s_maxScaledSize = std::max(s_maxScaledSize, t.guestSize);
                     }
                 }
                 if (!t.image.image)
@@ -4490,6 +4851,7 @@ void main()
             VkImageView view = VK_NULL_HANDLE;
             VkSampler sampler = VK_NULL_HANDLE;
             uint32_t base = 0, size = 0, mipBase = 0, mipSize = 0;
+            uint64_t sig = 0;
         };
         struct TextureCache
         {
@@ -4527,7 +4889,7 @@ void main()
                 return TextureEntryState::kValid;
             // Some page was written since: the full lookup's checks, in its
             // order (its scaled copy first).
-            bool valid = !(e.scaledCandidate && drawScaled && ScaledTextureValid(e.base, e.size)) &&
+            bool valid = !(e.scaledCandidate && drawScaled && ScaledTextureValid(e.base, e.size, e.sig)) &&
                 (checked == epoch || (t.uploaded && writewatch::WriteSequence(e.base, e.size) <= t.loadedSequence &&
                     (!e.mipSize || writewatch::WriteSequence(e.mipBase, e.mipSize) <= t.loadedSequence)));
             if (!valid)
@@ -4631,6 +4993,7 @@ void main()
             e.size = lookup.size;
             e.mipBase = lookup.mipBase;
             e.mipSize = lookup.mipSize;
+            e.sig = lookup.sig;
             RecentTextureEntry(fetch, dim) = e;
             return view;
         }
@@ -4640,10 +5003,22 @@ void main()
 
         VkPipeline s_resolvePipeline = VK_NULL_HANDLE;
         VkPipeline s_resolveCoalescedPipeline = VK_NULL_HANDLE;  // scaled resolves (see COALESCED in the shader)
-        // The same for a source of another scale denominator ([coalesced][den x - 1][den y - 1]: 1.5x is 3/2), made
-        // at the first resolve that needs it (ResolvePipeline); [..][0][0] are the two above.
-        VkPipeline s_resolveDenPipelines[2][2][2] = {};
+        // The same for a source of another scale denominator ([coalesced][x][y], each den - 1, or 2 for a texel
+        // axis, a den above 2: 1.5x is 3/2, a Steam Deck's native rows 10/9), made at the first resolve that needs
+        // it (ResolvePipeline); [..][0][0] are the two above.
+        VkPipeline s_resolveDenPipelines[2][3][3] = {};
+        // Sources above 1x: the same, built with SCALED_FUSE (and TEX_OFFSET),
+        // whole scales too; [coalesced][x][y] as above.
+        VkPipeline s_resolveScaledPipelines[2][3][3] = {};
         VkPipeline ResolvePipeline(bool coalesced, const gpu::RenderScale& scale);
+        // A coalesced group's samples fit its shared memory (64 x 16 words):
+        // every scale but a texel axis's beside 4x (1x10/9 has 2 a texel,
+        // 3x10/3 12).
+        bool CoalescedFits(const gpu::RenderScale& scale)
+        {
+            const uint32_t blocks = 64 / (gpu::ScaleGlsl{}.sbLayoutDen(scale.x.den) * gpu::ScaleGlsl{}.sbLayoutDen(scale.y.den));
+            return blocks * scale.SamplesPerBlock() <= 64 * 16;
+        }
 
         // Coalesced scaled resolves: 2.8 -> 1.1 ms of scaled resolves a frame
         // on the Steam Machine (RADV), but 2.6-3.4 -> 4.1-4.4 ms on an M1 Pro
@@ -4660,12 +5035,12 @@ void main()
         // cache keeps it), 23 ms on RADV.
         void PrewarmResolvePipelines(const gpu::RenderScale& scale)
         {
-            if (scale.x.den == 1 && scale.y.den == 1)
+            if (scale.IsOne())
                 return;
             VkPhysicalDeviceProperties props;
             vkGetPhysicalDeviceProperties(s_vk->physical, &props);
             ResolvePipeline(false, scale);
-            if (ScaledCoalesce(props))
+            if (ScaledCoalesce(props) && CoalescedFits(scale))
                 ResolvePipeline(true, scale);
         }
         VkPipelineLayout s_resolveLayout = VK_NULL_HANDLE;
@@ -4683,17 +5058,28 @@ void main()
             int32_t srcOriginX, srcOriginY;  // host pixels
             uint32_t scaleX, scaleY;         // host pixels per guest pixel in the source (/ the pipeline's SB_DEN_X, SB_DEN_Y)
             uint32_t scaledWrite, slotWords; // also write the samples to the scaled memory
+            // A texel axis's (SB_TEXEL_X, SB_TEXEL_Y) denominator, and the
+            // rectangle's first pixel in the source target in guest pixels
+            // (r + the tile shift), which its host pixels count from.
+            uint32_t denX, denY;
+            int32_t srcGuestX, srcGuestY;
             // Also store into a cached direct texture (binding 4), as its
             // untile would have from the words (see Resolve); texX, texY:
             // where the destination's texel 0,0 is in it (NFSMW_FUSE_PARTIAL,
             // NFSMW_DIRECT_CUBE; pushed only with either, see s_resolvePush).
             uint32_t texWrite, texEndian, texConvert, texWidth, texHeight;
             uint32_t texX, texY;
+            // A scaled resolve's samples also into a cached scaled texture
+            // (binding 5), where its untile would have put them (see
+            // Resolve): hostX, hostY: the destination's texel 0,0 in it; its
+            // guest size and endianness. Pushed (and in the shader:
+            // SCALED_FUSE) only to the pipelines of scaled sources.
+            uint32_t hostWrite, hostX, hostY, hostWidth, hostHeight, hostEndian;
         };
         // The constants pushed to the resolve shader: without NFSMW_FUSE_PARTIAL
         // and NFSMW_DIRECT_CUBE, those before texX, as before them, and the
         // shader is built without TEX_OFFSET (the same code and push).
-        const uint32_t s_resolvePush = s_fusePartial || s_directCube ? sizeof(ResolveConstants) : offsetof(ResolveConstants, texX);
+        PASS_CONST uint32_t s_resolvePush = s_fusePartial || s_directCube ? offsetof(ResolveConstants, hostWrite) : offsetof(ResolveConstants, texX);
 
         const char* kResolveGlsl = R"(#version 460
 #extension GL_EXT_samplerless_texture_functions : require
@@ -4703,6 +5089,9 @@ layout(set = 0, binding = 1) uniform texture2D src;
 layout(std430, set = 0, binding = 2) buffer ScaledPool { uint s_pool[]; };
 layout(std430, set = 0, binding = 3) readonly buffer ScaledTable { uint s_table[]; };
 layout(set = 0, binding = 4, r32ui) writeonly uniform uimage2D t_image;
+#ifdef SCALED_FUSE
+layout(set = 0, binding = 5, r32ui) writeonly uniform uimage2D h_image;
+#endif
 layout(push_constant) uniform P
 {
     ivec2 origin;
@@ -4713,9 +5102,17 @@ layout(push_constant) uniform P
     ivec2 srcOrigin;    // where the rectangle is in the host target (see untiled rendering), host pixels
     uvec2 scale;        // host pixels per guest pixel (internal resolution): scale / kDen
     uint scaledWrite, slotWords;
+    uvec2 den;          // a texel axis's denominator (SB_TEXEL_X, SB_TEXEL_Y)
+    ivec2 srcGuest;     // the rectangle's first pixel in the source target, guest pixels (texel axes)
     uint texWrite, texEndian, texConvert, texWidth, texHeight;  // also into a cached texture (binding 4)
 #ifdef TEX_OFFSET
     uint texX, texY;    // the destination's texel 0,0 in it (whole tiles)
+#endif
+#ifdef SCALED_FUSE
+    // Also each host sample into a cached scaled texture (binding 5) where
+    // its untile would put it: its texel of the destination's 0,0 (whole
+    // tiles), its guest size, its endianness.
+    uint hostWrite, hostX, hostY, hostWidth, hostHeight, hostEndian;
 #endif
 } p;
 )" GLSL_SCALE_CODE R"(
@@ -4730,6 +5127,29 @@ layout(push_constant) uniform P
 #define SB_DEN_Y 1u
 #endif
 const uvec2 kDen = uvec2(SB_DEN_X, SB_DEN_Y);
+// A texel axis (a den above 2, gpu/render_scale.h: a Steam Deck's native rows,
+// 10/9): its num / den from the constants and no blocks (kDen 1 there), each
+// pixel's host pixels counted from where it is in the source target
+// (srcGuest), the other axis's too. Without either the code is as before.
+#ifndef SB_TEXEL_X
+#define SB_TEXEL_X 0
+#endif
+#ifndef SB_TEXEL_Y
+#define SB_TEXEL_Y 0
+#endif
+#if SB_TEXEL_X || SB_TEXEL_Y
+#define SB_TEXEL
+// The scale as the pipeline's constants when it has them (SB_FIXED_*: a
+// texel axis's pipelines are made for their exact scale, so every division
+// by num or den is by a constant, a multiply, not a runtime division).
+#ifdef SB_FIXED_NUM_X
+uvec2 texelDen() { return uvec2(SB_FIXED_DEN_X, SB_FIXED_DEN_Y); }
+#define TEXEL_NUM uvec2(SB_FIXED_NUM_X, SB_FIXED_NUM_Y)
+#else
+uvec2 texelDen() { return uvec2(SB_TEXEL_X != 0 ? p.den.x : kDen.x, SB_TEXEL_Y != 0 ? p.den.y : kDen.y); }
+#define TEXEL_NUM p.scale
+#endif
+#endif
 
 uint tiled2D(uint x, uint y, uint pitch, uint bppLog2)
 {
@@ -4742,21 +5162,9 @@ uint tiled2D(uint x, uint y, uint pitch, uint bppLog2)
         (((oi >> 5) & 7u) << 8) | ((oi >> 8) << 12);
 }
 
-uint swapWord(uint v, uint e)
-{
-    if (e == 1u) return ((v << 8) & 0xFF00FF00u) | ((v >> 8) & 0x00FF00FFu);
-    if (e == 2u || e >= 4u) return (v << 24) | ((v << 8) & 0x00FF0000u) | ((v >> 8) & 0x0000FF00u) | (v >> 24);
-    if (e == 3u) return (v >> 16) | (v << 16);
-    return v;
-}
+)" GLSL_SWAP_WORD_RESOLVE R"(
 
-uint bppLog2(uint f)
-{
-    if (f == 2u) return 0u;                                  // 8
-    if (f == 3u || f == 4u || f == 10u || f == 15u || f == 24u || f == 30u) return 1u;
-    if (f == 26u || f == 32u || f == 34u || f == 37u) return 3u;
-    return 2u;
-}
+)" GLSL_BPP_LOG2 R"(
 
 // px() at 1.5x (a den of 2): the host pixels the guest pixel covers, each
 // weighted by how much of it lies inside (gpu/render_scale.h's box filter:
@@ -4780,8 +5188,35 @@ vec4 pxFraction(uint x, uint y)
     return v;
 }
 
+#ifdef SB_TEXEL
+// px() with a texel axis: the host pixels guest pixel (x, y) of the rectangle
+// covers, from its place in the source target (srcGuest + x, y), each
+// weighted by how much of it lies inside (the box filter), or (depth) the
+// one holding its centre.
+vec4 pxTexel(uint x, uint y)
+{
+    uvec2 n = TEXEL_NUM, d = texelDen();
+    uvec2 g = uvec2(p.srcGuest) + uvec2(x, y);
+    if ((p.flags & 2u) != 0u)
+        return texelFetch(src, clamp(ivec2(sbCenterHost(g.x, n.x, d.x), sbCenterHost(g.y, n.y, d.y)), ivec2(0), ivec2(p.srcSize) - 1), 0);
+    vec4 v = vec4(0.0);
+    uint x1 = sbHostSize(g.x + 1u, n.x, d.x), y1 = sbHostSize(g.y + 1u, n.y, d.y);
+    for (uint j = g.y * n.y / d.y; j < y1; j++)
+        for (uint i = g.x * n.x / d.x; i < x1; i++)
+            v += float(sbOverlap(g.x, i, n.x, d.x) * sbOverlap(g.y, j, n.y, d.y)) *
+                texelFetch(src, clamp(ivec2(i, j), ivec2(0), ivec2(p.srcSize) - 1), 0);
+    v /= float(n.x * n.y);
+    v *= p.expScale;
+    if ((p.flags & 1u) != 0u) v = v.bgra;
+    return v;
+}
+#endif
+
 vec4 px(uint x, uint y)
 {
+#ifdef SB_TEXEL
+    return pxTexel(x, y);
+#else
     // Guest pixel (x, y) of the rectangle: its sx x sy block of host pixels,
     // averaged (colour) or its first sample (depth).
     if (kDen.x * kDen.y > 1u) return pxFraction(x, y);
@@ -4799,6 +5234,7 @@ vec4 px(uint x, uint y)
     v *= p.expScale;
     if ((p.flags & 1u) != 0u) v = v.bgra;
     return v;
+#endif
 }
 
 uint unorm(float v, float m) { return uint(clamp(v, 0.0, 1.0) * m + 0.5); }
@@ -4871,37 +5307,87 @@ void main()
         // bits 0 and 2; the rectangle's origin is even, so gx and gy agree).
         uint a = word << 2;
         uint slot = inside ? s_table[a >> 12] : 0u;
+#ifdef SB_TEXEL
+        // With a texel axis: on it, all the texel's stride of samples (the
+        // ones it owns, then its last again), from its own place in the
+        // source target; on a block axis as below, from the block's corner.
+        uvec2 n = TEXEL_NUM, d = texelDen();
+        uint sX = sbStride(n.x, d.x);
+        uint s = sX * sbStride(n.y, d.y);  // samples a block
+        uint k = (a & 4095u) >> 2;
+        uint o = (slot - 1u) * p.slotWords + sbBlockIndex(k, d.x, d.y) * s;
+        uint subX = sbSubX(k, d.x), subY = sbSubY(k, d.y);
+        uint i0 = sbSampleLo(subX, n.x, d.x), i1 = sbSampleHi(subX, n.x, d.x);
+        uint j0 = sbSampleLo(subY, n.y, d.y), j1 = sbSampleHi(subY, n.y, d.y);
+        uvec2 g = uvec2(p.srcGuest) + uvec2(gx, gy);
+#else
+        uint sX = p.scale.x;
         uint s = p.scale.x * p.scale.y;  // samples a block
         uint k = (a & 4095u) >> 2;
         uint o = (slot - 1u) * p.slotWords + sbBlockIndex(k, kDen.x, kDen.y) * s;
         uint subX = sbSubX(k, kDen.x), subY = sbSubY(k, kDen.y);
         uint i0 = sbHostEdge(subX, p.scale.x, kDen.x), i1 = sbHostEdge(subX + 1u, p.scale.x, kDen.x);
         uint j0 = sbHostEdge(subY, p.scale.y, kDen.y), j1 = sbHostEdge(subY + 1u, p.scale.y, kDen.y);
+#endif
 #ifdef COALESCED
         uint lb = sbBlockIndex(l, kDen.x, kDen.y);  // the block's in this group (l is the word order)
 #endif
+#ifdef SCALED_FUSE
+        uint tx = x + p.hostX, ty = y + p.hostY;  // the texel in the cached scaled texture
+#endif
         if (slot != 0u)
         {
+#ifndef SB_TEXEL
             ivec2 c0 = p.srcOrigin + ivec2(sbHostEdge(gx, p.scale.x, kDen.x), sbHostEdge(gy, p.scale.y, kDen.y)) - ivec2(i0, j0);
+#endif
             for (uint j = j0; j < j1; j++)
                 for (uint i = i0; i < i1; i++)
                 {
-                    vec4 v = texelFetch(src, clamp(c0 + ivec2(i, j), ivec2(0), ivec2(p.srcSize) - 1), 0);
+#ifdef SB_TEXEL
+                    ivec2 c = ivec2(sbSampleHost(g.x, subX, i, n.x, d.x), sbSampleHost(g.y, subY, j, n.y, d.y));
+#else
+                    ivec2 c = c0 + ivec2(i, j);
+#endif
+                    vec4 v = texelFetch(src, clamp(c, ivec2(0), ivec2(p.srcSize) - 1), 0);
                     if ((p.flags & 2u) == 0u)
                     {
                         v *= p.expScale;
                         if ((p.flags & 1u) != 0u) v = v.bgra;
                     }
+                    uint word32 = swapWord(pack32(v), p.endian);
 #ifdef COALESCED
-                    g_samples[lb * s + j * p.scale.x + i] = swapWord(pack32(v), p.endian);
+                    g_samples[lb * s + j * sX + i] = word32;
+#elif defined(SCALED_FUSE)
+                    if (p.hostWrite != 2u)  // (2: into the texture alone)
+                        s_pool[o + j * sX + i] = word32;
 #else
-                    s_pool[o + j * p.scale.x + i] = swapWord(pack32(v), p.endian);
+                    s_pool[o + j * sX + i] = word32;
+#endif
+#ifdef SCALED_FUSE
+                    // The texture's host texel this sample is (sbReaderHost:
+                    // the untile's own mapping; none for a texel axis's
+                    // padding), from its texel (tx, ty).
+                    if (p.hostWrite != 0u && tx < p.hostWidth && ty < p.hostHeight)
+                    {
+#ifdef SB_TEXEL
+                        uint hx = sbReaderHost(tx, subX, i, n.x, d.x), hy = sbReaderHost(ty, subY, j, n.y, d.y);
+#else
+                        uint hx = sbReaderHost(tx, subX, i, p.scale.x, kDen.x), hy = sbReaderHost(ty, subY, j, p.scale.y, kDen.y);
+#endif
+                        if (hx != ~0u && hy != ~0u)
+                            imageStore(h_image, ivec2(int(hx), int(hy)), uvec4(swapWord(word32, p.hostEndian), 0u, 0u, 0u));
+                    }
 #endif
                 }
         }
 #ifdef COALESCED
+#ifdef SCALED_FUSE
+        if (subX == 0u && subY == 0u)  // (every pixel at a whole scale; hostWrite 2: into the texture alone)
+            g_offsets[lb] = slot != 0u && p.hostWrite != 2u ? o : ~0u;
+#else
         if (subX == 0u && subY == 0u)  // (every pixel at a whole scale)
             g_offsets[lb] = slot != 0u ? o : ~0u;
+#endif
         barrier();
         uint samples = 64u / (kDen.x * kDen.y) * s;
         for (uint q = l; q < samples; q += 64u)
@@ -5027,6 +5513,9 @@ void main()
                     depth = float(v >> 8) / 16777215.0f;
                 }
                 ca.clearValue.depthStencil = { std::clamp(depth, 0.0f, 1.0f), v & 0xFF };
+#ifdef _WIN32
+                s_lastDepthClear[rt->base] = ca.clearValue.depthStencil;  // (see s_lastDepthClear)
+#endif
             }
             else
             {
@@ -5522,10 +6011,16 @@ void main()
                     rc.srcOriginY = source->scale.y.EdgeAt(r.y0 + shiftY);
                     rc.scaleX = source->scale.x.num;
                     rc.scaleY = source->scale.y.num;
+                    rc.denX = source->scale.x.den;
+                    rc.denY = source->scale.y.den;
+                    rc.srcGuestX = std::max(r.x0 + shiftX, 0);
+                    rc.srcGuestY = std::max(r.y0 + shiftY, 0);
                     // At 1.5x the shader counts host pixels from srcOrigin
                     // and the destination's blocks from its origin: both
                     // need even coordinates (resolves are 8-pixel aligned
-                    // and the tile offsets even, so they are).
+                    // and the tile offsets even, so they are). A texel axis
+                    // counts each pixel from its place in the target
+                    // (srcGuest), so any origin will do (Exact).
                     const bool wholeBlocks = (r.x0 + shiftX) >= 0 && (r.y0 + shiftY) >= 0 &&
                         source->scale.x.Exact(uint32_t(r.x0 + shiftX)) && source->scale.y.Exact(uint32_t(r.y0 + shiftY)) &&
                         source->scale.x.Exact(uint32_t(r.x0)) && source->scale.y.Exact(uint32_t(r.y0));
@@ -5542,7 +6037,12 @@ void main()
                     uint32_t lastPage = std::min<uint32_t>((rangeBase + rangeBytes - 1) >> 12, kGuestPages - 1);
                     // A 32-bit resolve from a scaled target keeps its samples.
                     bool scaledWrite = !directShadowResolve && !source->scale.IsOne() && wholeBlocks && bl == 2 && !destInfo.copy_dest_array &&
-                        EnsureScaledMemory() && source->scale == s_scaled.scale;
+                        EnsureScaledMemory() && source->scale == s_scaled.scale && ScaledWanted(rangeBase, rangeBytes);
+                    bool freshSlots = false;  // a page here had no current scaled copy before this
+                    // Pages whose samples only a scaled texture holds (see
+                    // below): their slots are filled from the 1x data too
+                    // unless that texture takes this resolve and keeps them.
+                    std::vector<std::pair<uint32_t, uint32_t>> heldSlots;
                     if (scaledWrite)
                     {
                         std::vector<std::pair<uint32_t, uint32_t>> fresh;
@@ -5551,14 +6051,18 @@ void main()
                             // A slot whose copy went stale (a CPU write, a 1x
                             // resolve) starts over from the 1x data too: the
                             // resolve may not cover all of it.
-                            bool stale = s_scaled.pageSlot[page] != 0 && !ScaledPageValid(page);
+                            const bool held = ScaledPageHeld(page);
+                            bool stale = s_scaled.pageSlot[page] != 0 && !ScaledPageValid(page) && !held;
                             bool isFresh;
                             uint32_t slot = ScaledSlot(page, isFresh);
                             if (isFresh || stale)
                                 fresh.push_back({ page, slot });
+                            else if (held)
+                                heldSlots.push_back({ page, slot });
                         }
                         FlushScaledTable();
                         FillFreshSlots(fresh);
+                        freshSlots = !fresh.empty();
                         rc.scaledWrite = 1;
                         rc.slotWords = s_scaled.slotWords;
                         s_scaled.resolvedBytes += s_scaled.scale.HostPixels(rc.width, rc.height) * 4;
@@ -5581,7 +6085,14 @@ void main()
                     bool partial = false;
                     uint32_t layer = 0, texX = 0, texY = 0;  // partial: the face, and the destination's texel 0,0 in it
                     // Why not (NFSMW_LOG_UPLOADS).
-                    const char* unfused = !s_resolveToTexture ? "off" : scaledWrite ? "scaled resolve" : bl != 2 ? "not 32-bit"
+                    // A scaled resolve writes the same 1x words too, so it
+                    // stores them into a 1x texture of its surface as well
+                    // (NFSMW_SCALED_FUSE=0: not, as before): the scene's depth
+                    // (a D24 texture, never scaled) and its colour where a
+                    // draw into a 1x target (the bloom chain) samples it were
+                    // loaded again every frame at native rows.
+                    const bool fuseHere = !scaledWrite || s_scaledFuse;
+                    const char* unfused = !s_resolveToTexture ? "off" : !fuseHere ? "scaled resolve" : bl != 2 ? "not 32-bit"
                         : "no direct texture there";
                     // Whether `t` can take this resolve's words as its texels at all.
                     auto unfit = [&](const Texture& t) -> const char* {
@@ -5591,7 +6102,7 @@ void main()
                             : t.offX != 0 || t.offY != 0 ? "texture offset"
                             : nullptr;
                     };
-                    if (!scaledWrite && bl == 2 && s_resolveToTexture)
+                    if (fuseHere && bl == 2 && s_resolveToTexture)
                         if (auto it = s_directByBase.find(rc.destBase); it != s_directByBase.end())
                         {
                             Texture& t = *(direct = it->second);
@@ -5604,7 +6115,7 @@ void main()
                             if (!unfused)
                                 fused = &t;
                         }
-                    if (!fused && !scaledWrite && bl == 2 && s_resolveToTexture && (s_fusePartial || s_directCube))
+                    if (!fused && fuseHere && bl == 2 && s_resolveToTexture && (s_fusePartial || s_directCube))
                     {
                         // Each direct texture holding the destination, the
                         // nearest start first, until one takes it: textures
@@ -5663,6 +6174,85 @@ void main()
                             }
                         }
                     }
+                    // A scaled resolve stores its samples into a cached scaled
+                    // texture holding its destination too, where that
+                    // texture's untile would put them (sbReaderHost), so it
+                    // stays current instead of being untiled from the pool
+                    // again before its next use: the scene, every frame. The
+                    // texture as the 1x rule above, by its first byte: this
+                    // surface's pitch, the destination whole 32x32 tiles in
+                    // and all this resolve writes inside it, nothing written
+                    // there since its load, and every page of it current in
+                    // the pool before this resolve (so its texels are the
+                    // pool's, and none of its slots is filled afresh now).
+                    // Its other texels must still be what it loaded: checked
+                    // again after MarkWritten. NFSMW_SCALED_FUSE=0: not.
+                    Texture* hosted = nullptr;
+                    const char* unhosted = !scaledWrite ? nullptr : !s_scaledFuse || !s_resolveToTexture ? "off"
+                        : freshSlots ? "fresh slots" : "no scaled texture there";
+                    uint32_t hostX = 0, hostY = 0;
+                    if (scaledWrite && s_scaledFuse && s_resolveToTexture && !freshSlots)
+                        for (auto it = s_scaledByStart.upper_bound(rc.destBase); !hosted && it != s_scaledByStart.begin();)
+                        {
+                            if (rc.destBase - (--it)->first >= s_maxScaledSize)
+                                break;
+                            Texture& t = *it->second;
+                            if (rc.destBase - t.guestStart >= t.guestSize)
+                                continue;
+                            uint32_t rel = rc.destBase - t.guestStart, tilesPerRow = std::max(t.pitch >> 5, 1u);
+                            uint32_t x = (rel >> 12) % tilesPerRow * 32, y = (rel >> 12) / tilesPerRow * 32;
+                            const char* reason = !(t.uploaded && t.storeView && t.scaled) ? "texture not loaded"
+                                : t.pitch != rc.destPitch ? "pitch differs"
+                                : rel % 4096 != 0 ? "not whole tiles into the texture"
+                                : x + uint32_t(r.x1) > rc.destPitch ? "beyond the texture's columns"
+                                : !(rangeBase >= t.guestStart && uint64_t(rangeBase) + rangeBytes <= uint64_t(t.guestStart) + t.guestSize)
+                                ? "beyond the texture"
+                                : writewatch::WrittenSince(t.guestStart, t.guestSize, t.loadedSequence) ? "texture written since its load"
+                                : !ScaledSurfaceValid(t.guestStart, t.guestSize, t.scaledSig) ? "texture's pages not all current"
+                                : nullptr;
+                            if (!reason)
+                            {
+                                hosted = &t;
+                                hostX = x;
+                                hostY = y;
+                            }
+                            unhosted = reason;
+                        }
+                    // And when no other scaled reader (another texture, the
+                    // front buffer) asked for this memory lately, the samples
+                    // go only into that texture, not the pool too: its pages
+                    // are then held by it (pageHeld), current for it alone;
+                    // any other reader sees them as 1x until a resolve
+                    // writes the pool again (one now asking makes the next
+                    // one do so). NFSMW_SCALED_HOLD=0: always the pool too.
+                    const bool hold = hosted && s_scaledHold &&
+                        !ScaledWanted(rangeBase, rangeBytes, hosted->guestStart, hosted->guestSize, hosted->scaledSig);
+                    // Held pages this resolve doesn't keep held by the same
+                    // texture: their slots start over from the 1x data, as
+                    // stale ones (the pool's copy is old).
+                    if (scaledWrite)
+                    {
+                        std::erase_if(heldSlots, [&](const std::pair<uint32_t, uint32_t>& ps) {
+                            return hold && s_scaled.pageHeld[ps.first] == hosted;
+                        });
+                        if (!heldSlots.empty())
+                        {
+                            FillFreshSlots(heldSlots);
+                            for (const auto& ps : heldSlots)
+                                s_scaled.pageHeld[ps.first] = nullptr;
+                        }
+                    }
+                    if (hosted)
+                    {
+                        rc.hostWrite = hold ? 2 : 1;
+                        rc.hostX = hostX;
+                        rc.hostY = hostY;
+                        rc.hostWidth = hosted->guestWidth;
+                        rc.hostHeight = hosted->guestHeight;
+                        rc.hostEndian = hosted->endian;
+                        LogOnce(0x2900, "scaled resolves store into cached scaled textures too (the first: %ux%u host at %08X, texels from %u,%u)",
+                            hosted->width, hosted->height, rc.destBase, hostX, hostY);
+                    }
                     if (s_uploadLog)
                     {
                         UploadLog& log = *s_uploadLog;
@@ -5674,9 +6264,11 @@ void main()
                             std::string part = !partial ? std::string()
                                 : fused->cube ? std::format(" (face {}, texels from {},{})", layer, texX, texY)
                                 : std::format(" (texels from {},{})", texX, texY);
-                            fprintf(stderr, "[upload] frame %llu resolve dest %08X range %08X+%u rect %ux%u fmt %u pitch %u %s %s%s",
+                            fprintf(stderr, "[upload] frame %llu resolve dest %08X range %08X+%u rect %ux%u fmt %u pitch %u %s %s%s%s%s",
                                 (unsigned long long)s_frame, rc.destBase, rangeBase, rangeBytes, rc.width, rc.height, format, rc.destPitch,
-                                depthSource ? "depth" : "color", fused ? "fused" : "unfused: ", fused ? part.c_str() : unfused);
+                                depthSource ? "depth" : "color", fused ? "fused" : "unfused: ", fused ? part.c_str() : unfused,
+                                !scaledWrite ? "" : hosted ? ", scaled: stored into its scaled texture" : ", scaled: not stored into a scaled texture: ",
+                                scaledWrite && !hosted ? unhosted : "");
                             std::set<std::string> kinds;
                             if (direct)
                                 fprintf(stderr, " | texture %08X+%u %ux%u pitch %u%s%s", direct->guestStart, direct->guestSize, direct->width,
@@ -5703,9 +6295,10 @@ void main()
 
                     VkDescriptorImageInfo ii{ VK_NULL_HANDLE, source->sampleView, VK_IMAGE_LAYOUT_GENERAL };
                     VkDescriptorImageInfo ti{ VK_NULL_HANDLE, fused ? fused->storeViews[layer] : s_dummyStorage.view, VK_IMAGE_LAYOUT_GENERAL };
+                    VkDescriptorImageInfo hi{ VK_NULL_HANDLE, hosted ? hosted->storeView : s_dummyStorage.view, VK_IMAGE_LAYOUT_GENERAL };
                     VkDescriptorBufferInfo pool = DummyStorage(s_scaled.pool);
                     VkDescriptorBufferInfo table = DummyStorage(s_scaled.table);
-                    VkWriteDescriptorSet w[8]{};
+                    VkWriteDescriptorSet w[9]{};
                     w[0] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, VK_NULL_HANDLE, 0, 0, 1,
                         VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &s_sharedInfo[0], nullptr };
                     w[1] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, VK_NULL_HANDLE, 1, 0, 1,
@@ -5716,11 +6309,14 @@ void main()
                         VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &table, nullptr };
                     w[4] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, VK_NULL_HANDLE, 4, 0, 1,
                         VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &ti, nullptr, nullptr };
+                    w[5] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, VK_NULL_HANDLE, 5, 0, 1,
+                        VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &hi, nullptr, nullptr };
                     s_stateEpoch++;
-                    bool coalesced = scaledWrite && s_scaled.coalesce;  // 32x2 pixels a group
+                    bool coalesced = scaledWrite && s_scaled.coalesce && CoalescedFits(source->scale);  // 32x2 pixels a group
                     vkCmdBindPipeline(s_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, ResolvePipeline(coalesced, source->scale));
-                    s_pushDescriptorSet(s_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, s_resolveLayout, 0, AddSharedParts(w, 5), w);
-                    vkCmdPushConstants(s_cmd, s_resolveLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, s_resolvePush, &rc);
+                    s_pushDescriptorSet(s_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, s_resolveLayout, 0, AddSharedParts(w, 6), w);
+                    vkCmdPushConstants(s_cmd, s_resolveLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0,
+                        source->scale.IsOne() ? s_resolvePush : uint32_t(sizeof(ResolveConstants)), &rc);
                     uint32_t perWord = bl >= 2 ? 1 : (4 >> bl);
                     if (!(s_exp & 2))
                         vkCmdDispatch(s_cmd, coalesced ? (rc.width + 31) / 32 : (rc.width / perWord + 7) / 8,
@@ -5741,7 +6337,7 @@ void main()
                         uint32_t g = s_scaled.hostPageGuestPages;
                         for (uint32_t edge : { firstPage, lastPage })
                             for (uint32_t q = edge / g * g; q < edge / g * g + g && q < kGuestPages; q++)
-                                if ((q < firstPage || q > lastPage) && ScaledPageValid(q))
+                                if ((q < firstPage || q > lastPage) && (ScaledPageValid(q) || ScaledPageHeld(q)))
                                     siblings.push_back(q);
                     }
                     uint64_t written = writewatch::MarkWritten(rangeBase, rangeBytes, writewatch::Writer::kResolve, rc.destBase);
@@ -5772,6 +6368,22 @@ void main()
                         fused->loadedSequence = written;
                         fused->verifyHashes.clear();  // (NFSMW_TEXTURE_VERIFY: its memory is the GPU's to change now)
                     }
+                    // The scaled texture likewise: current now, unless a
+                    // page of it outside this resolve was written meanwhile
+                    // (then it loads again, as without this).
+                    bool hostKept = false;
+                    if (hosted && written)
+                    {
+                        if (!partial)
+                            writewatch::Quiesce();  // (as above)
+                        if (!writewatch::WrittenSince(hosted->guestStart, rangeBase - hosted->guestStart, hosted->loadedSequence) &&
+                            !writewatch::WrittenSince(rangeEnd, hosted->guestStart + hosted->guestSize - rangeEnd, hosted->loadedSequence))
+                        {
+                            hosted->loadedSequence = written;
+                            s_scaled.hosted++;
+                            hostKept = true;
+                        }
+                    }
                     if (fused && !keep && s_uploadLog)
                     {
                         s_uploadLog->resolves[rc.destBase].unfused = "texture written outside it meanwhile";
@@ -5788,8 +6400,15 @@ void main()
                         writewatch::Watch(rangeBase, rangeBytes);
                     if (s_scaled.enabled)
                     {
+                        // Held (only the texture has this resolve's samples)
+                        // while the texture took them and stays current; a
+                        // held resolve whose texture didn't: lost (1x).
                         for (uint32_t page = firstPage; page <= lastPage; page++)
-                            s_scaled.pageSeq[page] = scaledWrite ? writewatch::WriteSequence(page << 12, 4096) : 0;
+                        {
+                            const bool lost = hold && !hostKept;
+                            s_scaled.pageSeq[page] = scaledWrite && !lost ? writewatch::WriteSequence(page << 12, 4096) : 0;
+                            s_scaled.pageHeld[page] = hold && hostKept ? hosted : nullptr;
+                        }
                         for (uint32_t q : siblings)
                             s_scaled.pageSeq[q] = writewatch::WriteSequence(q << 12, 4096);
                     }
@@ -5859,8 +6478,8 @@ layout(push_constant) uniform P { uint count, slotWords, listWord, pad; uvec2 sc
 )" GLSL_SCALE_CODE R"(
 // A new slot starts as its page's 1x data, each word in the host samples its
 // texel owns (all s at a whole scale; at 1.5x one, two or four of its
-// block's): a resolve covering the page only in part leaves no garbage
-// around it.
+// block's; on a texel axis all its stride): a resolve covering the page only
+// in part leaves no garbage around it.
 void main()
 {
     uint n = gl_GlobalInvocationID.x;
@@ -5868,12 +6487,13 @@ void main()
     if (pair >= p.count) return;
     uint page = l_pairs[p.listWord + pair * 2u], slot = l_pairs[p.listWord + pair * 2u + 1u];
     uint v = memLoad(page * 1024u + k);
-    uint o = slot * p.slotWords + sbBlockIndex(k, p.den.x, p.den.y) * (p.scale.x * p.scale.y);
+    uint sX = sbStride(p.scale.x, p.den.x);
+    uint o = slot * p.slotWords + sbBlockIndex(k, p.den.x, p.den.y) * (sX * sbStride(p.scale.y, p.den.y));
     uint subX = sbSubX(k, p.den.x), subY = sbSubY(k, p.den.y);
-    uint i1 = sbHostEdge(subX + 1u, p.scale.x, p.den.x), j1 = sbHostEdge(subY + 1u, p.scale.y, p.den.y);
-    for (uint j = sbHostEdge(subY, p.scale.y, p.den.y); j < j1; j++)
-        for (uint i = sbHostEdge(subX, p.scale.x, p.den.x); i < i1; i++)
-            s_pool[o + j * p.scale.x + i] = v;
+    uint i1 = sbSampleHi(subX, p.scale.x, p.den.x), j1 = sbSampleHi(subY, p.scale.y, p.den.y);
+    for (uint j = sbSampleLo(subY, p.scale.y, p.den.y); j < j1; j++)
+        for (uint i = sbSampleLo(subX, p.scale.x, p.den.x); i < i1; i++)
+            s_pool[o + j * sX + i] = v;
 }
 )";
         VkPipeline s_scaledFillPipeline = VK_NULL_HANDLE;
@@ -5894,7 +6514,7 @@ layout(std430, set = 0, binding = 2) writeonly buffer Out { uint o_mem[]; };
 layout(set = 0, binding = 2, r32ui) writeonly uniform uimage2D o_image;
 #endif
 // width, height: the texture's host size (whole blocks); scale / den: host
-// pixels per guest pixel.
+// pixels per guest pixel (a den above 2: a texel axis).
 layout(push_constant) uniform P { uint base, pitch, width, height, endian, slotWords; uvec2 scale, den; } p;
 )" GLSL_SCALE_CODE R"(
 uint tiled2D(uint x, uint y, uint pitch, uint bppLog2)
@@ -5908,13 +6528,7 @@ uint tiled2D(uint x, uint y, uint pitch, uint bppLog2)
         (((oi >> 5) & 7u) << 8) | ((oi >> 8) << 12);
 }
 
-uint swapWord(uint v, uint e)
-{
-    if (e == 1u) return ((v << 8) & 0xFF00FF00u) | ((v >> 8) & 0x00FF00FFu);
-    if (e == 2u) return (v << 24) | ((v << 8) & 0x00FF0000u) | ((v >> 8) & 0x0000FF00u) | (v >> 24);
-    if (e == 3u) return (v >> 16) | (v << 16);
-    return v;
-}
+)" GLSL_SWAP_WORD R"(
 
 void main()
 {
@@ -5922,14 +6536,15 @@ void main()
     uint w = p.width;
     if (h.x >= w || h.y >= p.height) return;
     // Host texel h: sample (h mod scale) of the block (h / scale), whose
-    // first texel is guest (block x den) (gpu/render_scale.h).
-    uvec2 b = h / p.scale;
-    uint a = (p.base + tiled2D(b.x * p.den.x, b.y * p.den.y, p.pitch, 2u)) & 0x1FFFFFFFu;
+    // first texel is guest (block x den); on a texel axis, of the texel
+    // owning it (gpu/render_scale.h).
+    uvec2 t = uvec2(sbBlockTexel(h.x, p.scale.x, p.den.x), sbBlockTexel(h.y, p.scale.y, p.den.y));
+    uint a = (p.base + tiled2D(t.x, t.y, p.pitch, 2u)) & 0x1FFFFFFFu;
     uint slot = s_table[a >> 12];
     uint v = 0u;
     if (slot != 0u)
-        v = s_pool[(slot - 1u) * p.slotWords + sbSampleWord((a & 4095u) >> 2, h.x - b.x * p.scale.x, h.y - b.y * p.scale.y,
-            p.scale.x, p.scale.y, p.den.x, p.den.y)];
+        v = s_pool[(slot - 1u) * p.slotWords + sbSampleWord((a & 4095u) >> 2, sbBlockSample(h.x, p.scale.x, p.den.x),
+            sbBlockSample(h.y, p.scale.y, p.den.y), p.scale.x, p.scale.y, p.den.x, p.den.y)];
 #ifdef TO_BUFFER
     o_mem[h.y * w + h.x] = swapWord(v, p.endian);
 #else
@@ -5979,8 +6594,47 @@ void main()
         {
             uint64_t epoch = ~0ull;
             bool valid = false;
+            uint64_t wanted = 0;  // s_frame + 1 when a scaled reader last asked for it
+            uint32_t base = 0, size = 0;
+            uint64_t sig = 0;     // the scaled texture's (ScaledSignature); 0: the front buffer
         };
         std::unordered_map<uint64_t, ScaledCheck> s_scaledChecks;
+        uint64_t ScaledCheckKey(uint32_t base, uint32_t size, uint64_t sig)
+        {
+            return ((uint64_t(base) << 32) | size) ^ (sig * 0x9E3779B97F4A7C15ull);
+        }
+
+        // Scaled resolves keep their samples only where a scaled reader (a
+        // draw into scaled targets sampling a texture there, the front
+        // buffer) asked for that memory in the last kScaledWantFrames
+        // frames; elsewhere they write the 1x words alone, as at 1x (the
+        // pages then read as 1x, as after any 1x write). The scene's depth
+        // strips (D24: never a scaled texture) and the 1x-only targets'
+        // sources were stored at host resolution every frame for no reader.
+        // A reader that starts asking reads 1x for the frame its memory
+        // takes to be resolved again. NFSMW_SCALED_WANTED=0: every scaled
+        // resolve keeps its samples, as before.
+        constexpr uint64_t kScaledWantFrames = 120;
+        const bool s_scaledWantedOnly = [] { const char* v = std::getenv("NFSMW_SCALED_WANTED"); return !v || v[0] != '0'; }();
+        // (`except`: a scaled texture's surface not to count, ScaledSignature.)
+        bool ScaledWanted(uint32_t base, uint32_t size, uint32_t exceptBase, uint32_t exceptSize, uint64_t exceptSig)
+        {
+            for (const auto& [key, check] : s_scaledChecks)
+            {
+                if (!check.wanted || check.wanted + kScaledWantFrames <= s_frame + 1)
+                    continue;
+                if (exceptSig && check.sig == exceptSig && check.base == exceptBase && check.size == exceptSize)
+                    continue;
+                const uint64_t b = check.base, e = b + check.size;
+                if (b < uint64_t(base) + size && uint64_t(base) < e)
+                    return true;
+            }
+            return false;
+        }
+        bool ScaledWanted(uint32_t base, uint32_t size)
+        {
+            return !s_scaledWantedOnly || ScaledWanted(base, size, 0, 0, 0);
+        }
 
         // The pool, page table and scratch buffer (the caller has the GPU idle).
         void FreeScaledBuffers()
@@ -6014,6 +6668,7 @@ void main()
             s_scaled.scratchSize = 0;
             std::vector<uint32_t>().swap(s_scaled.pageSlot);
             std::vector<uint64_t>().swap(s_scaled.pageSeq);
+            std::vector<const void*>().swap(s_scaled.pageHeld);
             std::vector<uint32_t>().swap(s_scaled.slotPage);
             std::vector<uint8_t>().swap(s_scaled.slotRef);
             s_scaled.dirty.clear();
@@ -6035,14 +6690,28 @@ void main()
                 return false;
             VkPhysicalDeviceProperties props;
             vkGetPhysicalDeviceProperties(s_vk->physical, &props);
-            uint64_t megabytes = 512;
+            // gpu::ScaledPoolMegabytes: 512 MB on a discrete GPU, 128 MB at a
+            // Steam Deck's native rows (1x10/9: 512 MB took ~510 MB more VRAM
+            // than 1x, and 128 MB the same GPU time, 450 MB less).
+            uint64_t megabytes = gpu::ScaledPoolMegabytes(s_scaled.scale, props.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU);
             if (const char* v = std::getenv("NFSMW_SCALED_MB"))
                 megabytes = std::clamp<uint64_t>(std::strtoull(v, nullptr, 10), 16, 4096);
-            // The whole budget, whatever the scale: kept across live changes
-            // of the internal resolution (ResetScaledMemory). Bound whole, so
-            // within the device's storage buffer range (NFSMW_SCALED_MB=4096
-            // is past a 4 GB - 1 limit).
+            // Kept across live changes of the internal resolution
+            // (ResetScaledMemory), and made again larger for a scale that
+            // wants more (below). Bound whole, so within the device's storage
+            // buffer range (NFSMW_SCALED_MB=4096 is past a 4 GB - 1 limit).
             VkDeviceSize poolSize = std::min<VkDeviceSize>(VkDeviceSize(megabytes) << 20, props.limits.maxStorageBufferRange) & ~VkDeviceSize(0xFFFF);
+            if (s_scaled.pool && s_scaled.poolBytes < poolSize)
+            {
+                // (Commands in flight may still bind it, as a stand-in too.)
+                Flush();
+                video::WaitGpuIdle();
+                vkDestroyBuffer(s_dev, s_scaled.pool, nullptr);
+                vkFreeMemory(s_dev, s_scaled.poolMemory, nullptr);
+                s_scaled.pool = VK_NULL_HANDLE;
+                s_scaled.poolMemory = VK_NULL_HANDLE;
+                s_scaled.poolBytes = 0;
+            }
             s_scaled.slotWords = s_scaled.scale.SlotWords();
             s_scaled.slots = uint32_t(std::min<uint64_t>(poolSize / (4ull * s_scaled.slotWords), kGuestPages));
             // Scaled textures up to 1280x1024 (at scale). The untile stores
@@ -6092,6 +6761,7 @@ void main()
             }
             s_scaled.pageSlot.assign(kGuestPages, 0);
             s_scaled.pageSeq.assign(kGuestPages, 0);
+            s_scaled.pageHeld.assign(kGuestPages, nullptr);
             s_scaled.slotPage.assign(s_scaled.slots, 0);
             s_scaled.slotRef.assign(s_scaled.slots, 0);
             long hostPage = sysconf(_SC_PAGESIZE);
@@ -6132,14 +6802,18 @@ void main()
             return true;
         }
 
-        bool ScaledTextureValid(uint32_t base, uint32_t size)
+        bool ScaledTextureValid(uint32_t base, uint32_t size, uint64_t sig)
         {
             uint64_t epoch = writewatch::WriteEpoch();
-            ScaledCheck& check = s_scaledChecks[(uint64_t(base) << 32) | size];
+            ScaledCheck& check = s_scaledChecks[ScaledCheckKey(base, size, sig)];
+            check.base = base;
+            check.size = size;
+            check.sig = sig;
+            check.wanted = s_frame + 1;
             if (check.epoch != epoch)
             {
                 check.epoch = epoch;
-                check.valid = ScaledRangeValid(base, size);
+                check.valid = ScaledSurfaceValid(base, size, sig);
                 if (!check.valid)
                     s_scaled.fallbacks++;
             }
@@ -6268,21 +6942,27 @@ void main()
     if (p.scaled != 0u)
     {
         // Host pixel g: sample (g mod scale) of the block (g / scale), whose
-        // first texel is guest (block x den) (gpu/render_scale.h).
-        uint bx = g.x / p.sx, by = g.y / p.sy;
-        uint a = (p.base + tiled2D(bx * p.denX, by * p.denY, p.pitch, 2u)) & 0x1FFFFFFFu;
+        // first texel is guest (block x den); on a texel axis, of the texel
+        // owning it (gpu/render_scale.h).
+        // (SB_FIXED_*: the scale as constants, a pipeline made for it: no
+        // runtime divisions, see the resolve shader.)
+#ifdef SB_FIXED_NUM_X
+        const uint sx = SB_FIXED_NUM_X, sy = SB_FIXED_NUM_Y, denX = SB_FIXED_DEN_X, denY = SB_FIXED_DEN_Y;
+#else
+        uint sx = p.sx, sy = p.sy, denX = p.denX, denY = p.denY;
+#endif
+        uint tx = sbBlockTexel(g.x, sx, denX), ty = sbBlockTexel(g.y, sy, denY);
+        uint a = (p.base + tiled2D(tx, ty, p.pitch, 2u)) & 0x1FFFFFFFu;
         uint slot = s_table[a >> 12];
-        v = slot != 0u ? s_pool[(slot - 1u) * p.slotWords + sbSampleWord((a & 4095u) >> 2, g.x - bx * p.sx, g.y - by * p.sy, p.sx, p.sy,
-            p.denX, p.denY)] : 0u;
+        v = slot != 0u ? s_pool[(slot - 1u) * p.slotWords + sbSampleWord((a & 4095u) >> 2, sbBlockSample(g.x, sx, denX),
+            sbBlockSample(g.y, sy, denY), sx, sy, denX, denY)] : 0u;
     }
     else
     {
         uint addr = p.base + (p.tiled != 0u ? tiled2D(g.x, g.y, p.pitch, 2u) : (g.y * p.pitch + g.x) * 4u);
         v = memLoad((addr & 0x1FFFFFFFu) >> 2);
     }
-    if (p.endian == 1u) v = ((v << 8) & 0xFF00FF00u) | ((v >> 8) & 0x00FF00FFu);
-    else if (p.endian == 2u) v = (v << 24) | ((v << 8) & 0x00FF0000u) | ((v >> 8) & 0x0000FF00u) | (v >> 24);
-    else if (p.endian == 3u) v = (v >> 16) | (v << 16);
+)" GLSL_FRONT_SWAP R"(
     float c[6];
     if (p.format == 7u || p.format == 54u)
     {
@@ -6302,6 +6982,13 @@ void main()
         VkPipeline s_frontPipeline = VK_NULL_HANDLE;
         VkPipelineLayout s_frontLayout = VK_NULL_HANDLE;
         VkDescriptorSetLayout s_frontSetLayout = VK_NULL_HANDLE;
+        // The same for a texel axis's scale, made for that exact scale
+        // (SB_FIXED_*) at its first scaled present (Steam Deck 1x10/9: the
+        // divisions by the push constants were most of the front's cost).
+        VkPipeline s_frontFixedPipeline = VK_NULL_HANDLE;
+        VkPipelineLayout s_frontFixedLayout = VK_NULL_HANDLE;
+        VkDescriptorSetLayout s_frontFixedSetLayout = VK_NULL_HANDLE;
+        gpu::RenderScale s_frontFixedScale;
         // The front buffer as presented: 1x, and at host resolution when the
         // scaled resolve memory has it (two images: no stall when the game
         // switches between them, e.g. around movies).
@@ -6324,6 +7011,93 @@ void main()
             width = height = 0;
         }
 
+#ifdef _WIN32
+        // (See BlackCheck.) Per 8x8 group, then one atomic add per group that
+        // saw any light.
+        const char* kBlackProbeGlsl = R"(#version 460
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(set = 0, binding = 0, rgba8) readonly uniform image2D frontImage;
+layout(std430, set = 0, binding = 1) buffer Lit { uint lit[]; };
+layout(push_constant) uniform P { uint width, height, entry; } p;
+shared uint s_lit;
+void main()
+{
+    if (gl_LocalInvocationIndex == 0u) s_lit = 0u;
+    barrier();
+    uvec2 g = gl_GlobalInvocationID.xy;
+    if (g.x < p.width && g.y < p.height && any(greaterThan(imageLoad(frontImage, ivec2(g)).rgb, vec3(0.0))))
+        atomicAdd(s_lit, 1u);
+    barrier();
+    if (gl_LocalInvocationIndex == 0u && s_lit != 0u)
+        atomicAdd(lit[p.entry], s_lit);
+}
+)";
+
+        void CreateBlackCheck()
+        {
+            const char* v = std::getenv("NFSMW_BLACK_CHECK");
+            if (!v || v[0] != '1')
+                return;
+            VkBufferCreateInfo bci{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+            bci.size = kBlackEntries * sizeof(uint32_t);
+            bci.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+            Check(vkCreateBuffer(s_dev, &bci, nullptr, &s_black.buffer), "vkCreateBuffer(black check)");
+            VkMemoryRequirements req;
+            vkGetBufferMemoryRequirements(s_dev, s_black.buffer, &req);
+            VkMemoryAllocateInfo mai{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+            mai.allocationSize = req.size;
+            mai.memoryTypeIndex = FindMemoryType(req.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+            Check(vkAllocateMemory(s_dev, &mai, nullptr, &s_black.memory), "vkAllocateMemory(black check)");
+            vkBindBufferMemory(s_dev, s_black.buffer, s_black.memory, 0);
+            void* p;
+            Check(vkMapMemory(s_dev, s_black.memory, 0, VK_WHOLE_SIZE, 0, &p), "vkMapMemory(black check)");
+            s_black.host = static_cast<const volatile uint32_t*>(p);
+            VkDescriptorSetLayoutBinding b[2] = {
+                { 0, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr },
+                { 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr },
+            };
+            CreateComputePipeline(kBlackProbeGlsl, b, 2, 3 * sizeof(uint32_t), s_black.setLayout, s_black.layout, s_black.pipeline);
+            s_black.start = std::chrono::steady_clock::now();
+            s_black.on = true;
+            fprintf(stderr, "[black] NFSMW_BLACK_CHECK: every present's front image is checked; an all-zero one is logged as [black]\n");
+        }
+
+        // After the front pass wrote `front` (and a full barrier), before the
+        // present's submit: count its lit texels into the next entry.
+        void RecordBlackProbe(const Image& front, uint32_t width, uint32_t height)
+        {
+            uint32_t entry = s_black.next++ % kBlackEntries;
+            vkCmdFillBuffer(s_cmd, s_black.buffer, VkDeviceSize(entry) * sizeof(uint32_t), sizeof(uint32_t), 0);
+            VkMemoryBarrier mb{ VK_STRUCTURE_TYPE_MEMORY_BARRIER, nullptr, VK_ACCESS_TRANSFER_WRITE_BIT,
+                VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT };
+            vkCmdPipelineBarrier(s_cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &mb, 0, nullptr, 0, nullptr);
+            VkDescriptorImageInfo ii{ VK_NULL_HANDLE, front.view, VK_IMAGE_LAYOUT_GENERAL };
+            VkDescriptorBufferInfo bi{ s_black.buffer, 0, VK_WHOLE_SIZE };
+            VkWriteDescriptorSet w[2] = {
+                { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, VK_NULL_HANDLE, 0, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &ii, nullptr, nullptr },
+                { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, VK_NULL_HANDLE, 1, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &bi, nullptr },
+            };
+            uint32_t pc[3] = { width, height, entry };
+            s_stateEpoch++;
+            vkCmdBindPipeline(s_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, s_black.pipeline);
+            s_pushDescriptorSet(s_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, s_black.layout, 0, 2, w);
+            vkCmdPushConstants(s_cmd, s_black.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), pc);
+            vkCmdDispatch(s_cmd, (width + 7) / 8, (height + 7) / 8, 1);
+            mb.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+            mb.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+            vkCmdPipelineBarrier(s_cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &mb, 0, nullptr, 0, nullptr);
+            Submission& sub = s_submissions[s_slot];
+            sub.blackEntry = int32_t(entry);
+            sub.blackFrame = s_frame;
+            sub.blackSec = std::chrono::duration<double>(std::chrono::steady_clock::now() - s_black.start).count();
+            sub.blackDraws = uint32_t(s_stats.draws - s_black.drawsAt);
+            sub.blackWaiting = s_pipelineSkips;  // (this frame's: OnSwap, which resets it, comes after the present)
+            sub.blackResolves = uint32_t(s_stats.resolves - s_black.resolvesAt);
+            s_black.drawsAt = s_stats.draws;
+            s_black.resolvesAt = s_stats.resolves;
+        }
+#endif
+
         void CreateUntilePipeline()
         {
             VkDescriptorSetLayoutBinding b[2] = {
@@ -6340,16 +7114,28 @@ void main()
         }
 
         // The resolve shader for sources whose scale has these denominators
-        // (1 or 2 each; the shader's SB_DEN_X, SB_DEN_Y), into `out`.
-        void MakeResolvePipeline(bool coalesced, uint32_t denX, uint32_t denY, VkPipeline* out)
+        // (1 or 2 each; the shader's SB_DEN_X, SB_DEN_Y; 0 for a texel axis,
+        // SB_TEXEL_X, SB_TEXEL_Y: any den above 2, from the constants), into
+        // `out`.
+        void MakeResolvePipeline(bool coalesced, uint32_t denX, uint32_t denY, VkPipeline* out, bool scaled = false,
+            const gpu::RenderScale* fixed = nullptr)
         {
             std::string log;
             std::string preamble = coalesced ? "#define COALESCED\n" : "";
-            if (s_resolvePush != offsetof(ResolveConstants, texX))
+            if (fixed)
+                preamble += std::format("#define SB_FIXED_NUM_X {}u\n#define SB_FIXED_DEN_X {}u\n#define SB_FIXED_NUM_Y {}u\n#define SB_FIXED_DEN_Y {}u\n",
+                    fixed->x.num, fixed->x.den, fixed->y.num, fixed->y.den);
+            if (s_resolvePush != offsetof(ResolveConstants, texX) || scaled)
                 preamble += "#define TEX_OFFSET\n";
-            if (denX != 1)
+            if (scaled)
+                preamble += "#define SCALED_FUSE\n";
+            if (denX == 0)
+                preamble += "#define SB_TEXEL_X 1\n";
+            else if (denX != 1)
                 preamble += std::format("#define SB_DEN_X {}u\n", denX);
-            if (denY != 1)
+            if (denY == 0)
+                preamble += "#define SB_TEXEL_Y 1\n";
+            else if (denY != 1)
                 preamble += std::format("#define SB_DEN_Y {}u\n", denY);
             auto spirv = CompileGlsl(kResolveGlsl, GLSLANG_STAGE_COMPUTE, log, preamble);
             if (spirv.empty())
@@ -6368,34 +7154,44 @@ void main()
         // The resolve pipeline for a source at `scale` (see s_resolveDenPipelines).
         VkPipeline ResolvePipeline(bool coalesced, const gpu::RenderScale& scale)
         {
-            const uint32_t dx = std::clamp(scale.x.den, 1u, 2u), dy = std::clamp(scale.y.den, 1u, 2u);
-            VkPipeline& slot = s_resolveDenPipelines[coalesced][dx - 1][dy - 1];
+            // (0: a texel axis, any den above 2.)
+            const uint32_t dx = scale.x.Texel() ? 0 : std::clamp(scale.x.den, 1u, 2u), dy = scale.y.Texel() ? 0 : std::clamp(scale.y.den, 1u, 2u);
+            const bool scaled = !scale.IsOne();
+            // A texel axis's: one for its exact scale (SB_FIXED_*), kept per
+            // scale (a live change to another makes its own).
+            const bool fixed = scaled && (dx == 0 || dy == 0);
+            static std::map<std::tuple<bool, uint32_t, uint32_t, uint32_t, uint32_t>, VkPipeline> s_fixedPipelines;
+            VkPipeline& slot = fixed ? s_fixedPipelines[{ coalesced, scale.x.num, scale.x.den, scale.y.num, scale.y.den }]
+                : (scaled ? s_resolveScaledPipelines : s_resolveDenPipelines)[coalesced][dx == 0 ? 2 : dx - 1][dy == 0 ? 2 : dy - 1];
             if (!slot)
             {
                 auto start = std::chrono::steady_clock::now();
-                MakeResolvePipeline(coalesced, dx, dy, &slot);
-                fprintf(stderr, "[renderer] resolve pipeline for scale denominators %ux%u%s made (%.1f ms)\n", dx, dy,
-                    coalesced ? ", coalesced" : "", std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count());
+                MakeResolvePipeline(coalesced, dx, dy, &slot, scaled, fixed ? &scale : nullptr);
+                fprintf(stderr, "[renderer] resolve pipeline for scale denominators %sx%s%s%s made (%.1f ms)\n",
+                    dx ? std::to_string(dx).c_str() : "texel", dy ? std::to_string(dy).c_str() : "texel", coalesced ? ", coalesced" : "",
+                    scaled ? ", scaled source" : "",
+                    std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count());
             }
             return slot;
         }
 
         void CreateResolvePipeline()
         {
-            VkDescriptorSetLayoutBinding b[5] = {
+            VkDescriptorSetLayoutBinding b[6] = {
                 { 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr },
                 { 1, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr },
                 { 2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr },  // scaled pool
                 { 3, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr },  // scaled page table
                 { 4, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr },   // a cached texture (or a dummy)
+                { 5, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr },   // a cached scaled texture (or a dummy)
             };
-            auto bindings = WithSharedParts(b, 5);
+            auto bindings = WithSharedParts(b, 6);
             VkDescriptorSetLayoutCreateInfo dslci{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
             dslci.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR;
             dslci.bindingCount = uint32_t(bindings.size());
             dslci.pBindings = bindings.data();
             Check(vkCreateDescriptorSetLayout(s_dev, &dslci, nullptr, &s_resolveSetLayout), "resolve set layout");
-            VkPushConstantRange range{ VK_SHADER_STAGE_COMPUTE_BIT, 0, s_resolvePush };
+            VkPushConstantRange range{ VK_SHADER_STAGE_COMPUTE_BIT, 0, uint32_t(sizeof(ResolveConstants)) };
             VkPipelineLayoutCreateInfo plci{ VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
             plci.setLayoutCount = 1;
             plci.pSetLayouts = &s_resolveSetLayout;
@@ -6418,6 +7214,7 @@ void main()
         memplan::Memory s_planMemory;  // the plan's view of the device's memory
         uint32_t s_guestType = memplan::kNoType;  // the copy's memory type (kNoType: imported)
         std::string s_guestChoice;  // for the [renderer] memory line
+        memplan::Gpu s_planGpu = memplan::Gpu::kOther;  // the kind the memory was planned for (memplan::OverPcieNote)
 
         // Test hooks for the plan's fallbacks, which the machines we test on
         // never need:
@@ -6529,9 +7326,16 @@ void main()
                 return false;
             }
             VkMemoryHostPointerPropertiesEXT hpp{ VK_STRUCTURE_TYPE_MEMORY_HOST_POINTER_PROPERTIES_EXT };
-            if (s_vk->getMemoryHostPointerProperties(s_dev, VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT,
-                    s_sharedHost, &hpp) != VK_SUCCESS)
+            if (VkResult r = s_vk->getMemoryHostPointerProperties(s_dev, VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT,
+                    s_sharedHost, &hpp); r != VK_SUCCESS)
+            {
+                // (A driver can refuse the pointer itself: on Windows guest
+                // memory is a view of a file mapping, which only Intel's
+                // driver is known to import. Logged, so a bug report tells
+                // this from a refused allocation.)
+                fprintf(stderr, "[renderer] importing guest memory failed: the driver doesn't take its host pointer (%d)\n", int(r));
                 return false;
+            }
 
             VkExternalMemoryBufferCreateInfo embci{ VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO };
             embci.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT;
@@ -6641,6 +7445,37 @@ void main()
             return failed.empty() ? std::string() : " after " + failed + " failed";
         }
 
+        // The driver refused every place the plan had for guest memory or the
+        // upload ring (the line before this says which). Elsewhere abort(),
+        // as before. Windows: the game ends with a message, not abort(),
+        // whose SIGABRT handler writes a crash report (and Windows Error
+        // Reporting may add a dump) for what is the player's card or driver,
+        // not a bug in the game; the log has every place tried and the
+        // device's memory (the [renderer] memory heaps line). The tester
+        // build (no console) shows a box, as for a window that can't open
+        // (main.cpp); the watchdog stands down while it waits, so no hang
+        // report either. Called on the command processor's thread.
+        [[noreturn]] void EndWithoutMemory()
+        {
+#ifdef _WIN32
+            report::g_endingWithMessage.store(true);
+            fprintf(stderr, "[renderer] the graphics driver gave the game none of the memory it needs: the game ends here\n");
+            report::FlushLog();
+#ifdef SB_WINDOWS_GUI
+            int answer = MessageBoxA(nullptr,
+                "SpeedBreaker couldn't set up its memory on your graphics card: the graphics driver refused every place the "
+                "game tried (it needs 512 MB for the game's memory and 192 MB for drawing).\n\nUpdate your graphics driver and "
+                "try again. If it still happens, please send the game's log; it is in %LOCALAPPDATA%\\SpeedBreaker\\logs.",
+                "SpeedBreaker", MB_OK | MB_ICONERROR | MB_SETFOREGROUND);
+            fprintf(stderr, "[renderer] message box closed (%d)\n", answer);
+#endif
+            report::FlushLog();
+            std::_Exit(1);
+#else
+            abort();
+#endif
+        }
+
         void CreateSharedMemory()
         {
             s_sharedHost = static_cast<uint8_t*>(g_memory.Translate(vmem::Physical().Base()));
@@ -6685,6 +7520,7 @@ void main()
             VkMemoryRequirements req;
             VkBuffer copy = NewCopyBuffer(req);
             in.bits = req.memoryTypeBits;
+            s_planGpu = in.gpu;
             memplan::Plan plan = memplan::PlanGuestMemory(s_planMemory, in);
             std::string failed;
             const memplan::Candidate* placed = nullptr;
@@ -6700,7 +7536,7 @@ void main()
             if (!placed)
             {
                 fprintf(stderr, "[renderer] guest memory: no place could hold it (%s failed; %s)\n", failed.c_str(), plan.why.c_str());
-                abort();
+                EndWithoutMemory();
             }
             if (placed->place == memplan::Place::kImport)
             {
@@ -6722,6 +7558,19 @@ void main()
             VkBufferCreateInfo bci{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
             bci.size = kRingSize;
             bci.usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+#ifdef _WIN32
+            // Texture uploads copy the untiled texels from the ring into
+            // their images (vkCmdCopyBufferToImage), which needs TRANSFER_SRC:
+            // without it the validation layer reports
+            // VUID-vkCmdCopyBufferToImage-srcBuffer-00174 on every upload.
+            // NFSMW_CHECK_FRONT(_SEC) copies the front image back into the
+            // ring (vkCmdCopyImageToBuffer), which needs TRANSFER_DST
+            // (VUID-vkCmdCopyImageToBuffer-dstBuffer-00191).
+            // The drivers met so far copy anyway; a new driver needn't.
+            // Windows only for now, so the other platforms stay as they are;
+            // the spec wants it everywhere.
+            bci.usage |= VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+#endif
             Check(vkCreateBuffer(s_dev, &bci, nullptr, &s_ring), "vkCreateBuffer(ring)");
             VkMemoryRequirements req;
             vkGetBufferMemoryRequirements(s_dev, s_ring, &req);
@@ -6768,12 +7617,16 @@ void main()
             if (!placed)
             {
                 fprintf(stderr, "[renderer] upload ring: no place could hold it (%s failed; %s)\n", failed.c_str(), plan.why.c_str());
-                abort();
+                EndWithoutMemory();
             }
             // The choice and why, in one line.
             fprintf(stderr, "[renderer] memory: guest memory %s; upload ring in %s, memory type %u (%s)%s\n", s_guestChoice.c_str(),
                 placed->place == memplan::Place::kVram ? "CPU-mapped VRAM" : placed->place == memplan::Place::kCached ? "cached host memory"
                     : "host memory", placed->type, plan.why.c_str(), AfterFailed(failed).c_str());
+            // Issue #40: say so when the GPU reads guest memory across PCIe.
+            if (const char* note = memplan::OverPcieNote(s_planGpu, s_shadowMode && s_shadowInVram,
+                    (s_memProps.memoryTypes[placed->type].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) != 0))
+                fprintf(stderr, "[renderer] note: %s\n", note);
         }
 
         void CreateSet0()
@@ -6808,6 +7661,30 @@ void main()
                 { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, s_set0, 2, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &ring, nullptr },
             };
             vkUpdateDescriptorSets(s_dev, AddSharedParts(w, 3, s_set0), w, 0, nullptr);
+#ifdef _WIN32
+            // (See s_slotSet0.) The same bindings, the constants at each slot.
+            VkDescriptorPoolSize slotSizes[2] = { { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, (s_splitMemory ? 5u : 2u) * kSlots },
+                { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, kSlots } };
+            dpci.maxSets = kSlots;
+            dpci.pPoolSizes = slotSizes;
+            Check(vkCreateDescriptorPool(s_dev, &dpci, nullptr, &s_slotDescriptorPool), "slot descriptor pool");
+            for (uint32_t k = 0; k < kSlots; k++)
+            {
+                dsai.descriptorPool = s_slotDescriptorPool;
+                Check(vkAllocateDescriptorSets(s_dev, &dsai, &s_slotSet0[k]), "slot set 0");
+                VkDescriptorBufferInfo slotConstants{ s_ring, VkDeviceSize(k) * kSlotSize, kConstantsSize };
+                VkWriteDescriptorSet sw[6] = {
+                    { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, s_slotSet0[k], 0, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &s_sharedInfo[0], nullptr },
+                    { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, s_slotSet0[k], 1, 0, 1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, nullptr, &slotConstants, nullptr },
+                    { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, s_slotSet0[k], 2, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &ring, nullptr },
+                };
+                vkUpdateDescriptorSets(s_dev, AddSharedParts(sw, 3, s_slotSet0[k]), sw, 0, nullptr);
+            }
+            const char* slotSets = std::getenv("NFSMW_SLOT_SETS");
+            s_slotSets = !slotSets || slotSets[0] != '0';
+            fprintf(stderr, "[renderer] set 0: %s\n", s_slotSets ? "one per ring slot (dynamic offsets under 16 MB)"
+                : "one for the whole ring (NFSMW_SLOT_SETS=0: dynamic offsets up to 192 MB)");
+#endif
         }
 
         void CreateSamplerAndDummies()
@@ -6861,10 +7738,11 @@ void main()
         //     presenter's AA image with them.
         //   - Mipmaps: the whole texture cache, each texture loaded again
         //     from guest memory when a draw next uses it.
-        // Auto follows the picture's size (the window, fullscreen, Aspect
-        // Ratio) once it has held for kAutoSettleFrames, so a window being
-        // dragged doesn't rebuild at every step; a change of the setting
-        // itself applies at the next swap.
+        // Auto, and a setting's native rows or columns (video::NativeShape),
+        // follow the picture's size (the window, fullscreen, Aspect Ratio)
+        // once it has held for kAutoSettleFrames, so a window being dragged
+        // doesn't rebuild at every step; a change of the setting itself
+        // applies at the next swap.
         uint64_t s_liveGeneration = ~0ull;
         int32_t s_resolutionSetting = 0;  // Internal Resolution as applied
         constexpr uint32_t kAutoSettleFrames = 30;
@@ -6877,6 +7755,10 @@ void main()
                 s_directByBase.erase(it);
             if (auto it = s_directByStart.find(t.guestStart); it != s_directByStart.end() && it->second == &t)
                 s_directByStart.erase(it);
+            if (auto it = s_scaledByStart.find(t.guestStart); it != s_scaledByStart.end() && it->second == &t)
+                s_scaledByStart.erase(it);
+            if (t.scaled)
+                ReleaseHeldPages(&t, t.guestStart, t.guestSize);
             for (auto& [swizzle, view] : t.views)
                 vkDestroyImageView(s_dev, view, nullptr);
             t.views.clear();
@@ -6985,7 +7867,8 @@ void main()
                 return;
             int32_t setting = settings::GetInt(settings::Id::InternalResolution);
             uint32_t regionW = 0, regionH = 0;
-            if (setting <= 0)
+            // Auto, and a setting's native rows or columns, follow the picture.
+            if (setting <= 0 || s_nativeShape)
             {
                 video::FrameRegion(regionW, regionH);
                 if (regionW == 0 || regionH == 0)
@@ -6998,7 +7881,8 @@ void main()
                 s_autoSeen = 0;
                 return;
             }
-            // Only the picture's size moved (Auto): once it has settled.
+            // Only the picture's size moved (Auto, native rows or columns):
+            // once it has settled.
             if (setting == s_resolutionSetting)
             {
                 if (!(want == s_autoWant))
@@ -7081,6 +7965,34 @@ void main()
             last = c;
             lastStores = stores;
         }
+
+#ifdef _WIN32
+        // Fewer and lighter passes on an Intel integrated GPU (see
+        // kFewerPasses): the values the initializers above give with both on,
+        // for each variable not set, and what is derived from them; but the
+        // pass barrier stays at level 0 there (see s_passBarrierLevel).
+        void PassDefaultsForDevice()
+        {
+            if (!s_vk->integratedGpuDefaults)
+                return;
+            auto unset = [](const char* name) { return !std::getenv(name); };
+            if (unset("NFSMW_PASS_MERGE"))
+                s_passMerge = 3;
+            if (unset("NFSMW_CLEAR_FLUSH_RECT"))
+                s_clearFlushRect = true;
+            if (unset("NFSMW_DIRECT_CUBE"))
+                s_directCube = true;
+            if (unset("NFSMW_FUSE_PARTIAL"))
+                s_fusePartial = true;
+            if (unset("NFSMW_UNTILED_AREA"))
+                s_untiledArea = 1;
+            s_resolvePush = s_fusePartial || s_directCube ? offsetof(ResolveConstants, hostWrite) : offsetof(ResolveConstants, texX);
+            fprintf(stderr, "[renderer] passes: merge %u, clear flush rect %s, direct cubes %s, fused partial resolves %s, "
+                "untiled area %s, barrier level %u (an Intel integrated GPU; NFSMW_* variables override)\n",
+                s_passMerge, s_clearFlushRect ? "on" : "off", s_directCube ? "on" : "off", s_fusePartial ? "on" : "off",
+                s_untiledArea ? "on" : "off", s_passBarrierLevel);
+        }
+#endif
     }
 
     bool Initialize(const uint32_t* regs)
@@ -7090,6 +8002,9 @@ void main()
             return false;
         s_dev = s_vk->device;
         s_regs = regs;
+#ifdef _WIN32
+        PassDefaultsForDevice();  // before anything reads them
+#endif
         {
             VkPhysicalDeviceProperties props;
             vkGetPhysicalDeviceProperties(s_vk->physical, &props);
@@ -7217,6 +8132,9 @@ void main()
             CreateComputePipeline(kFrontGlsl, bindings.data(), uint32_t(bindings.size()), 14 * sizeof(uint32_t), s_frontSetLayout,
                 s_frontLayout, s_frontPipeline);
         }
+#ifdef _WIN32
+        CreateBlackCheck();
+#endif
         Flush();
         fprintf(stderr, "[renderer] ready: guest physical memory %s (%llu MB)\n",
             !s_shadowMode ? "imported" : s_shadowInVram ? "copied for the GPU, in VRAM" : "copied for the GPU, in host memory",
@@ -9206,12 +10124,25 @@ void main()
             memcpy(bound.bias, bias, sizeof(bias));
         }
 
+#ifdef _WIN32
+        // The constants' slot's set and their offset in it (see s_slotSet0).
+        // `bound` keeps the whole ring offset, which names both, so a skip
+        // never leaves another slot's set bound.
+        VkDescriptorSet set0 = s_slotSets ? s_slotSet0[constantsOffset / kSlotSize] : s_set0;
+        uint32_t dynamicOffset = uint32_t(s_slotSets ? constantsOffset % kSlotSize : constantsOffset);
+        if (fresh || bound.setOffset != uint32_t(constantsOffset))
+        {
+            vkCmdBindDescriptorSets(s_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, layout.pipeline, 0, 1, &set0, 1, &dynamicOffset);
+            bound.setOffset = uint32_t(constantsOffset);
+        }
+#else
         uint32_t dynamicOffset = uint32_t(constantsOffset);
         if (fresh || bound.setOffset != dynamicOffset)
         {
             vkCmdBindDescriptorSets(s_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, layout.pipeline, 0, 1, &s_set0, 1, &dynamicOffset);
             bound.setOffset = dynamicOffset;
         }
+#endif
 
         VkWriteDescriptorSet writes[96];
         uint32_t writeCount = 0;
@@ -9571,6 +10502,13 @@ void main()
         // At host resolution when a scaled resolve wrote it (the game's frames;
         // movies and loading screens drawn at 1x use the 1x image). At 1.5x
         // only a front buffer of whole blocks (even; 1280x720 is).
+        if (pc.tiled && !showTexture[0] && s_scaled.enabled)
+        {
+            ScaledCheck& check = s_scaledChecks[ScaledCheckKey(pc.base, frontBytes, 0)];  // (ScaledWanted)
+            check.base = pc.base;
+            check.size = frontBytes;
+            check.wanted = s_frame + 1;
+        }
         bool scaled = pc.tiled && !showTexture[0] && s_scaled.enabled && s_scaled.scale.Exact(width, height) &&
             ScaledRangeValid(pc.base, frontBytes);
         uint32_t outW = scaled ? s_scaled.scale.x.Size(width) : width, outH = scaled ? s_scaled.scale.y.Size(height) : height;
@@ -9618,12 +10556,35 @@ void main()
             { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, VK_NULL_HANDLE, 3, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &table, nullptr },
         };
         s_stateEpoch++;
-        vkCmdBindPipeline(s_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, s_frontPipeline);
-        s_pushDescriptorSet(s_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, s_frontLayout, 0, AddSharedParts(w, 4), w);
-        vkCmdPushConstants(s_cmd, s_frontLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
+        const bool fixedFront = scaled && (s_scaled.scale.x.Texel() || s_scaled.scale.y.Texel());
+        if (fixedFront && !(s_frontFixedPipeline && s_frontFixedScale == s_scaled.scale))
+        {
+            // (A live change's old one may still be in flight: kept, not destroyed. Rare.)
+            VkDescriptorSetLayoutBinding fb[4] = {
+                { 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr },
+                { 1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr },
+                { 2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr },
+                { 3, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr },
+            };
+            auto bindings = WithSharedParts(fb, 4);
+            const gpu::RenderScale& sc = s_scaled.scale;
+            CreateComputePipeline(kFrontGlsl, bindings.data(), uint32_t(bindings.size()), 14 * sizeof(uint32_t), s_frontFixedSetLayout,
+                s_frontFixedLayout, s_frontFixedPipeline,
+                std::format("#define SB_FIXED_NUM_X {}u\n#define SB_FIXED_DEN_X {}u\n#define SB_FIXED_NUM_Y {}u\n#define SB_FIXED_DEN_Y {}u\n",
+                    sc.x.num, sc.x.den, sc.y.num, sc.y.den).c_str());
+            s_frontFixedScale = sc;
+        }
+        VkPipelineLayout frontLayout = fixedFront ? s_frontFixedLayout : s_frontLayout;
+        vkCmdBindPipeline(s_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, fixedFront ? s_frontFixedPipeline : s_frontPipeline);
+        s_pushDescriptorSet(s_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, frontLayout, 0, AddSharedParts(w, 4), w);
+        vkCmdPushConstants(s_cmd, frontLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
         vkCmdDispatch(s_cmd, (outW + 7) / 8, (outH + 7) / 8, 1);
         GuardGpu(pc.base, frontBytes, false, "front buffer");
         FullBarrier();
+#ifdef _WIN32
+        if (s_black.on)
+            RecordBlackProbe(front, outW, outH);
+#endif
         SubmitRecorded(7);  // the presenter's blit comes later in queue order
         video::SubmitFrontImage(front.image, outW, outH, width, height, between, shift, target);
         // Back at 1x (a live change): the host-resolution image is no longer
@@ -10106,7 +11067,7 @@ void main()
     ScaledStats GetScaledStats()
     {
         return { s_scaled.loads, s_scaled.untiledBytes, s_scaled.resolvedBytes, s_scaled.allocations, s_scaled.evictions,
-            s_scaled.fallbacks };
+            s_scaled.fallbacks, s_scaled.hosted };
     }
 
     Stats GetStats()

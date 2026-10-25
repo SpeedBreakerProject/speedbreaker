@@ -41,7 +41,7 @@
 [Download](#download) · [Quick start](#quick-start) · [How to update](#how-to-update) ·
 [Setup by platform](#setup-by-platform) ·
 [Controls](#controls) · [Settings](#settings) · [Tips](#tips-for-smooth-play) ·
-[FAQ](#faq-and-troubleshooting) · [What's next](#whats-next) ·
+[FAQ](#faq-and-troubleshooting) · [Known issues](#known-issues) · [What's next](#whats-next) ·
 [For developers](#for-developers) · [Credits](#credits) · [License](#license) ·
 [Legal notice](#legal-notice)
 
@@ -64,13 +64,17 @@ and a settings menu you can open mid-race.
   3x is 3840x2160). *Auto* picks a scale for your screen and device.
 - **Ultrawide done right.** On 21:9 screens the view gets wider instead of stretched, and the
   HUD and the rear-view mirror stay in place. A 4:3 iPad, a 3:2 screen or the 16:10 screens of
-  the Steam Deck and many Macs show more above and below instead, and fill the screen.
+  the Steam Deck and many Macs show more above and below instead, and fill the screen at their
+  own resolution: a Steam Deck renders 1280x800 at 1x, pixel for pixel.
 - **Up to 60 fps,** locked to your 60 Hz display. You can also pick a steady 30 at full game
   speed, or *Auto*, which drops to 30 only while a device is hot or can't hold 60. On a Mac with
   a 120 Hz screen, *Smooth Motion* draws up to 120 fps (off by default).
 - **Two-player split screen** (Quick Race > Split Screen), with two controllers.
 - **USB steering wheels (experimental).** Tested with a Logitech G29 on a Mac, force feedback
   included; the steering feel is still being tuned.
+- **Ten languages.** English, French, German, Italian, Spanish, Dutch, Swedish, Danish, Polish
+  and Finnish, from the USA disc's own text (Settings > Game > Language). The movies and the
+  speech stay in English, as on the USA disc.
 - **The sun glare is back.** The low sun glows in open sky and fades behind buildings, as it did
   on the console.
 - **The original look:** sunlit roads and shadows as on the console, the picture a real Xbox 360
@@ -120,7 +124,7 @@ belongs to its owners.</sub>
 | **Linux** (x86-64) | [Download][dl-steamos-x86_64] the x86-64 SteamOS build, `SpeedBreaker-steamos-x86_64.tar.xz`, or [build from source](#building-from-source) | Tested here on SteamOS. Players reported v0.1.1 working on Fedora 44 (GeForce GTX 1080 Ti) and Ubuntu 24.04 (Intel Arc 140T). Other setups: reports welcome. |
 | **Mac** (Apple silicon) | [Download][dl-macos]<br>`SpeedBreaker-macos.dmg` | MacBook Pro (M1 Pro) on macOS 27 and Mac Studio (M4 Max) on macOS 26; macOS 15.6 (Sequoia) in a virtual machine. There is no Intel Mac build. |
 | **iPhone** and **iPad** | [Sideload the IPA](#iphone-and-ipad) (experimental), `SpeedBreaker-<version>-ios.ipa` on the [release page][releases], or [build it yourself](#iphone-and-ipad) with Xcode | iPhone 15 Pro Max and iPhone 18 Pro Max (iOS 27). iPad Pro 12.9-inch (M2, iPadOS 27) with a Backbone Pro. Not on the App Store. Those were Xcode-signed builds: the IPA itself hasn't been installed on a device yet. |
-| **Windows** | Coming soon | |
+| **Windows** (beta) | [Download][all-releases] `SpeedBreaker-0.1.9-windows-x64-beta.zip` from the Releases page; see [Windows (beta)](#windows-beta) | A laptop with Intel UHD Graphics (60 Hz). NVIDIA, AMD and recent Intel Arc graphics and 120/144 Hz monitors haven't been tested yet: [reports welcome](#reporting-a-bug). |
 | **Android** | Coming soon | |
 
 Each link downloads the newest release. Every file and its `.sha256` checksum file are on the
@@ -147,6 +151,8 @@ should say OK. What changed in each release is in [CHANGELOG.md](CHANGELOG.md).
 - **Steam Frame** (the arm64 SteamOS download): SteamOS on the Steam Frame, kept up to date
   (v0.1.2 needs the September 2026 release or later). The arm64 download is for the Frame only;
   it hasn't been tested on any other arm64 Linux device.
+- **Windows (beta):** Windows 10 or 11, 64-bit; a CPU with AVX2 (Intel Haswell from 2013 or
+  newer, or any AMD Ryzen); a Vulkan 1.2 graphics card with a current driver.
 - **Mac:** Apple silicon and **macOS 15** (Sequoia) or later. The app won't open on older
   versions of macOS, and there is no Intel Mac build.
 - **iPhone and iPad:** iOS or iPadOS 17 or later, on an A15-class chip or newer (iPhone 13 and
@@ -160,7 +166,7 @@ should say OK. What changed in each release is in [CHANGELOG.md](CHANGELOG.md).
    the extracted disc files. No title update is needed. SpeedBreaker doesn't provide game files
    or disc images, or link to them.
 2. **Get SpeedBreaker.** [Download it](#download) for Steam Deck, Steam Machine and Steam Frame
-   (SteamOS), Linux or Mac. On iPhone and iPad you sideload the experimental IPA or build it
+   (SteamOS), Linux, Mac or Windows (beta). On iPhone and iPad you sideload the experimental IPA or build it
    yourself. Then follow the
    [setup for your platform](#setup-by-platform).
 3. **Start it and install.** On first run, SpeedBreaker looks for your disc image, checks that
@@ -177,6 +183,7 @@ should say OK. What changed in each release is in [CHANGELOG.md](CHANGELOG.md).
 
 - **Mac:** drag the new SpeedBreaker into Applications, choose **Replace**, then allow it once more with **Open Anyway** (see [Mac setup](#mac)).
 - **Steam Deck, Steam Machine, Steam Frame and Linux:** unpack the new download over the old folder (`~/Games/SpeedBreaker`); your Steam shortcut keeps working.
+- **Windows (beta):** extract the new zip into a new folder, run it from there, then delete the old folder.
 - **Everywhere:** your saves, settings and the installed game are kept, and no disc image is needed. Settings > Advanced > **Check for Updates** says when there's a new release, and so does GitHub's **Watch > Custom > Releases**.
 
 ## Setup by platform
@@ -291,6 +298,23 @@ launcher also turns on PRIME render offload. That hasn't been confirmed on a rea
 yet: the log's `[video] Vulkan devices:` line says which GPU it chose and why, and a report with
 that line from yours would help. To pick another, start it with `NFSMW_GPU=<its number or part of
 its name>`, e.g. `NFSMW_GPU=intel %command%` in Steam's launch options.
+
+### Windows (beta)
+
+The Windows version is a **beta**: so far it has been tested on one laptop with Intel UHD
+Graphics and a 60 Hz screen. Download `SpeedBreaker-0.1.9-windows-x64-beta.zip` from the
+[Releases page][all-releases], right-click it, choose **Extract All**, and double-click
+`SpeedBreaker.exe` in the extracted folder (not inside the zip). SpeedBreaker isn't signed, so
+Windows may say **"Windows protected your PC"**: click **More info**, then **Run anyway**.
+(Smart App Control, where it's on, offers no Run anyway.) The installer then works as on the
+other platforms: it looks for your `.iso` in your user folder, Downloads, Desktop, Documents and
+Games and on your other drives, or takes one (or an extracted disc folder) you browse for, and
+puts the game in `%LOCALAPPDATA%\SpeedBreaker`, where your saves, settings and logs go too.
+`README.txt` in the zip has the details. **Check for Updates** isn't available on Windows yet.
+
+Please [report](#reporting-a-bug) how it runs, especially on NVIDIA, AMD and Intel Arc
+graphics and on 120 or 144 Hz monitors, with "Windows beta" in the issue's title. Windows
+builds made by others aren't supported here.
 
 ### Mac
 
@@ -422,7 +446,7 @@ switcher).
 | Frame Rate | Auto / 60 fps / 30 fps | 60 fps on most devices. 30 fps keeps the game at full speed. Auto runs at 60, or at a steady 30 while the device is hot or can't hold 60. |
 | Smooth Motion | On / Off | Off. On a Mac with a 120 Hz screen: up to 120 fps. The game still runs at 60 steps a second, as on the console, and draws one more picture between each two; the controls answer a few milliseconds later. Heavy scenes ease off, down to an even 60 for a while. Takes effect the next time the game starts. Shown only where it works. |
 | Screen Resolution | Full / 75% | Full. iPhone and iPad only: 75% is slightly softer and saves graphics work. |
-| Aspect Ratio | Fill Screen / 16:9 | Fill Screen: wider screens get a wider view; 4:3, 3:2 and 16:10 screens (the Steam Deck, many Macs) a taller one. 16:9 always shows the classic picture with bars. |
+| Aspect Ratio | Fill Screen / 16:9 | Fill Screen: wider screens get a wider view; 4:3, 3:2 and 16:10 screens (the Steam Deck, many Macs) a taller one. Since v0.1.9 the game renders the screen's own shape: a Steam Deck draws 1280x800 at 1x, a 1920x1200 screen 1920x1200 at 1.5x. 16:9 always shows the classic picture with bars. |
 | Brightness | -5 to +5 | 0, the picture as it is. Each step makes the shadows and mid-tones a little lighter or darker, like a TV's brightness; black and white stay put, and the menus never change. |
 | Xbox 360 Display Gamma | On / Off | On: the gamma ramp the game sets for a real Xbox 360's TV output, with slightly deeper shadows and slightly brighter mid-tones. Off: the flatter picture of v0.1.3 and earlier. |
 
@@ -439,7 +463,13 @@ then Yes, puts it back.
 | Sharpening | 0.00 to 1.00 | 0.30 (0 turns it off). With FSR 1, the share of its sharpening pass's full strength. |
 | Anisotropic Filtering | Auto / Off / 2x / 4x / 8x / 16x / Original | Auto: 16x on dedicated graphics cards and M-series iPads, 4x elsewhere. Original uses each texture's own setting, as on the 360. |
 | Mipmaps | On / Off | On, so distant textures don't shimmer |
-| Internal Resolution | Auto / 1x (720p) / 1.5x (1080p) / 2x (1440p) / 3x (2160p) | Sun shadows follow this setting, capped at 2x. Auto: enough to cover your screen, within what the device can afford (whole scales only: 1x, 2x, 3x, or 3x2 on an ultrawide). On iPhone and iPad, Auto always picks 1x. |
+| Internal Resolution | Auto / 1x (720p) / 1.5x (1080p) / 2x (1440p) / 3x (2160p) | Sun shadows follow this setting, capped at 2x. Auto: enough to cover your screen, within what the device can afford: the screen's own shape when that fits (a Steam Deck's 1280x800), otherwise whole scales (1x, 2x, 3x, or 3x2 on an ultrawide). On iPhone and iPad, Auto always picks 1x. With Fill Screen, the rows count the screen's shape: 1x on a 16:10 screen is 1280x800. |
+
+**Game:** Language (English): French, German, Italian, Spanish, Dutch, Swedish, Danish, Polish or
+Finnish switch the menus and the race text (European languages show km/h) the next time the game
+starts. The text comes from the USA disc's own files; the movies and the speech stay in English.
+The line under the row says what your installed files give the language you choose. Not shown on
+iPhone and iPad.
 
 **Audio:** Master Volume (100%), Mute (Off), and Mute in Background (Off), which silences the
 game while its window isn't in front.
@@ -500,7 +530,8 @@ your own disc, and SpeedBreaker checks it file by file.
 **Which version of the game do I need?**
 The Xbox 360 **USA release (NTSC-U, English)**. The installer checks your image and tells you if
 it's a different version. PAL and Japanese discs and re-releases haven't been tested, so expect
-the installer to refuse them. Games on Demand packages aren't supported, and no title update is
+the installer to refuse them. The USA disc already holds the game's text in nine more languages:
+pick one in Settings > Game > Language. Games on Demand packages aren't supported, and no title update is
 used.
 
 **Does it work with the PC version of the game?**
@@ -594,7 +625,7 @@ SpeedBreaker folder instead: `data/`, `data/game` and `cache/`.
 2. A notice says where the zip file went: your **Desktop** (on SteamOS, pick it up in Desktop
    Mode, or in the Desktop app on a Steam Frame), the **SpeedBreaker** folder in the Files app on
    iPhone and iPad, or the data folder above when there is no Desktop. Its name says which
-   version you were running, for example `speedbreaker-bug-report-v0.1.8-<date>_<time>.zip`.
+   version you were running, for example `speedbreaker-bug-report-v0.1.9-<date>_<time>.zip`.
 3. Open an [issue][issues], attach the zip, and say what you were doing, what you expected, what
    happened, and roughly how long into the session it happened.
 
@@ -604,9 +635,19 @@ crashed, start it again and save a report: the crash report is included. **Never
 files or disc images to an issue.** [CONTRIBUTING.md](CONTRIBUTING.md) says how bug reports and
 pull requests are handled.
 
+## Known issues
+
+- **Mac: wired Xbox controllers don't rumble.** macOS drives an Xbox One or Series controller
+  connected by USB through its own controller framework, which never runs the motors. Pair it
+  over Bluetooth for rumble (a DualSense rumbles either way). The game says so once.
+- **Languages:** the movies and the speech (the police radio, the voices in the scenes) stay in
+  English in every language, as the USA disc has them. Fan translations aren't supported.
+- **Steering wheels are experimental:** the steering feel is still being tuned; see
+  [Settings](#settings).
+
 ## What's next
 
-- **Windows:** coming soon.
+- **Windows:** in [beta](#windows-beta) now; a full release once it has run on more PCs.
 - **Android:** coming soon.
 
 **One more thing… SpeedBreaker: Carbon, coming soon.** It's planned, not available yet.
@@ -690,6 +731,12 @@ The supported executable is 3,936,256 bytes, with SHA-256
 
 - **Other Linux distributions:** your distribution's equivalents of the package list above
   (Clang 18 or newer). Untested so far. The GPU needs Vulkan 1.2 and BC (DXT) texture support.
+- **Windows (beta):** the Visual Studio Build Tools (MSVC's libraries, the Windows SDK) with
+  LLVM's `clang-cl` 19 or newer, CMake and Ninja, and SDL3, glslang and FFmpeg's XMA decoder built
+  as static libraries with the static C runtime (`/MT`) into one folder. FFmpeg's configure
+  options are `scripts/build_ffmpeg_xma.sh`'s, with FFmpeg's MSVC toolchain; the Windows
+  third-party source archive on the release page has the exact build script. Step 2 runs on a
+  Mac or Linux; copy `ppc/` and `tools/XenonRecomp` to the Windows PC.
 - `gh`, logged in, is optional: it fetches Xenia's instruction tests.
 
 #### 2. Toolchain, your game files, recompilation
@@ -730,6 +777,17 @@ cmake -S . -B build/main -G Ninja -DCMAKE_BUILD_TYPE=Release \
 
 ninja -C build/main SpeedBreaker
 ```
+
+On Windows (beta), from an x64 Visual Studio developer prompt with `clang-cl` on `PATH`:
+
+```bat
+cmake -S . --preset windows-clang -DCMAKE_PREFIX_PATH=<deps folder> -DFFMPEG_XMA=<deps folder>
+ninja -C build\windows SpeedBreaker
+```
+
+`--preset windows-clang-tester` instead links it without a console window and labels it, as the
+download is; `python scripts\windows\make_zip.py --public ...` (its header lists the options)
+packages it with the license notices.
 
 Run `build/main/runtime/SpeedBreaker` from the repository root. With the whole disc extracted in
 `game/files`, it plays from there. Otherwise the first-run installer asks for your disc image.
@@ -847,6 +905,7 @@ SpeedBreaker is provided "as is", without warranty of any kind, as set out in th
 Public License.
 
 [releases]: https://github.com/SpeedBreakerProject/speedbreaker/releases/latest
+[all-releases]: https://github.com/SpeedBreakerProject/speedbreaker/releases
 [dl-steamos-x86_64]: https://github.com/SpeedBreakerProject/speedbreaker/releases/latest/download/SpeedBreaker-steamos-x86_64.tar.xz
 [dl-steamos-arm64]: https://github.com/SpeedBreakerProject/speedbreaker/releases/latest/download/SpeedBreaker-steamos-arm64.tar.xz
 [dl-macos]: https://github.com/SpeedBreakerProject/speedbreaker/releases/latest/download/SpeedBreaker-macos.dmg

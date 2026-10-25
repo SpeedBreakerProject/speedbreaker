@@ -235,42 +235,24 @@ uint32_t XamShowMessageBoxUI(uint32_t dwUserIndex, be<uint16_t>* wszTitle, be<ui
 #if _DEBUG
     assert("XamShowMessageBoxUI encountered!" && false);
 #elif _WIN32
-    // This code is Win32-only as it'll most likely crash, misbehave or
-    // cause corruption due to using a different type of memory than what
-    // wchar_t is on Linux. Windows uses 2 bytes while Linux uses 4 bytes.
-    std::vector<std::wstring> texts{};
-
-    texts.emplace_back(reinterpret_cast<wchar_t*>(wszTitle));
-    texts.emplace_back(reinterpret_cast<wchar_t*>(wszText));
-
+    // SpeedBreaker: the 360 shows a message box (no UI for one yet): log it.
+    // Its strings are big-endian UTF-16, which Windows' wchar_t holds after a
+    // swap (elsewhere wchar_t is 4 bytes, so only Windows logs them).
+    auto text = [](const be<uint16_t>* guest) {
+        std::wstring wide;
+        for (; guest && guest->get() != 0; guest++)
+            wide.push_back(wchar_t(guest->get()));
+        int n = WideCharToMultiByte(CP_UTF8, 0, wide.c_str(), int(wide.size()), nullptr, 0, nullptr, nullptr);
+        std::string out(size_t(std::max(n, 0)), '\0');
+        if (n > 0)
+            WideCharToMultiByte(CP_UTF8, 0, wide.c_str(), int(wide.size()), out.data(), n, nullptr, nullptr);
+        return out;
+    };
+    std::string buttons;
     for (size_t i = 0; i < cButtons; i++)
-        texts.emplace_back(reinterpret_cast<wchar_t*>(pwszButtons[i].get()));
-
-    for (auto& text : texts)
-    {
-        for (size_t i = 0; i < text.size(); i++)
-            ByteSwapInplace(text[i]);
-    }
-
-    wprintf(L"[XamShowMessageBoxUI] !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n");
-    wprintf(L"[XamShowMessageBoxUI] If you are encountering this message and the game has ceased functioning,\n");
-    wprintf(L"[XamShowMessageBoxUI] please report it at https://github.com/SpeedBreakerProject/speedbreaker/issues.\n");
-    wprintf(L"[XamShowMessageBoxUI] !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n");
-    wprintf(L"[XamShowMessageBoxUI] %ls\n", texts[0].c_str());
-    wprintf(L"[XamShowMessageBoxUI] %ls\n", texts[1].c_str());
-    wprintf(L"[XamShowMessageBoxUI] ");
-
-    for (size_t i = 0; i < cButtons; i++)
-    {
-        wprintf(L"%ls", texts[2 + i].c_str());
-
-        if (i != cButtons - 1)
-            wprintf(L" | ");
-    }
-
-    wprintf(L"\n");
-    wprintf(L"[XamShowMessageBoxUI] Defaulted to button: %d\n", pResult->get());
-    wprintf(L"[XamShowMessageBoxUI] !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n");
+        buttons += (i ? " | " : "") + text(pwszButtons[i].get());
+    fprintf(stderr, "[xam] the game showed a message box, answered with button %u: \"%s\": \"%s\" [%s]\n",
+        uint32_t(pResult->get()), text(wszTitle).c_str(), text(wszText).c_str(), buttons.c_str());
 #endif
 
     XamNotifyEnqueueEvent(9, 0);

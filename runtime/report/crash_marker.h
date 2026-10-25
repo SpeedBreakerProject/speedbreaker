@@ -14,7 +14,10 @@
 // the game had gone (a Steam Frame session its player closed from Steam,
 // 2026-10-15) said nothing about how it ended.
 //
-// POSIX file calls only. Header only (tests/clean_exit_test.cpp).
+// POSIX file calls only (Windows: the platform layer's, on wide paths, so a
+// user folder of any name works; a session there that Task Manager ends, or
+// that Windows ends without asking it, keeps its marker as SIGKILL's does).
+// Header only (tests/clean_exit_test.cpp, POSIX only).
 #pragma once
 #include <cstdint>
 #include <filesystem>
@@ -22,8 +25,13 @@
 #include <system_error>
 #include <vector>
 
+#ifdef _WIN32
+#include <platform/file_io.h>
+#include <platform/os.h>
+#else
 #include <fcntl.h>
 #include <unistd.h>
+#endif
 
 namespace report::marker
 {
@@ -36,18 +44,34 @@ namespace report::marker
 
     // Startup: the session's empty marker, open for the crash handler (-1:
     // it couldn't be made).
+#ifdef _WIN32
+    inline int Arm(const wchar_t* path)
+    {
+        return platform::OpenFile(path, O_RDWR | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+    }
+#else
     inline int Arm(const char* path)
     {
         return open(path, O_RDWR | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
     }
+#endif
 
     // The session ended cleanly: the marker closed and removed.
+#ifdef _WIN32
+    inline void Clear(int fd, const wchar_t* path)
+    {
+        if (fd >= 0)
+            _close(fd);
+        platform::RemoveFile(path);
+    }
+#else
     inline void Clear(int fd, const char* path)
     {
         if (fd >= 0)
             close(fd);
         unlink(path);
     }
+#endif
 
     // An earlier session's marker, as a launch finds it.
     enum class Ended

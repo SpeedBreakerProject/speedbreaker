@@ -22,6 +22,9 @@
 #include <future>
 #include <thread>
 #include <utility>
+#ifdef _WIN32
+#include <platform/folders.h>
+#endif
 
 #if defined(__APPLE__) && TARGET_OS_IOS
 #include <platform/ios_files.h>
@@ -134,6 +137,14 @@ namespace ui
             }
 #else
             static const SDL_DialogFileFilter filters[] = { { "Xbox 360 disc image", "iso" }, { "All files", "*" } };
+#ifdef _WIN32
+            // Downloads, where a disc image most likely is (never HOME: Git
+            // Bash and MSYS2 set it to their own idea of home).
+            static const std::string start = platform::GetKnownFolder(platform::KnownFolder::Downloads).string();
+            const char* startAt = start.empty() ? nullptr : start.c_str();
+#else
+            const char* startAt = std::getenv("HOME");
+#endif
             if (purpose == DialogFor::Destination)
             {
                 // Where to install: titled as such (where the platform shows a
@@ -146,8 +157,8 @@ namespace ui
                 // Portable mode: it opens in SpeedBreaker's folder, where the game moves with it.
                 if (const portable::Layout& layout = portable::Current(); layout.Active())
                     SDL_SetStringProperty(props, SDL_PROP_FILE_DIALOG_LOCATION_STRING, layout.root.string().c_str());
-                else if (const char* home = std::getenv("HOME"))
-                    SDL_SetStringProperty(props, SDL_PROP_FILE_DIALOG_LOCATION_STRING, home);
+                else if (startAt)
+                    SDL_SetStringProperty(props, SDL_PROP_FILE_DIALOG_LOCATION_STRING, startAt);
                 SDL_SetStringProperty(props, SDL_PROP_FILE_DIALOG_TITLE_STRING, "Choose where to install the game");
 #ifdef __APPLE__
                 SDL_SetStringProperty(props, SDL_PROP_FILE_DIALOG_ACCEPT_STRING, "Choose");
@@ -156,9 +167,9 @@ namespace ui
                 SDL_DestroyProperties(props);
             }
             else if (folder)
-                SDL_ShowOpenFolderDialog(OnDialog, request, GetWindow(), std::getenv("HOME"), false);
+                SDL_ShowOpenFolderDialog(OnDialog, request, GetWindow(), startAt, false);
             else
-                SDL_ShowOpenFileDialog(OnDialog, request, GetWindow(), filters, 2, std::getenv("HOME"), false);
+                SDL_ShowOpenFileDialog(OnDialog, request, GetWindow(), filters, 2, startAt, false);
 #endif
         }
 
@@ -281,6 +292,11 @@ namespace ui
 #elif defined(__APPLE__)
         const char* kWhereToPut = "Put your .iso file in a Games folder in your home folder and choose Rescan, or browse for it.";
         const char* kScanning = "Looking for disc images in ~/Games...";
+#elif defined(_WIN32)
+        // The folders install::DiscImageSearchFolders reads on Windows.
+        const char* kWhereToPut = "Put your .iso file in your user folder, Downloads, Desktop, Documents, a Games folder in "
+                                  "your user folder or the top folder of another drive and choose Rescan, or browse for it.";
+        const char* kScanning = "Looking for disc images in your user folder, Downloads, Desktop, Documents and other drives...";
 #else
         const char* kWhereToPut = "Put your .iso file in your home folder, Downloads, a Games folder, or on an SD card or USB "
                                   "drive and choose Rescan, or browse for it.";
@@ -289,6 +305,9 @@ namespace ui
 #if defined(__APPLE__) && TARGET_OS_IOS
         const char* kNoDialog = "The Files picker couldn't be shown. Copy your .iso into SpeedBreaker's folder in the Files "
                                 "app (On My iPad or On My iPhone > SpeedBreaker) and choose Rescan.";
+#elif defined(_WIN32)
+        const char* kNoDialog = "The file browser couldn't be opened. Put the .iso in Downloads, Desktop or Documents and "
+                                "choose Rescan, or type its path below.";
 #else
         const char* kNoDialog = "The file browser isn't available here (in Game Mode, for example). Put the .iso in Downloads, "
                                 "a Games folder or on an SD card and choose Rescan, or type its path below (Steam + X shows "
@@ -406,7 +425,7 @@ namespace ui
                         if (job->abandoned)
                         {
                             release = std::exchange(job->access, 0);
-                            fprintf(stderr, "[installer] the check of %s that was left behind has returned\n", path.c_str());
+                            fprintf(stderr, "[installer] the check of %s that was left behind has returned\n", path.string().c_str());
                         }
                         else
                         {
@@ -733,7 +752,7 @@ namespace ui
                 {
                     check->abandoned = true;
                     check->access = std::exchange(access, 0);
-                    fprintf(stderr, "[installer] left the check of %s still reading\n", sourcePath.c_str());
+                    fprintf(stderr, "[installer] left the check of %s still reading\n", sourcePath.string().c_str());
                 }
             }
             check.reset();
@@ -845,7 +864,7 @@ namespace ui
                 installedPath = st.destination;
                 // So the next launch finds it (internal storage clears the record).
                 if (!install::RecordInstallPath(st.destination))
-                    fprintf(stderr, "[installer] couldn't record the install location %s\n", st.destination.c_str());
+                    fprintf(stderr, "[installer] couldn't record the install location %s\n", st.destination.string().c_str());
                 st.Go(Page::Done);
             }
             else if (st.result.error == install::Error::Cancelled)

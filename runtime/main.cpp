@@ -43,12 +43,18 @@
 #include <cerrno>
 #include <csignal>
 #include <map>
-#include <pthread.h>
+#ifndef _WIN32
 #include <unistd.h>
+#endif
 #ifdef __linux__
 #include <sys/prctl.h>
 #endif
 #include <unordered_map>
+
+#include <platform/fault.h>
+#include <platform/startup.h>
+#include <platform/thread.h>
+#include <platform/timer.h>
 
 #include <file.h>
 #include <image.h>
@@ -212,6 +218,7 @@ namespace
         return exact;
     }
 
+#ifndef _WIN32
 #if defined(__linux__) && defined(__aarch64__)
     // Whether a data abort was a write: ESR_EL1's ISS bit 6 (WnR), which the
     // kernel passes in an esr_context record among those after the
@@ -271,10 +278,16 @@ namespace
         report::WriteCrashReport(sig, info, context);
         _exit(128 + sig);
     }
+#endif
 }
 
 int main(int argc, char** argv)
 {
+    // Windows: no drive-error dialogs, UTF-8 in the console
+    // (platform/startup.h), and 1 ms sleeps instead of the 15.6 ms tick
+    // (platform/timer.h).
+    platform::PrepareProcess();
+    platform::RaiseTimerResolution();
 #if defined(__APPLE__) && TARGET_OS_IOS
     // iOS starts an app in /, which it can't write. Relative paths (test
     // output in build/, a ./game/files development copy) mean the app's
@@ -359,14 +372,20 @@ int main(int argc, char** argv)
     guesttime::SetResumeHook(dispatcher::WakeAfterResume);
 
     report::PrepareCrashReports();
+#ifdef _WIN32
+    // A vectored handler for the write watch, the crash report for the rest.
+    platform::InstallFaultHandlers();
+#else
     struct sigaction sa{};
     sa.sa_sigaction = CrashHandler;
     sa.sa_flags = SA_SIGINFO;
     for (int sig : { SIGSEGV, SIGBUS, SIGILL, SIGTRAP, SIGFPE, SIGABRT })
         sigaction(sig, &sa, nullptr);
+#endif
     // SIGTERM, SIGINT and SIGHUP quit the game as its window's close button
-    // does (platform/quit_signals.h): before SDL starts, which leaves them to
-    // us.
+    // does (platform/quit_signals.h; Windows: SIGINT and SIGBREAK, Ctrl+C and
+    // Ctrl+Break in a console build's console): before SDL starts, which
+    // leaves them to us.
     quitsignals::Install();
     // From here on a return from main() is a clean end too (an unknown
     // option, a cancelled install, a XEX that can't be read): the session's
@@ -423,6 +442,24 @@ int main(int argc, char** argv)
         fprintf(stderr, "[version] v%s (the last version isn't known: settings.toml didn't load)\n", report::Version());
     // The window must live on the main thread (macOS); the game gets its own.
     bool windowed = video::Initialize();
+#if defined(_WIN32) && defined(SB_WINDOWS_GUI)
+    // The Windows-subsystem build (the download) has no console: without
+    // a window there would be nothing to see at all, the game running on
+    // unseen (the headless mode, meant for tests) or ending without a word.
+    // Say so in a box instead; the log has why.
+    if (const char* headless = std::getenv("NFSMW_HEADLESS"); !windowed && !(headless && headless[0] == '1'))
+    {
+        fprintf(stderr, "[runtime] no window: a message box says so, then the game ends\n");
+        report::FlushLog();
+        // Windows' own box: SDL's may need the video driver that just failed.
+        int answer = MessageBoxA(nullptr,
+            "SpeedBreaker couldn't start its graphics. It needs a graphics card with Vulkan 1.2 and an up-to-date "
+            "driver: update your graphics driver and try again.\n\nThe game's log is in %LOCALAPPDATA%\\SpeedBreaker\\logs.",
+            "SpeedBreaker", MB_OK | MB_ICONERROR | MB_SETFOREGROUND);
+        fprintf(stderr, "[runtime] message box closed (%d)\n", answer);
+        return 1;
+    }
+#endif
     if (!settingsLoaded)
         ui::Toast(settings::LastError(), 12.0);  // a mistake in settings.toml: it was kept as .bad
     if (portableError)
@@ -444,6 +481,7 @@ int main(int argc, char** argv)
     report::NoticePreviousCrash(!lastVersion.empty() && version::Compare(lastVersion, report::Version()) >= 0);
 #endif
 
+#ifndef _WIN32
     // NFSMW_LIFELINE_PID (scripts/steamos/speedbreaker.sh): the launcher's PID. The
     // game runs in a container, not as the launcher's child, so Steam
     // stopping the launcher never reaches it: exit once the launcher is gone.
@@ -460,6 +498,7 @@ int main(int argc, char** argv)
                 report::FlushLog();
                 std::_Exit(0);
             }).detach();
+#endif
 
     std::filesystem::path xexPath;
     std::string gameOrigin;  // for the system summary
@@ -552,11 +591,8 @@ int main(int argc, char** argv)
     if (auto* stack = static_cast<const be<uint32_t>*>(getOptHeaderPtr(file.data(), XEX_HEADER_DEFAULT_STACK_SIZE)))
         params.stackSize = std::max<uint32_t>(*stack, DEFAULT_GUEST_STACK);
 
-    pthread_attr_t attr;
-    pthread_attr_init(&attr);
-    pthread_attr_setstacksize(&attr, HOST_STACK);
-    pthread_t thread;
-    pthread_create(&thread, &attr, GuestMain, &params);
+    platform::Thread thread{};
+    platform::StartThread(&thread, HOST_STACK, GuestMain, &params);
     report::StartWatchdog();  // hang reports (and the NFSMW_TEST_* switches)
 
 #ifdef __linux__
@@ -582,7 +618,7 @@ int main(int argc, char** argv)
             report::FlushLog();
             std::_Exit(0);
         }
-        pthread_join(thread, nullptr);
+        platform::JoinThread(thread);
         report::FlushLog();
         return 0;
     }

@@ -11,6 +11,10 @@
 #include <format>
 #include <set>
 
+#ifdef _WIN32
+#include <platform/folders.h>
+#include <platform/os.h>
+#else
 #include <pwd.h>
 #include <sys/stat.h>
 #include <sys/statvfs.h>
@@ -18,6 +22,9 @@
 #include <sys/mount.h>
 #endif
 #include <unistd.h>
+#endif
+
+#include <platform/file_io.h>
 
 namespace install
 {
@@ -31,7 +38,7 @@ namespace install
             return !name.empty() && name[0] == '.';
         }
 
-#ifndef __APPLE__
+#if !defined(__APPLE__) && !defined(_WIN32)
         std::string UserName()
         {
             if (const char* user = std::getenv("USER"); user && *user)
@@ -92,6 +99,11 @@ namespace install
             std::string extension = file.extension().string();
             if (!PathEqualsIgnoreCase(extension, ".iso"))
                 return;
+#ifdef _WIN32
+            // Only in the cloud (OneDrive): opening it would download 7 GB.
+            if (platform::IsCloudOnly(file))
+                return;
+#endif
             std::error_code ec;
             uint64_t size = fs::file_size(file, ec);
             if (ec || size < minSize)
@@ -164,7 +176,7 @@ namespace install
         {
             std::optional<std::string> marker = ReadInstallMarker(user);
             fprintf(stderr, "[install] %s is not a current install (marker %s, manifest %.*s): reinstall\n",
-                user.c_str(), marker ? marker->c_str() : "missing", int(manifest.version.size()), manifest.version.data());
+                user.string().c_str(), marker ? marker->c_str() : "missing", int(manifest.version.size()), manifest.version.data());
         }
         return std::nullopt;
     }
@@ -176,6 +188,7 @@ namespace install
             return GetUserPath() / "game-location";
         }
 
+#ifndef _WIN32
         // A folder that is the root of a mounted file system.
         bool IsMountPoint(const fs::path& dir)
         {
@@ -184,11 +197,12 @@ namespace install
                 return false;
             return S_ISDIR(self.st_mode) && self.st_dev != parent.st_dev;
         }
+#endif
     }
 
     std::optional<std::filesystem::path> ReadInstallRecord(const std::filesystem::path& file, const portable::Layout& layout)
     {
-        FILE* f = fopen(file.c_str(), "rb");
+        FILE* f = platform::OpenStdioFile(file, "rb");
         if (!f)
             return std::nullopt;
         char buffer[4096];
@@ -205,7 +219,7 @@ namespace install
         fs::create_directories(file.parent_path(), ec);
         fs::path temp = file;
         temp += ".tmp";
-        FILE* f = fopen(temp.c_str(), "wb");
+        FILE* f = platform::OpenStdioFile(temp, "wb");
         if (!f)
             return false;
         std::string line = text + "\n";
@@ -252,6 +266,7 @@ namespace install
             return out;
         }
         out.push_back({ "Internal storage", DefaultInstallPath(), false });
+#ifndef _WIN32
         auto addVolume = [&](const fs::path& volume)
         {
             if (Hidden(volume) || !IsMountPoint(volume))
@@ -269,8 +284,14 @@ namespace install
             std::string label = volume.filename().string();
             out.push_back({ label.empty() ? volume.string() : label, volume / kUserFolderName / "game", true });
         };
+#endif
         std::error_code ec;
-#ifdef __APPLE__
+#ifdef _WIN32
+        // Every other local drive that takes files: <drive>:\SpeedBreaker\game.
+        for (const platform::Drive& drive : platform::Drives())
+            if (!drive.system && !drive.readOnly)
+                out.push_back({ drive.label, drive.root / kUserFolderName / "game", drive.removable });
+#elif defined(__APPLE__)
         for (fs::directory_iterator it("/Volumes", ec), end; !ec && it != end; it.increment(ec))
         {
             std::error_code sameEc;
@@ -301,6 +322,22 @@ namespace install
             if (fs::is_directory(dir, ec) && std::find(folders.begin(), folders.end(), dir) == folders.end())
                 folders.push_back(dir);
         };
+#ifdef _WIN32
+        // The profile folder (never HOME: Git Bash and MSYS2 set it), the
+        // shell's Downloads, Desktop and Documents (wherever OneDrive or the
+        // player moved them), Games, and the root of every other local drive.
+        fs::path profile = platform::GetKnownFolder(platform::KnownFolder::Profile);
+        if (!profile.empty())
+            add(profile);
+        for (platform::KnownFolder known : { platform::KnownFolder::Downloads, platform::KnownFolder::Desktop, platform::KnownFolder::Documents })
+            if (fs::path dir = platform::GetKnownFolder(known); !dir.empty())
+                add(dir);
+        if (!profile.empty())
+            add(profile / "Games");
+        for (const platform::Drive& drive : platform::Drives())
+            if (!drive.system)
+                add(drive.root);
+#else
         if (const char* home = std::getenv("HOME"); home && *home)
         {
             fs::path h = home;
@@ -308,7 +345,9 @@ namespace install
             for (const char* sub : { "Downloads", "Desktop", "Documents", "Games" })
                 add(h / sub);
         }
-#ifdef __APPLE__
+#endif
+#ifdef _WIN32
+#elif defined(__APPLE__)
         // /Volumes also lists the startup disk (a link to /): skip it, a scan of
         // the whole system disk is what the folders above avoid.
         std::error_code ec;
@@ -347,8 +386,10 @@ namespace install
         std::vector<DiscImageCandidate> found;
         std::set<fs::path> seenFiles, listedDirs;
         fs::path library;
+#ifndef _WIN32
         if (const char* home = std::getenv("HOME"); home && *home)
             library = fs::path(home) / "Library";
+#endif
         auto cancelled = [&] { return cancel && cancel->load(std::memory_order_relaxed); };
 
         // Lists `dir`'s .iso files (once per directory, however it is reached)

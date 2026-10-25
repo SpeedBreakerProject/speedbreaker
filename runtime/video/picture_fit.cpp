@@ -98,4 +98,70 @@ namespace video
                 sy--;
         }
     }
+
+    namespace
+    {
+        // A picture narrower than 16:9 (Vert+), wider (Hor+), or 16:9 within
+        // 0.5% (a letterboxed box rounded to whole pixels): AutoRenderScale's
+        // test for its rows.
+        enum class Shape { Wide16x9, Tall, Wide };
+        Shape ShapeOf(uint32_t regionW, uint32_t regionH)
+        {
+            if (!regionW || !regionH)
+                return Shape::Wide16x9;
+            const float aspect = float(regionW) / float(regionH);
+            if (aspect < (16.0f / 9.0f) / 1.005f)
+                return Shape::Tall;
+            if (aspect > (16.0f / 9.0f) * 1.005f)
+                return Shape::Wide;
+            return Shape::Wide16x9;
+        }
+    }
+
+    gpu::RenderScale NativeShape(gpu::AxisScale base, uint32_t regionW, uint32_t regionH)
+    {
+        gpu::RenderScale s{ base, base };
+        switch (ShapeOf(regionW, regionH))
+        {
+        case Shape::Tall:
+        {
+            // The 1280 columns' host ones, and as many rows as the picture
+            // has for them (rounded: 803 for a MacBook's 3024x1898).
+            const uint32_t columns = base.Size(1280);
+            const uint32_t rows = uint32_t(std::lround(double(columns) * double(regionH) / double(regionW)));
+            s.y = gpu::AxisFor(std::max(rows, base.Size(720)), 720);
+            break;
+        }
+        case Shape::Wide:
+        {
+            const uint32_t rows = base.Size(720);
+            const uint32_t columns = uint32_t(std::lround(double(rows) * double(regionW) / double(regionH)));
+            s.x = gpu::AxisFor(std::max(columns, base.Size(1280)), 1280);
+            break;
+        }
+        case Shape::Wide16x9:
+            break;
+        }
+        return s;
+    }
+
+    gpu::RenderScale NativeAuto(uint32_t sx, uint32_t sy, uint32_t regionW, uint32_t regionH, uint32_t budget)
+    {
+        const gpu::RenderScale whole = gpu::RenderScale::Whole(sx, sy);
+        const Shape shape = ShapeOf(regionW, regionH);
+        if (shape == Shape::Wide16x9)
+            return whole;
+        const gpu::RenderScale native = NativeShape({ shape == Shape::Tall ? sx : sy, 1 }, regionW, regionH);
+        // (Exact: num x num / (den x den) against the budget in integers.)
+        if (uint64_t(native.x.num) * native.y.num > uint64_t(budget) * native.x.den * native.y.den)
+            return whole;
+        return native;
+    }
+
+    gpu::RenderScale AutoNativeScale(uint32_t regionW, uint32_t regionH, uint32_t budget)
+    {
+        uint32_t sx = 1, sy = 1;
+        AutoRenderScale(regionW, regionH, budget, sx, sy);
+        return NativeAuto(sx, sy, regionW, regionH, budget);
+    }
 }

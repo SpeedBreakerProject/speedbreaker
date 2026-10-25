@@ -7,10 +7,16 @@
 // Desktop Mode's file manager shows it), else the user data folder; on iOS
 // to the app's Documents, which the Files app shows (On My iPhone/iPad >
 // SpeedBreaker). NFSMW_BUG_REPORT_DIR=<dir> puts it there instead (tests).
-// Its name carries the version: speedbreaker-bug-report-v0.1.0-<date>_<time>.zip.
+// On Windows the Desktop is the shell's (FOLDERID_Desktop, which follows
+// OneDrive's folder backup); NFSMW_TEST_DESKTOP=<dir> stands in for it in
+// tests, where the real one can't be swapped for a sandbox's without
+// changing the registry. Its name carries the version:
+// speedbreaker-bug-report-v0.1.0-<date>_<time>.zip (a labelled build's, its
+// label and commit after that).
 #include <stdafx.h>
 #include "report.h"
 #include "internal.h"
+#include "scrub.h"
 #include "zip.h"
 
 #include <cpu/guest_thread.h>
@@ -25,7 +31,13 @@
 
 #include <fcntl.h>
 #include <sys/stat.h>
+#ifdef _WIN32
+#include <platform/folders.h>
+#else
 #include <unistd.h>
+#endif
+
+#include <platform/file_io.h>
 
 namespace report
 {
@@ -44,6 +56,17 @@ namespace report
 
         std::filesystem::path DesktopFolder()
         {
+#ifdef _WIN32
+            // The shell's Desktop (it follows OneDrive's folder backup), if
+            // new files can go there (Controlled Folder Access may say no).
+            const char* test = std::getenv("NFSMW_TEST_DESKTOP");
+            std::filesystem::path desktop = test && *test ? std::filesystem::path(test)
+                                                          : platform::GetKnownFolder(platform::KnownFolder::Desktop);
+            std::error_code ec;
+            if (!desktop.empty() && std::filesystem::is_directory(desktop, ec) && platform::CheckWritableFolder(desktop, platform::NewEntry::File) == 0)
+                return desktop;
+            return {};
+#else
             const char* home = std::getenv("HOME");
             if (!home || !*home)
                 return {};
@@ -69,6 +92,7 @@ namespace report
             if (std::filesystem::is_directory(desktop, ec) && access(desktop.c_str(), W_OK) == 0)
                 return desktop;
             return {};
+#endif
         }
 
         // iOS: the app's Documents folder (HOME/Documents), the one the
@@ -123,8 +147,8 @@ namespace report
 
         time_t ModifiedTime(const std::filesystem::path& path)
         {
-            struct stat st{};
-            return stat(path.c_str(), &st) == 0 ? st.st_mtime : time(nullptr);
+            platform::FileInfo st;
+            return platform::InfoOf(path, st) == 0 ? time_t(st.modifiedSeconds) : time(nullptr);
         }
 
         // Halved (2x2 box filter) while wider than 2560: a 3440x1440 frame
@@ -284,8 +308,13 @@ namespace report
                 stamp, SessionName(), SessionSeconds(), BuildString());
             for (const std::string& note : notes)
                 readme += "  " + note + "\n";
+#ifdef _WIN32
+            readme += "\nPaths in your user folder are shown as %USERPROFILE%. Nothing was sent anywhere: send\n"
+                      "this file with a few words on what you were doing and what went wrong.\n";
+#else
             readme += "\nPaths in your home folder are shown as ~. Nothing was sent anywhere: send this file\n"
                       "with a few words on what you were doing and what went wrong.\n";
+#endif
 
             ZipWriter zip;
             bool ok = true;
@@ -309,7 +338,7 @@ namespace report
                 std::error_code ec;
                 std::filesystem::create_directories(folder, ec);
                 // write(2) rather than a stream, for an errno that says why.
-                int fd = ::open(partial.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+                int fd = platform::OpenFile(partial, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
                 if (fd < 0)
                     return strerror(errno);
                 int error = 0;
@@ -323,8 +352,8 @@ namespace report
                 }
                 if (::close(fd) != 0 && !error)
                     error = errno;
-                if (!error && ::rename(partial.c_str(), path.c_str()) != 0)
-                    error = errno;
+                if (!error)
+                    error = platform::AtomicReplace(partial, path);
                 if (error)
                 {
                     std::filesystem::remove(partial, ec);
@@ -333,13 +362,17 @@ namespace report
                 return {};
             };
             std::filesystem::path folder = OutputFolder();
-            std::filesystem::path path = folder / std::format("speedbreaker-bug-report-v{}-{}.zip", Version(), stamp);
+            // A labelled build's reports say which build in their names too:
+            // speedbreaker-bug-report-v0.1.3-<stamp>-windows-beta-2026-10-11-59d1ef3.zip.
+            std::string tag = ReleaseFileTag();
+            std::filesystem::path path = folder / std::format("speedbreaker-bug-report-v{}-{}{}.zip", Version(), stamp,
+                tag.empty() ? "" : "-" + tag);
             std::string failed = saveTo(folder, path);
             // The Desktop refused it (full, or macOS's privacy prompt said
             // no): the data folder, where the logs are, is ours.
             if (!failed.empty() && !std::getenv("NFSMW_BUG_REPORT_DIR") && folder != GetUserPath())
             {
-                fprintf(stderr, "[bugreport] couldn't save in %s (%s); trying the data folder\n", folder.c_str(), failed.c_str());
+                fprintf(stderr, "[bugreport] couldn't save in %s (%s); trying the data folder\n", folder.string().c_str(), failed.c_str());
                 std::filesystem::path fallback = GetUserPath();
                 std::filesystem::path fallbackPath = fallback / path.filename();
                 if (std::string again = saveTo(fallback, fallbackPath); again.empty())
@@ -361,7 +394,7 @@ namespace report
             double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
             std::string size = archive.size() < (1 << 20) ? std::format("{} KB", (archive.size() + 1023) >> 10)
                                                           : std::format("{:.1f} MB", double(archive.size()) / (1 << 20));
-            fprintf(stderr, "[bugreport] saved %s (%zu files, %s, %.1f s)\n", path.c_str(), zip.Entries(), size.c_str(), seconds);
+            fprintf(stderr, "[bugreport] saved %s (%zu files, %s, %.1f s)\n", path.string().c_str(), zip.Entries(), size.c_str(), seconds);
             std::string where = Describe(path);
             SetMessage("Saved to " + where);
             s_state.store(BugReportState::Saved);
@@ -404,40 +437,49 @@ namespace report
 
     std::string ScrubHome(std::string text)
     {
-        std::vector<std::string> homes;
+#ifdef _WIN32
+        // The user's profile folder (C:\Users\<name>) as %USERPROFILE%, a
+        // name Explorer's address bar takes: as the environment and the shell
+        // spell it, and in its short 8.3 form (C:\Users\JOSEMA~1, which TEMP
+        // can hold). Letters in either case, \ or / (or \\, escaped).
+        std::vector<detail::FolderName> folders;
+        auto utf8 = [](const std::wstring& wide) {
+            int n = WideCharToMultiByte(CP_UTF8, 0, wide.c_str(), int(wide.size()), nullptr, 0, nullptr, nullptr);
+            std::string out(size_t(std::max(n, 0)), '\0');
+            WideCharToMultiByte(CP_UTF8, 0, wide.c_str(), int(wide.size()), out.data(), n, nullptr, nullptr);
+            return out;
+        };
+        auto add = [&](std::wstring path) {
+            while (path.size() > 3 && (path.back() == L'\\' || path.back() == L'/'))
+                path.pop_back();
+            if (path.size() <= 3)  // never a whole drive
+                return;
+            folders.push_back({ utf8(path), "%USERPROFILE%" });
+            wchar_t shortPath[1024];
+            DWORD n = GetShortPathNameW(path.c_str(), shortPath, DWORD(std::size(shortPath)));
+            if (n > 0 && n < std::size(shortPath) && _wcsicmp(shortPath, path.c_str()) != 0)
+                folders.push_back({ utf8(std::wstring(shortPath, n)), "%USERPROFILE%" });
+        };
+        if (const wchar_t* profile = _wgetenv(L"USERPROFILE"); profile && *profile)
+            add(profile);
+        add(platform::GetKnownFolder(platform::KnownFolder::Profile).wstring());
+        return detail::ReplaceFolders(std::move(text), std::move(folders), true);
+#else
+        std::vector<detail::FolderName> homes;
         if (const char* h = std::getenv("HOME"); h && strlen(h) > 1)
         {
             std::string home = h;
             while (home.size() > 1 && home.back() == '/')
                 home.pop_back();
-            homes.push_back(home);
+            homes.push_back({ home, "~" });
             std::error_code ec;
             std::string real = std::filesystem::weakly_canonical(home, ec).string();
             while (real.size() > 1 && real.back() == '/')
                 real.pop_back();
             if (!ec && real.size() > 1 && real != home)
-                homes.push_back(real);
+                homes.push_back({ real, "~" });
         }
-        std::sort(homes.begin(), homes.end(), [](const std::string& a, const std::string& b) { return a.size() > b.size(); });
-        auto pathChar = [](char c) { return std::isalnum(uint8_t(c)) || c == '.' || c == '_' || c == '-'; };
-        for (const std::string& home : homes)
-        {
-            std::string out;
-            out.reserve(text.size());
-            size_t from = 0;
-            for (size_t at; (at = text.find(home, from)) != std::string::npos;)
-            {
-                size_t end = at + home.size();
-                // Only the whole folder (/home/deck, not /home/deck2) and not
-                // the tail of a longer path (/mnt/home/deck).
-                bool whole = (end == text.size() || !pathChar(text[end])) && (at == 0 || !pathChar(text[at - 1]));
-                out.append(text, from, at - from);
-                out += whole ? "~" : home;
-                from = end;
-            }
-            out.append(text, from, std::string::npos);
-            text.swap(out);
-        }
-        return text;
+        return detail::ReplaceFolders(std::move(text), std::move(homes), false);
+#endif
     }
 }

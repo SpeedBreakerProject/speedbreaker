@@ -8,7 +8,9 @@
 #include <cpu/ppc_context.h>
 #include <report/report.h>
 
+#ifndef _WIN32
 #include <sys/resource.h>
+#endif
 
 constexpr size_t PCR_SIZE = 0xAB0;
 constexpr size_t TLS_SIZE = 0x100;
@@ -86,6 +88,10 @@ static size_t GetStackSize()
     {
         // 8 MiB is a typical default.
         constexpr auto defaultSize = 8 * 1024 * 1024;
+#ifdef _WIN32
+        // A reservation, committed as it grows (platform/thread.h).
+        stackSize = defaultSize;
+#else
         struct rlimit lim;
         const auto ret = getrlimit(RLIMIT_STACK, &lim);
 #if defined(__APPLE__) && TARGET_OS_IOS
@@ -103,19 +109,14 @@ static size_t GetStackSize()
         {
             stackSize = defaultSize;
         }
+#endif
     }
     return stackSize;
 }
 
 void SetHostThreadName(const char* name)
 {
-#if defined(__APPLE__)
-    pthread_setname_np(name);
-#elif defined(__linux__)
-    pthread_setname_np(pthread_self(), name);
-#else
-    (void)name;
-#endif
+    platform::NameCurrentThread(name);
     report::RegisterThread(name);  // hang reports sample named threads
 }
 
@@ -151,16 +152,17 @@ GuestThreadHandle::GuestThreadHandle(const GuestThreadParams& params)
     : params(params), id(s_nextThreadId++), suspended((params.flags & 0x1) != 0)
 #ifdef USE_PTHREAD
 {
-    pthread_attr_t attr;
-    pthread_attr_init(&attr);
-    pthread_attr_setstacksize(&attr, GetStackSize());
     refs = 2;  // SpeedBreaker: the handle's reference + the thread's own
-    const auto ret = pthread_create(&thread, &attr, GuestThreadFunc, this);
+    const auto ret = platform::StartThread(&thread, GetStackSize(), GuestThreadFunc, this);
     if (ret != 0) {
+#ifdef _WIN32
+        fprintf(stderr, "_beginthreadex failed with error code 0x%X.\n", ret);
+#else
         fprintf(stderr, "pthread_create failed with error code 0x%X.\n", ret);
+#endif
         return;
     }
-    pthread_detach(thread);
+    platform::DetachThread(thread);
 }
 #else
       , thread(GuestThreadFunc, this)
@@ -231,34 +233,3 @@ void GuestThread::SetLastError(uint32_t error)
     // TEB + 0x160 : Win32LastError
     *(uint32_t*)(thread + TEB_OFFSET + 0x160) = ByteSwap(error);
 }
-
-#ifdef _WIN32
-void GuestThread::SetThreadName(uint32_t threadId, const char* name)
-{
-#pragma pack(push,8)
-    const DWORD MS_VC_EXCEPTION = 0x406D1388;
-
-    typedef struct tagTHREADNAME_INFO
-    {
-        DWORD dwType; // Must be 0x1000.
-        LPCSTR szName; // Pointer to name (in user addr space).
-        DWORD dwThreadID; // Thread ID (-1=caller thread).
-        DWORD dwFlags; // Reserved for future use, must be zero.
-    } THREADNAME_INFO;
-#pragma pack(pop)
-
-    THREADNAME_INFO info;
-    info.dwType = 0x1000;
-    info.szName = name;
-    info.dwThreadID = threadId;
-    info.dwFlags = 0;
-
-    __try
-    {
-        RaiseException(MS_VC_EXCEPTION, 0, sizeof(info) / sizeof(ULONG_PTR), (ULONG_PTR*)&info);
-    }
-    __except (EXCEPTION_EXECUTE_HANDLER)
-    {
-    }
-}
-#endif

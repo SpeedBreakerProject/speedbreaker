@@ -5,12 +5,13 @@
 #include <kernel/xdm.h>
 #include <kernel/dispatcher.h>
 
-// SpeedBreaker: pthreads on every platform (macOS and Linux), for the stack
-// size and so thread handles share one detached, reference-counted path.
+// SpeedBreaker: pthreads on every platform (macOS and Linux; Windows:
+// _beginthreadex, platform/thread.h), for the stack size and so thread
+// handles share one detached, reference-counted path.
 #define USE_PTHREAD 1
 
 #ifdef USE_PTHREAD
-#include <pthread.h>
+#include <platform/thread.h>
 #endif
 
 #define CURRENT_THREAD_HANDLE uint32_t(-2)
@@ -46,7 +47,7 @@ struct GuestThreadHandle : Waitable
     std::atomic<bool> suspended;
     bool finished = false;  // SpeedBreaker: guarded by dispatcher::Lock()
 #ifdef USE_PTHREAD
-    pthread_t thread;
+    platform::Thread thread{};
 #else
     std::thread thread;
 #endif
@@ -70,10 +71,6 @@ struct GuestThread
     static void SetDefaultStackSize(size_t size);
     // The current thread's kernel object (for the 0xFFFFFFFE pseudo-handle).
     static KernelObject* GetCurrentThreadObject();
-
-#ifdef _WIN32
-    static void SetThreadName(uint32_t threadId, const char* name);
-#endif
 };
 
 // Names the calling host thread, for top -H, perf and debuggers (at most 15

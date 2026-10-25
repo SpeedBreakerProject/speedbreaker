@@ -17,6 +17,8 @@
 // Otherwise (16:9 within those margins, the 16:9 setting, or a ppc/ without
 // the hooks) the 16:9 frame is letterboxed as it always was.
 #pragma once
+#include <gpu/render_scale.h>
+
 #include <cstdint>
 
 namespace video
@@ -28,8 +30,8 @@ namespace video
     // the same 1% margin as Hor+: 16:10 (1.11: the Steam Deck's 1280x800,
     // 16:10 Macs), 3:2 (1.19) and a 4:3 iPad (1.33) fill. 16:9 itself, and
     // a screen within 1% of it (1360x768), keeps the letterboxed 16:9 frame.
-    // On the Deck, AutoRenderScale keeps 1x1, so the frame's 720 rows are
-    // stretched to 800 (1.11) rather than drawn 1:1 in a 720-row box.
+    // The frame's 720 rows used to be stretched to the Deck's 800 (1.11) at
+    // 1x; now they are rendered as 800 host rows (NativeShape, GitHub #34).
     constexpr float kTallMinStretch = 1.01f;
 
     struct PictureFit
@@ -70,4 +72,24 @@ namespace video
     // screen (video::FrameRegion), within `budget` host pixels per guest
     // pixel.
     void AutoRenderScale(uint32_t regionW, uint32_t regionH, uint32_t budget, uint32_t& sx, uint32_t& sy);
+
+    // Native rows and columns (GitHub #34): a picture covering regionW x
+    // regionH narrower than 16:9 (Vert+) keeps `base` across and gets the
+    // rows its shape asks at that many columns; a wider one (Hor+) keeps
+    // `base` down and gets the columns. So 1x on a Steam Deck's 1280x800
+    // renders 1280x800 (1x10/9), the presenter showing it 1:1, not the 720
+    // rows of a 16:9 frame stretched to 800; 1.5x on 1920x1200 renders
+    // 1920x1200 and 2x on a 3440x1440 ultrawide 3440x1440. A picture within
+    // 0.5% of 16:9 (a letterboxed 16:9 box, as AutoRenderScale tells it)
+    // keeps `base` both ways, exactly as before. No region: `base` too.
+    gpu::RenderScale NativeShape(gpu::AxisScale base, uint32_t regionW, uint32_t regionH);
+
+    // Auto with native rows and columns: Auto's whole scale sx x sy
+    // (AutoRenderScale's), unless the picture is Vert+ or Hor+ and NativeShape
+    // at its scale across (Vert+) or down (Hor+) fits the budget too (the
+    // Deck's 1x10/9 within 4; 3440x1440's 2.6875x2 within 6, in place of
+    // 3x2): then that.
+    gpu::RenderScale NativeAuto(uint32_t sx, uint32_t sy, uint32_t regionW, uint32_t regionH, uint32_t budget);
+    // AutoRenderScale's scale through NativeAuto.
+    gpu::RenderScale AutoNativeScale(uint32_t regionW, uint32_t regionH, uint32_t budget);
 }

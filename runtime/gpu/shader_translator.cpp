@@ -14,6 +14,50 @@
 #include <format>
 #include <set>
 
+// gpuSwap(v, endian): a guest word in the given Xenos endianness (0 none,
+// 1 8in16, 2 8in32, 3 16in32) as a host uint. On Windows as selects: Intel's
+// Windows Vulkan driver (UHD 620, 101.2135) compiled the early-return chain
+// below wrongly in vertex shaders, returning the swapped word OR'd with the
+// unswapped one for 8in32 (1.0f read back as 1.0039f, 0x3F80803F). Vertex
+// positions and colours came out wrong: the front end's layers at z = 1 lay
+// beyond the far plane and were clipped, so the title screen and every menu
+// were black while movies played. The same function (for every endian value,
+// 4 and up left as they are, as the chain does); the other platforms keep
+// the chain for now (the same SPIR-V and caches as before).
+//
+// cubeDirection(c) below, a run of early returns on the cube face, is written
+// as selects on Windows for the same reason, though it hasn't shown yet.
+#ifdef _WIN32
+#define GLSL_GPU_SWAP R"(uint gpuSwap(uint v, uint endian)
+{
+    uint s8 = ((v << 8) & 0xFF00FF00u) | ((v >> 8) & 0x00FF00FFu);
+    v = (endian == 1u || endian == 2u) ? s8 : v;
+    return (endian == 2u || endian == 3u) ? (v >> 16) | (v << 16) : v;
+}
+)"
+#define GLSL_CUBE_FACE_DIRECTION R"(    vec3 d = vec3(-sc * 2.0, -tc * 2.0, -1.0);
+    d = face == 4 ? vec3(sc * 2.0, -tc * 2.0, 1.0) : d;
+    d = face == 3 ? vec3(sc * 2.0, -1.0, -tc * 2.0) : d;
+    d = face == 2 ? vec3(sc * 2.0, 1.0, tc * 2.0) : d;
+    d = face == 1 ? vec3(-1.0, -tc * 2.0, sc * 2.0) : d;
+    return face == 0 ? vec3(1.0, -tc * 2.0, -sc * 2.0) : d;)"
+#else
+#define GLSL_CUBE_FACE_DIRECTION R"(    if (face == 0) return vec3(1.0, -tc * 2.0, -sc * 2.0);
+    if (face == 1) return vec3(-1.0, -tc * 2.0, sc * 2.0);
+    if (face == 2) return vec3(sc * 2.0, 1.0, tc * 2.0);
+    if (face == 3) return vec3(sc * 2.0, -1.0, -tc * 2.0);
+    if (face == 4) return vec3(sc * 2.0, -tc * 2.0, 1.0);
+    return vec3(-sc * 2.0, -tc * 2.0, -1.0);)"
+#define GLSL_GPU_SWAP R"(uint gpuSwap(uint v, uint endian)
+{
+    if (endian == 1u) return ((v << 8) & 0xFF00FF00u) | ((v >> 8) & 0x00FF00FFu);
+    if (endian == 2u) return (v << 24) | ((v << 8) & 0x00FF0000u) | ((v >> 8) & 0x0000FF00u) | (v >> 24);
+    if (endian == 3u) return (v >> 16) | (v << 16);
+    return v;
+}
+)"
+#endif
+
 namespace gpu
 {
     using namespace xe::gpu;
@@ -75,14 +119,7 @@ float fetchLodBias(uint slot)
     return float(bitfieldExtract(int(fetchDword(slot, 4u)), 12, 10)) / 32.0;
 }
 
-uint gpuSwap(uint v, uint endian)
-{
-    if (endian == 1u) return ((v << 8) & 0xFF00FF00u) | ((v >> 8) & 0x00FF00FFu);
-    if (endian == 2u) return (v << 24) | ((v << 8) & 0x00FF0000u) | ((v >> 8) & 0x0000FF00u) | (v >> 24);
-    if (endian == 3u) return (v >> 16) | (v << 16);
-    return v;
-}
-
+)" GLSL_GPU_SWAP R"(
 // Guest memory words are big-endian; the buffer holds them as host uints.
 uint memWord(uint byteAddress)
 {
@@ -1020,12 +1057,7 @@ vec3 cubeDirection(vec3 c)
     // degrees). Back to a direction, inverting cubeop().
     float sc = c.x - 1.5, tc = c.y - 1.5;
     int face = int(c.z + 0.5);
-    if (face == 0) return vec3(1.0, -tc * 2.0, -sc * 2.0);
-    if (face == 1) return vec3(-1.0, -tc * 2.0, sc * 2.0);
-    if (face == 2) return vec3(sc * 2.0, 1.0, tc * 2.0);
-    if (face == 3) return vec3(sc * 2.0, -1.0, -tc * 2.0);
-    if (face == 4) return vec3(sc * 2.0, -tc * 2.0, 1.0);
-    return vec3(-sc * 2.0, -tc * 2.0, -1.0);
+)" GLSL_CUBE_FACE_DIRECTION R"(
 }
 )";
     }

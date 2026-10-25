@@ -20,9 +20,16 @@
 #include <ctime>
 
 #include <fcntl.h>
+#ifndef _WIN32
 #include <pthread.h>
 #include <sys/ioctl.h>
 #include <unistd.h>
+#endif
+
+#include <platform/file_io.h>
+#ifdef _WIN32
+#include <platform/startup.h>
+#endif
 
 namespace report
 {
@@ -43,7 +50,80 @@ namespace report
         std::atomic<bool> s_busy{ false };        // the writer holds a chunk it hasn't finished with
         std::atomic<uint64_t> s_chunks{ 0 };      // chunks finished
         std::atomic<bool> s_writerStarted{ false };
+#ifdef _WIN32
+        DWORD s_writer = 0;  // its thread id
+#else
         pthread_t s_writer{};
+#endif
+
+        // fcntl(fd, F_DUPFD_CLOEXEC, 3): a copy of `fd` numbered 3 or more.
+        int DupAbove2(int fd)
+        {
+#ifdef _WIN32
+            // The C runtime's _dup takes the lowest free number: hold the low
+            // ones until a copy lands above them.
+            int held[3], heldCount = 0;
+            int copy = _dup(fd);
+            while (copy >= 0 && copy <= 2 && heldCount < 3)
+            {
+                held[heldCount++] = copy;
+                copy = _dup(fd);
+            }
+            for (int i = 0; i < heldCount; i++)
+                _close(held[i]);
+            return copy;
+#else
+            return fcntl(fd, F_DUPFD_CLOEXEC, 3);
+#endif
+        }
+
+#ifdef _WIN32
+        // The pipe, as a named pipe whose reading end is overlapped: FlushLog
+        // asks how much is waiting (PeekNamedPipe) while the writer thread's
+        // read is pending, and on a synchronous handle Windows queues the
+        // question behind that read, which waits for output that the asking
+        // thread was about to write (a hang at exit). Both ends are C runtime
+        // descriptors (the writing one becomes fd 2), not inherited.
+        int MakeLogPipe(int fds[2])
+        {
+            static std::atomic<int> serial{ 0 };
+            wchar_t name[96];
+            swprintf(name, std::size(name), L"\\\\.\\pipe\\SpeedBreaker-log-%lu-%d", GetCurrentProcessId(), serial++);
+            HANDLE reader = CreateNamedPipeW(name, PIPE_ACCESS_INBOUND | FILE_FLAG_OVERLAPPED | FILE_FLAG_FIRST_PIPE_INSTANCE,
+                PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS, 1, 0, 1 << 20, 0, nullptr);
+            if (reader == INVALID_HANDLE_VALUE)
+            {
+                errno = EMFILE;
+                return -1;
+            }
+            HANDLE writer = CreateFileW(name, GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+            if (writer == INVALID_HANDLE_VALUE)
+            {
+                CloseHandle(reader);
+                errno = EMFILE;
+                return -1;
+            }
+            fds[0] = _open_osfhandle(reinterpret_cast<intptr_t>(reader), _O_RDONLY | _O_NOINHERIT);
+            fds[1] = _open_osfhandle(reinterpret_cast<intptr_t>(writer), _O_NOINHERIT);
+            return 0;
+        }
+
+        // read(2) on the pipe's overlapped end: waits for data; 0 once every
+        // writer has gone.
+        ssize_t ReadPipe(int fd, void* buffer, size_t size)
+        {
+            static HANDLE done = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+            HANDLE pipe = reinterpret_cast<HANDLE>(_get_osfhandle(fd));
+            OVERLAPPED at{};
+            at.hEvent = done;
+            DWORD got = 0;
+            if (!ReadFile(pipe, buffer, DWORD(size), nullptr, &at) && GetLastError() != ERROR_IO_PENDING)
+                return GetLastError() == ERROR_BROKEN_PIPE ? 0 : -1;
+            if (!GetOverlappedResult(pipe, &at, &got, TRUE))
+                return GetLastError() == ERROR_BROKEN_PIPE ? 0 : -1;
+            return ssize_t(got);
+        }
+#endif
 
         char s_sessionName[64] = "";
         std::filesystem::path s_logPath;
@@ -95,18 +175,25 @@ namespace report
         void Writer()
         {
             SetHostThreadName("nfsmw-log");
+#ifndef _WIN32
             // A terminal that went away must not kill the game: with SIGPIPE
-            // blocked here, the write fails with EPIPE instead.
+            // blocked here, the write fails with EPIPE instead. (Windows has
+            // no SIGPIPE: the write just fails.)
             sigset_t set;
             sigemptyset(&set);
             sigaddset(&set, SIGPIPE);
             pthread_sigmask(SIG_BLOCK, &set, nullptr);
+#endif
             static char buffer[16384];
             static char stamped[sizeof(buffer) * 13];  // room for a prefix on every byte
             bool lineStart = true;
             while (true)
             {
+#ifdef _WIN32
+                ssize_t n = ReadPipe(s_pipeRead, buffer, sizeof(buffer));
+#else
                 ssize_t n = read(s_pipeRead, buffer, sizeof(buffer));
+#endif
                 if (n < 0 && errno == EINTR)
                     continue;
                 if (n <= 0)
@@ -235,6 +322,23 @@ namespace report
             if (fd < 0)
                 return;
             const char* p = static_cast<const char*>(data);
+#ifdef _WIN32
+            // WriteFile on the descriptor's handle: the C runtime's write()
+            // takes the descriptor's lock, which a crash may have left held.
+            // (These descriptors are binary, and the log file is only ever
+            // appended to through this one handle, so its position is its end.)
+            HANDLE handle = reinterpret_cast<HANDLE>(_get_osfhandle(fd));
+            if (handle == INVALID_HANDLE_VALUE)
+                return;
+            while (size > 0)
+            {
+                DWORD written = 0;
+                if (!WriteFile(handle, p, DWORD(std::min<size_t>(size, 1u << 30)), &written, nullptr) || written == 0)
+                    return;
+                p += written;
+                size -= written;
+            }
+#else
             while (size > 0)
             {
                 ssize_t n = write(fd, p, size);
@@ -245,6 +349,7 @@ namespace report
                 p += n;
                 size -= size_t(n);
             }
+#endif
         }
 
         int TerminalFd()
@@ -339,7 +444,7 @@ namespace report
         {
             std::string name = attempt == 1 ? stamp : std::format("{}-{}", stamp, attempt);
             std::filesystem::path path = dir / (name + ".log");
-            file = open(path.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_APPEND | O_CLOEXEC, 0644);
+            file = platform::OpenFile(path, O_WRONLY | O_CREAT | O_EXCL | O_APPEND | O_CLOEXEC, 0644);
             if (file >= 0)
             {
                 snprintf(s_sessionName, sizeof(s_sessionName), "%s", name.c_str());
@@ -349,21 +454,27 @@ namespace report
                 break;
         }
         if (file < 0)
-            fprintf(stderr, "[log] can't create a session log in %s: %s\n", dir.c_str(), strerror(errno));
+            fprintf(stderr, "[log] can't create a session log in %s: %s\n", dir.string().c_str(), strerror(errno));
         else if (file <= 2)
         {
             // Launched with stderr (or stdin, stdout) closed, open() hands
             // out its number: as fd 2 the file would be replaced by the pipe
             // below, and the copying thread would feed the pipe to itself
             // forever (one core busy, the log growing without its cap).
-            int moved = fcntl(file, F_DUPFD_CLOEXEC, 3);
+            int moved = DupAbove2(file);
             close(file);
             file = moved;
         }
 
         // fd 2 becomes the pipe; the writer copies it on (StartLogWriter).
         int fds[2];
+#ifdef _WIN32
+        // Binary, not inherited, 1 MB: room for a burst (and for startup,
+        // before the writer runs).
+        if (MakeLogPipe(fds) != 0)
+#else
         if (pipe(fds) != 0)
+#endif
         {
             fprintf(stderr, "[build] SpeedBreaker %s\n", BuildString());
             fprintf(stderr, "[log] pipe: %s (no session log)\n", strerror(errno));
@@ -376,7 +487,7 @@ namespace report
         for (int& fd : fds)
             if (fd <= 2)
             {
-                int moved = fcntl(fd, F_DUPFD_CLOEXEC, 3);
+                int moved = DupAbove2(fd);
                 close(fd);
                 fd = moved;
             }
@@ -388,13 +499,15 @@ namespace report
                 close(file);
             return;
         }
+#ifndef _WIN32
         fcntl(fds[0], F_SETFD, FD_CLOEXEC);
+#endif
 #ifdef F_SETPIPE_SZ
         // Room for a burst (and for startup, before the writer runs).
         fcntl(fds[1], F_SETPIPE_SZ, 1 << 20);
 #endif
         fflush(stderr);
-        int terminal = fcntl(2, F_DUPFD_CLOEXEC, 3);
+        int terminal = DupAbove2(2);
         if (dup2(fds[1], 2) < 0)
         {
             fprintf(stderr, "[build] SpeedBreaker %s\n", BuildString());
@@ -408,6 +521,11 @@ namespace report
             return;
         }
         close(fds[1]);
+#ifdef _WIN32
+        // Code that writes to the process's standard error handle rather
+        // than to fd 2 (the C runtime's assert, a driver) reaches the pipe too.
+        SetStdHandle(STD_ERROR_HANDLE, reinterpret_cast<HANDLE>(_get_osfhandle(2)));
+#endif
         // A write that failed before (stderr closed at launch: the
         // NFSMW_INPUT_SCRIPT line, any message before this) leaves the
         // stream's error flag set, and macOS's fprintf then writes nothing,
@@ -421,7 +539,12 @@ namespace report
         // The first lines of the file.
         fprintf(stderr, "[build] SpeedBreaker %s\n", BuildString());
         if (file >= 0)
-            fprintf(stderr, "[log] session %s (pid %d): %s\n", s_sessionName, int(getpid()), s_logPath.c_str());
+            fprintf(stderr, "[log] session %s (pid %d): %s\n", s_sessionName, int(getpid()), s_logPath.string().c_str());
+#ifdef _WIN32
+        // The download (the Windows subsystem): where the console went.
+        if (const char* note = platform::StandardStreamsNote(); note[0])
+            fprintf(stderr, "[log] %s\n", note);
+#endif
     }
 
     void StartLogWriter()
@@ -429,7 +552,11 @@ namespace report
         if (s_pipeRead < 0 || s_writerStarted.load())
             return;
         std::thread writer(Writer);
+#ifdef _WIN32
+        s_writer = GetThreadId(writer.native_handle());
+#else
         s_writer = writer.native_handle();
+#endif
         writer.detach();
         s_writerStarted.store(true, std::memory_order_release);
         // A return from main() or an exit() (a usage message, "the game
@@ -472,8 +599,13 @@ namespace report
 
     void FlushLog()
     {
+#ifdef _WIN32
+        if (s_pipeRead < 0 || !s_writerStarted.load(std::memory_order_acquire) || GetCurrentThreadId() == s_writer)
+            return;
+#else
         if (s_pipeRead < 0 || !s_writerStarted.load(std::memory_order_acquire) || pthread_equal(pthread_self(), s_writer))
             return;
+#endif
         // Empty pipe and an idle writer, twice a millisecond apart with no
         // chunk finished in between (it may have just taken the last one).
         int quiet = 0;
@@ -481,7 +613,13 @@ namespace report
         for (int i = 0; i < 250 && quiet < 2; i++)
         {
             int pending = 0;
+#ifdef _WIN32
+            DWORD available = 0;
+            if (PeekNamedPipe(reinterpret_cast<HANDLE>(_get_osfhandle(s_pipeRead)), nullptr, 0, nullptr, &available, nullptr))
+                pending = int(std::min<DWORD>(available, INT_MAX));
+#else
             ioctl(s_pipeRead, FIONREAD, &pending);
+#endif
             uint64_t now = s_chunks.load(std::memory_order_acquire);
             quiet = (pending == 0 && !s_busy.load(std::memory_order_acquire) && now == chunks) ? quiet + 1 : 0;
             chunks = now;

@@ -23,6 +23,16 @@
 #include <thread>
 #include <utility>
 #include <vector>
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#include <timeapi.h>
+#endif
 
 using namespace std::chrono_literals;
 
@@ -66,10 +76,17 @@ static Reading Host()
 }
 
 // Waits `us` microseconds of host time: spinning for the shortest, so a
-// window can be next to nothing, and sleeping otherwise.
+// window can be next to nothing, and sleeping otherwise. (Windows sleeps a
+// millisecond or more even after timeBeginPeriod(1), so it spins below 1 ms:
+// otherwise test 4's 20,000 windows of 0-200 us take minutes.)
 static void Pause(int64_t us)
 {
-    if (us >= 20)
+#ifdef _WIN32
+    constexpr int64_t kShortestSleepUs = 1000;
+#else
+    constexpr int64_t kShortestSleepUs = 20;
+#endif
+    if (us >= kShortestSleepUs)
     {
         std::this_thread::sleep_for(std::chrono::microseconds(us));
         return;
@@ -213,6 +230,11 @@ namespace hook
 
 int main()
 {
+#ifdef _WIN32
+    // As the runtime does first thing (platform/timer.h): 1 ms sleeps, not
+    // the 15.6 ms tick.
+    timeBeginPeriod(1);
+#endif
     // A thread left parked would hang the joins below: give up instead.
     std::thread([] {
         std::this_thread::sleep_for(120s);

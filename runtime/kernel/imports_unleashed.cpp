@@ -20,7 +20,11 @@
 #include "xdm.h"
 
 #ifdef _WIN32
-#include <ntstatus.h>
+// SpeedBreaker: Windows has these NT values only in <ntstatus.h>, which
+// clashes with <windows.h> (already in); elsewhere xdm.h defines them.
+#ifndef STATUS_FAIL_CHECK
+#define STATUS_FAIL_CHECK 0xC0000229
+#endif
 #endif
 
 
@@ -223,20 +227,10 @@ uint32_t RtlUnicodeToMultiByteN(char* MultiByteString, uint32_t MaxBytesInMultiB
     return STATUS_SUCCESS;
 }
 
+// SpeedBreaker: a no-op on every platform (Unleashed set the host thread's
+// priority on Windows only); thread priorities are PLAN.md P4's.
 void KeSetBasePriorityThread(GuestThreadHandle* hThread, int priority)
 {
-#ifdef _WIN32
-    if (priority == 16)
-    {
-        priority = 15;
-    }
-    else if (priority == -16)
-    {
-        priority = -15;
-    }
-
-    SetThreadPriority(hThread == GetKernelObject(CURRENT_THREAD_HANDLE) ? GetCurrentThread() : hThread->thread.native_handle(), priority);
-#endif
 }
 
 uint32_t ObReferenceObjectByHandle(uint32_t handle, uint32_t objectType, be<uint32_t>* object)

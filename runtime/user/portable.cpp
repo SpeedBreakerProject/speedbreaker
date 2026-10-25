@@ -21,6 +21,13 @@ namespace portable
             return p;
         }
 
+        // The record's text: UTF-8 everywhere (on Windows path.string() is
+        // the code page's, UTF-8 only under the exe's manifest).
+        std::string Utf8(const std::u8string& text)
+        {
+            return std::string(text.begin(), text.end());
+        }
+
         // `relative` stays inside the folder it's relative to (not "", ".",
         // or "../...").
         bool Inside(const fs::path& relative)
@@ -57,8 +64,8 @@ namespace portable
         fs::path path = Normal(folder);
         if (layout.Active())
             if (fs::path relative = path.lexically_relative(layout.root); Inside(relative))
-                return relative.generic_string();
-        return path.string();
+                return Utf8(relative.generic_u8string());
+        return Utf8(path.u8string());
     }
 
     std::optional<std::filesystem::path> ParseRecord(std::string_view text, const Layout& layout)
@@ -67,7 +74,8 @@ namespace portable
             text.remove_suffix(1);
         if (text.empty())
             return std::nullopt;
-        fs::path path{ std::string(text) };
+        // UTF-8 (RecordText), whatever the system's code page is on Windows.
+        fs::path path{ std::u8string(text.begin(), text.end()) };
         // (Records before v0.1.1 kept `--dest dir/`'s trailing separator.)
         if (path.is_absolute())
             return Normal(path);

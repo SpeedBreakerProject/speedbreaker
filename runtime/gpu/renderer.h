@@ -103,6 +103,7 @@ namespace gpu::renderer
     struct ScaledStats
     {
         uint64_t loads, untiledBytes, resolvedBytes, allocations, evictions, fallbacks;
+        uint64_t hosted;  // scaled resolves that also stored into their scaled texture (no load needed)
     };
     ScaledStats GetScaledStats();
     // Device memory held now, in bytes: the renderer's render targets,

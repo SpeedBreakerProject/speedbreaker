@@ -4,6 +4,7 @@
 #include "input.h"
 #include "key_map.h"
 #include "player_slots.h"
+#include "rumble_note.h"
 #include "wheel.h"
 #include <cpu/guest_time.h>
 #include <game/split_screen.h>
@@ -31,8 +32,10 @@ static_assert(settings::keynames::Code("a") == SDL_SCANCODE_A && settings::keyna
 
 namespace
 {
+#ifndef ERROR_SUCCESS  // (<windows.h> has these, with the same values)
     constexpr uint32_t ERROR_SUCCESS = 0;
     constexpr uint32_t ERROR_DEVICE_NOT_CONNECTED = 0x48F;
+#endif
 
     struct Pad
     {
@@ -613,6 +616,60 @@ namespace
             SDL_UpdateJoysticks();  // read back this frame
     }
 
+    // The "no rumble over USB" note (hid/rumble_note.h): player 1's
+    // controller as SDL reaches it, judged by Update once the note can show.
+    struct RumbleNotePad
+    {
+        SDL_Gamepad* gamepad = nullptr;  // pending for this pad; null when decided
+        char driver = 0;
+        hid::RumbleNote::Connection connection = hid::RumbleNote::Connection::Unknown;
+        uint16_t vendor = 0;
+        std::string name;
+    };
+    RumbleNotePad s_rumbleNotePad;
+
+    // Main thread, from Update: the note, shown or skipped, with a line
+    // either way; it waits (silently) for the UI, no other panel, and the
+    // controls idle 3 s (not mid-race), as the refresh-rate notice does.
+    void MaybeRumbleNote(bool vibration)
+    {
+        using Note = hid::RumbleNote;
+        RumbleNotePad& pad = s_rumbleNotePad;
+        if (!pad.gamepad)
+            return;
+        if (pad.gamepad != s_gamepad)
+        {
+            pad.gamepad = nullptr;  // gone before it was judged (the next one is judged on its own)
+            return;
+        }
+        Note::Inputs in;
+#if defined(__APPLE__) && !TARGET_OS_IOS
+        in.platform = Note::Platform::Mac;
+#endif
+        in.driver = pad.driver;
+        in.connection = pad.connection;
+        in.vendor = pad.vendor;
+        in.name = pad.name;
+        in.vibration = vibration;
+        in.shownBefore = settings::RumbleNoteShown();
+        const Note::Decision d = Note::Decide(in);
+        if (!d.show)
+        {
+            pad.gamepad = nullptr;
+            fprintf(stderr, "[input] rumble note for %s: not shown: %s\n", pad.name.c_str(), d.reason);
+            return;
+        }
+        if (!ui::Ready() || ui::HasModal() || ui::SettingsOpen() || hid::SecondsSinceInput() < 3.0)
+            return;
+        if (!ui::ShowNotice(Note::kTitle, Note::kText, [](const char*) {
+                if (settings::RecordRumbleNote())
+                    fprintf(stderr, "[input] rumble note: recorded in settings.toml (not shown again)\n");
+            }))
+            return;
+        pad.gamepad = nullptr;
+        fprintf(stderr, "[input] rumble note for %s: shown (%s)\n", pad.name.c_str(), d.reason);
+    }
+
     void OpenFirstGamepad()
     {
         if (s_gamepad)
@@ -651,9 +708,26 @@ namespace
             {
                 // What it can do: a pad without motors takes rumble and ignores it.
                 SDL_PropertiesID props = SDL_GetGamepadProperties(s_gamepad);
-                fprintf(stderr, "[input] gamepad: %s (rumble %s, trigger rumble %s)\n", SDL_GetGamepadName(s_gamepad),
+                // How SDL reaches it (a wired Xbox Series pad on a Mac takes no rumble while the
+                // same pad over Bluetooth does): the GUID's driver byte ('h' HIDAPI, 'm' Apple's GameController,
+                // 0 the system's HID), the connection and the device path.
+                SDL_GUID guid = SDL_GetJoystickGUID(SDL_GetGamepadJoystick(s_gamepad));
+                char guidText[33];
+                SDL_GUIDToString(guid, guidText, sizeof(guidText));
+                const char* path = SDL_GetGamepadPath(s_gamepad);
+                SDL_JoystickConnectionState conn = SDL_GetGamepadConnectionState(s_gamepad);
+                fprintf(stderr, "[input] gamepad: %s (rumble %s, trigger rumble %s; %s, driver '%c', guid %s, path %s)\n",
+                    SDL_GetGamepadName(s_gamepad),
                     SDL_GetBooleanProperty(props, SDL_PROP_GAMEPAD_CAP_RUMBLE_BOOLEAN, false) ? "yes" : "no",
-                    SDL_GetBooleanProperty(props, SDL_PROP_GAMEPAD_CAP_TRIGGER_RUMBLE_BOOLEAN, false) ? "yes" : "no");
+                    SDL_GetBooleanProperty(props, SDL_PROP_GAMEPAD_CAP_TRIGGER_RUMBLE_BOOLEAN, false) ? "yes" : "no",
+                    conn == SDL_JOYSTICK_CONNECTION_WIRED ? "wired" : conn == SDL_JOYSTICK_CONNECTION_WIRELESS ? "wireless" : "connection unknown",
+                    guid.data[14] ? char(guid.data[14]) : '0', guidText, path ? path : "none");
+                const char* name = SDL_GetGamepadName(s_gamepad);
+                s_rumbleNotePad = { s_gamepad, char(guid.data[14]),
+                    conn == SDL_JOYSTICK_CONNECTION_WIRED ? hid::RumbleNote::Connection::Wired
+                        : conn == SDL_JOYSTICK_CONNECTION_WIRELESS ? hid::RumbleNote::Connection::Wireless
+                        : hid::RumbleNote::Connection::Unknown,
+                    SDL_GetGamepadVendor(s_gamepad), name ? name : "" };
             }
             break;
         }
@@ -1247,10 +1321,19 @@ namespace hid
                     vibration ? "on" : "off (the controller gets 0)", s_gamepad ? "" : "; no controller");
             }
         }
+        MaybeRumbleNote(vibration);
         if (!vibration)
             low = high = 0;
-        if (rumble && s_gamepad)
-            SDL_RumbleGamepad(s_gamepad, low, high, low || high ? 5000 : 0);
+        if (rumble && s_gamepad && !SDL_RumbleGamepad(s_gamepad, low, high, low || high ? 5000 : 0))
+        {
+            // A pad that says it has motors but refuses them: once per session, with SDL's reason.
+            static bool told = false;
+            if (!told)
+            {
+                told = true;
+                fprintf(stderr, "[input] rumble refused by %s: %s\n", SDL_GetGamepadName(s_gamepad), SDL_GetError());
+            }
+        }
         // The wheel's own force feedback: every frame, since Settings >
         // Wheel > Force Feedback and Centering Force can change under it
         // without the game asking for anything new.
@@ -1317,7 +1400,9 @@ namespace
     };
     static_assert(sizeof(Keystroke) == 8);
 
+#ifndef ERROR_EMPTY
     constexpr uint32_t ERROR_EMPTY = 0x10D2;
+#endif
 
     uint32_t NextKeystroke(Keystroke* out)
     {

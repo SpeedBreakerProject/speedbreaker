@@ -4,7 +4,8 @@
 // came from: the version (project() in the top-level CMakeLists.txt) and the
 // commit. build_info.inc is written at build time by build_info.cmake
 // (runtime/CMakeLists.txt); a build without it (a hand-run compiler) still
-// works and says "unknown".
+// works and says "unknown". A labelled build (SB_BUILD_LABEL: the Windows
+// beta) also defines NFSMW_BUILD_RELEASE, "Windows beta 2026-10-11".
 #include <stdafx.h>
 #include "report.h"
 
@@ -40,6 +41,46 @@ namespace report
         return id.c_str();
     }
 
+#ifdef NFSMW_BUILD_RELEASE
+    const char* ReleaseName()
+    {
+        static const std::string name = std::format("v{} {} ({})", Version(), NFSMW_BUILD_RELEASE, BuildId());
+        return name.c_str();
+    }
+
+    const char* ReleaseFileTag()
+    {
+        // "Windows beta 2026-10-11 (59d1ef3)" -> "windows-beta-2026-10-11-59d1ef3"
+        // (the names it goes into carry the version already).
+        static const std::string tag = [] {
+            std::string text;
+            const std::string name = std::format("{} ({})", NFSMW_BUILD_RELEASE, BuildId());
+            for (const char* p = name.c_str(); *p; p++)
+            {
+                char c = (*p >= 'A' && *p <= 'Z') ? char(*p - 'A' + 'a') : *p;
+                if ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9'))
+                    text += c;
+                else if (!text.empty() && text.back() != '-')
+                    text += '-';
+            }
+            while (!text.empty() && text.back() == '-')
+                text.pop_back();
+            return text;
+        }();
+        return tag.c_str();
+    }
+#else
+    const char* ReleaseName()
+    {
+        return "";
+    }
+
+    const char* ReleaseFileTag()
+    {
+        return "";
+    }
+#endif
+
     const char* BuildString()
     {
         static const std::string text = [] {
@@ -73,8 +114,14 @@ namespace report
             const char* arch = "an unknown CPU";
 #endif
             std::string type = NFSMW_BUILD_TYPE;
+#ifdef NFSMW_BUILD_RELEASE
+            // The name the testers quote first (with the version), then the details.
+            return std::format("{}: built {}, {}, {} {}{}{}", ReleaseName(), NFSMW_BUILD_DATE, compiler, os, arch,
+                type.empty() ? "" : ", ", type);
+#else
             return std::format("{}, built {}, {}, {} {}{}{}", VersionString(), NFSMW_BUILD_DATE, compiler, os, arch,
                 type.empty() ? "" : ", ", type);
+#endif
         }();
         return text.c_str();
     }

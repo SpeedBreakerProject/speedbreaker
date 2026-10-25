@@ -13,7 +13,9 @@
 // page is a guest page, checks the old rule both times); with it set, it runs
 // once. Physical memory is mapped as the runtime maps it (three windows of one
 // shared object), and
-// SIGSEGV and SIGBUS go to HandleFault as main.cpp sends them. Under a second.
+// SIGSEGV and SIGBUS go to HandleFault as main.cpp sends them (Windows: a
+// vectored exception handler, as platform/win32/fault.cpp does, and the
+// runtime's own mapping, platform/win32/memory.cpp). Under a second.
 #include <stdafx.h>
 #include <kernel/write_watch.h>
 
@@ -21,15 +23,19 @@
 #include <csignal>
 #include <cstdio>
 #include <cstdlib>
-#include <fcntl.h>
 #include <mutex>
+#include <thread>
+#ifdef _WIN32
+#include <platform/memory.h>
+#else
+#include <fcntl.h>
 #include <spawn.h>
 #include <sys/mman.h>
 #include <sys/wait.h>
-#include <thread>
 #include <unistd.h>
 
 extern char** environ;
+#endif
 
 // What write_watch.cpp needs of the runtime's memory: the base and the 0xE
 // window's shift (memory.cpp is not linked).
@@ -51,6 +57,19 @@ static uint8_t* Guest(uint32_t physical, uint32_t window = 0xA0000000)
     return g_memory.base + window + physical;
 }
 
+#ifdef _WIN32
+static LONG CALLBACK FaultHandler(EXCEPTION_POINTERS* info)
+{
+    const EXCEPTION_RECORD* r = info->ExceptionRecord;
+    if (r->ExceptionCode != EXCEPTION_ACCESS_VIOLATION || r->NumberParameters < 2)
+        return EXCEPTION_CONTINUE_SEARCH;
+    void* address = reinterpret_cast<void*>(r->ExceptionInformation[1]);
+    if (writewatch::HandleFault(address, r->ExceptionInformation[0] == 1))
+        return EXCEPTION_CONTINUE_EXECUTION;
+    fprintf(stderr, "unexpected access violation at %p\n", address);
+    _exit(2);
+}
+#else
 static void FaultHandler(int sig, siginfo_t* info, void* context)
 {
     bool isWrite = true;
@@ -66,11 +85,18 @@ static void FaultHandler(int sig, siginfo_t* info, void* context)
     fprintf(stderr, "unexpected signal %d at %p\n", sig, info->si_addr);
     _exit(2);
 }
+#endif
 
 // Physical memory, mapped three times as memory.cpp maps it (the 0xE window
 // shifted 4 KB where the host page size allows).
 static bool MapMemory()
 {
+#ifdef _WIN32
+    // The runtime's own: a view must fill its placeholder, so 0xE is unshifted.
+    g_memory.base = platform::MapGuestSpace();
+    g_memory.eWindowShift = 0;
+    return g_memory.base != nullptr;
+#else
     void* reserved = mmap(nullptr, size_t(1) << 32, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);
     if (reserved == MAP_FAILED)
         return false;
@@ -92,6 +118,7 @@ static bool MapMemory()
             return false;
     }
     return true;
+#endif
 }
 
 static writewatch::GuardStats Stats()
@@ -710,11 +737,15 @@ int main(int, char** argv)
         perror("map physical memory");
         return 1;
     }
+#ifdef _WIN32
+    AddVectoredExceptionHandler(1, FaultHandler);
+#else
     struct sigaction sa{};
     sa.sa_sigaction = FaultHandler;
     sa.sa_flags = SA_SIGINFO;
     sigaction(SIGSEGV, &sa, nullptr);
     sigaction(SIGBUS, &sa, nullptr);
+#endif
     writewatch::Initialize();
     if (std::getenv("NFSMW_WATCH_SUBPAGES"))
         return Run();
@@ -736,6 +767,27 @@ int main(int, char** argv)
     for (const char* value : { "0", "1" })
     {
         setenv("NFSMW_WATCH_SUBPAGES", value, 1);
+#ifdef _WIN32
+        // This executable again, with the variable in its environment.
+        wchar_t self[MAX_PATH];
+        GetModuleFileNameW(nullptr, self, MAX_PATH);
+        STARTUPINFOW si{};
+        si.cb = sizeof(si);
+        PROCESS_INFORMATION pi{};
+        fflush(stdout);
+        if (!CreateProcessW(self, nullptr, nullptr, nullptr, TRUE, 0, nullptr, nullptr, &si, &pi))
+        {
+            fprintf(stderr, "CreateProcess: error %lu\n", GetLastError());
+            return 1;
+        }
+        WaitForSingleObject(pi.hProcess, INFINITE);
+        DWORD code = 1;
+        GetExitCodeProcess(pi.hProcess, &code);
+        CloseHandle(pi.hThread);
+        CloseHandle(pi.hProcess);
+        if (code != 0)
+            result = 1;
+#else
         pid_t child;
         if (posix_spawn(&child, argv[0], nullptr, nullptr, argv, environ) != 0)
         {
@@ -746,6 +798,7 @@ int main(int, char** argv)
         waitpid(child, &status, 0);
         if (!WIFEXITED(status) || WEXITSTATUS(status) != 0)
             result = 1;
+#endif
         printf("\n");
         fflush(stdout);
     }

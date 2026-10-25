@@ -4,7 +4,9 @@
 //   build/memory_plan_test
 // The memory types are the devices' own: the Steam Machine's from vulkaninfo
 // (2026-10-09), the others from their logs' chosen types (flags) and their
-// drivers' type lists (RADV, NVIDIA's Linux driver, ANV, Turnip, MoltenVK).
+// drivers' type lists (RADV, NVIDIA's Linux driver, ANV, Turnip, MoltenVK);
+// on Windows, Intel UHD's from vulkaninfo on the ThinkPad and NVIDIA's
+// Windows driver's type list.
 #include <gpu/memory_plan.h>
 
 #include <cstdio>
@@ -101,6 +103,24 @@ static Memory RadvNoRebar()
 static Memory AnvArrowLake()
 {
     return { { { 0x7, 0 }, { 0xF, 0 } }, { 15 * GB } };
+}
+
+// Windows: Intel UHD (Comet Lake) on driver 101.2135, the ThinkPad that
+// tests the Windows port (vulkaninfo, 2026-10-09): one 7.88 GB heap, every
+// type device-local (the log: guest memory imported, ring in type 1, flags 7).
+static Memory IntelUhdWindows()
+{
+    return { { { 0x1, 0 }, { 0x7, 0 }, { 0xF, 0 } }, { 8459300864ull } };
+}
+
+// NVIDIA's Windows driver (an RTX card, the type list its Windows driver
+// reports): VRAM, system memory (plain and cached), and CPU-mapped VRAM as a
+// heap of its own, the 256 MB window (214-256 MB) unless resizable BAR is on
+// and the driver turns it on for the game; then all of VRAM (16 GB here, an
+// RTX 5070 Ti's).
+static Memory NvidiaWindows(uint64_t barHeap)
+{
+    return { { { 0x0, 1 }, { 0x1, 0 }, { 0x1, 0 }, { 0x6, 1 }, { 0xE, 1 }, { 0x7, 2 } }, { 16 * GB, 16 * GB, barHeap } };
 }
 
 static GuestInput Input(Gpu gpu, bool importable, uint32_t driver = 0, const char* shared = nullptr, const char* shadow = nullptr)
@@ -240,6 +260,55 @@ static void Intel()
         "Intel's Linux driver");
 }
 
+// Windows: the tester kits' machines. Intel's Windows driver (5) is not
+// ANV (6): it imports, as the ThinkPad does. NVIDIA's (4) without resizable
+// BAR: import first, then the copy in system memory (memory_plan.h,
+// "Windows"); kit 1 put the copy in the 256 MB window and quit.
+static void Windows()
+{
+    printf("Windows:\n");
+    {
+        Memory m = IntelUhdWindows();
+        Plan g = PlanGuestMemory(m, Input(Gpu::kIntegrated, true, 5));  // VK_DRIVER_ID_INTEL_PROPRIETARY_WINDOWS
+        Expect("Intel UHD (Windows), guest memory", g, false, "import,copy-vram:1", "an integrated GPU");
+        CHECK(g.why.find("not imported") == std::string::npos, "Intel's Windows driver refused: %s", g.why.c_str());
+        Expect("Intel UHD (Windows), ring", PlanRing(m, ~0u, CopyType(g)), true, "ring-vram:1,ring-cached:2");
+        // The copy, when the import fails (NFSMW_TEST_ALLOC_FAIL=import): in
+        // its one host-visible type, the ring beside it.
+        Expect("Intel UHD (Windows), ring beside the copy", PlanRing(m, ~0u, 1), true, "ring-vram:1,ring-cached:2");
+    }
+    // What the ThinkPad runs to stand in for a discrete GPU without resizable
+    // BAR: NFSMW_TEST_GPU_KIND=discrete NFSMW_TEST_BAR_HEAP_MB=256. No
+    // host-visible type outside device memory there, so after the import
+    // only the window, too small.
+    {
+        Memory m = IntelUhdWindows();
+        ShrinkMappedVram(m, 256 * MB);
+        Plan g = PlanGuestMemory(m, Input(Gpu::kDiscrete, true, 5));
+        Expect("Intel UHD as discrete, 256 MB BAR, guest memory", g, false, "import,copy-vram:1!", "no resizable BAR");
+        Expect("Intel UHD as discrete, 256 MB BAR, ring", PlanRing(m, ~0u, CopyType(g)), true, "ring-cached:2!,ring-vram:1!", "too small");
+    }
+    for (uint64_t bar : { 214 * MB, 256 * MB })
+    {
+        Memory m = NvidiaWindows(bar);
+        Plan g = PlanGuestMemory(m, Input(Gpu::kDiscrete, true, 4));
+        Expect("NVIDIA (Windows) without resizable BAR, guest memory", g, false, "import,copy-system:3,copy-cached:4,copy-vram:5!",
+            "no resizable BAR");
+        Expect("NVIDIA (Windows) without resizable BAR, ring", PlanRing(m, ~0u, CopyType(g)), true,
+            "ring-cached:4,ring-system:3,ring-vram:5!");
+        // The import refused (the driver won't take a file mapping's view):
+        // the copy in system memory, the ring still in cached system memory.
+        Expect("NVIDIA (Windows), ring beside a copy in type 3", PlanRing(m, ~0u, 3), true, "ring-cached:4,ring-system:3,ring-vram:5!");
+    }
+    {
+        Memory m = NvidiaWindows(16 * GB);
+        Plan g = PlanGuestMemory(m, Input(Gpu::kDiscrete, true, 4));
+        Expect("NVIDIA (Windows) with resizable BAR, guest memory", g, false, "copy-vram:5,import,copy-system:3,copy-cached:4",
+            "resizable BAR");
+        Expect("NVIDIA (Windows) with resizable BAR, ring", PlanRing(m, ~0u, CopyType(g)), true, "ring-vram:5,ring-cached:4,ring-system:3");
+    }
+}
+
 // The environment's overrides still lead, and the default order follows.
 static void EnvOverrides()
 {
@@ -309,11 +378,40 @@ static void Types()
         Size(256 * MB).c_str(), Size(8573157376ull).c_str(), Size(16621477888ull).c_str());
 }
 
+// Issue #40: an RTX 5060 Ti on NVIDIA 615.78.08 (Linux), a 246 MB BAR window
+// (its log: "0 16 GB device-local, 1 12 GB, 2 246 MB device-local; types
+// 0:1/0 1:0/1 2:1/6 3:1/E 4:2/7"). Both in system memory, as its log says,
+// and the log now says the GPU reads them over PCIe.
+static void OverPcie()
+{
+    printf("over PCIe (issue #40):\n");
+    Memory m{ { { 0x0, 1 }, { 0x1, 0 }, { 0x6, 1 }, { 0xE, 1 }, { 0x7, 2 } }, { 16 * GB, 12 * GB, 246 * MB } };
+    Plan g = PlanGuestMemory(m, Input(Gpu::kDiscrete, true, 4));
+    Expect("RTX 5060 Ti 246 MB BAR, guest memory", g, false, "import,copy-system:2,copy-cached:3,copy-vram:4!", "no resizable BAR");
+    Expect("RTX 5060 Ti 246 MB BAR, ring (imported)", PlanRing(m, ~0u, kNoType), true, "ring-cached:3,ring-system:2,ring-vram:4!");
+    // Imported guest memory and a cached ring: both named.
+    const char* both = OverPcieNote(Gpu::kDiscrete, false, false);
+    CHECK(both && std::string(both).find("upload ring") != std::string::npos && std::string(both).find("Resizable BAR") != std::string::npos,
+        "both over PCIe: %s", both ? both : "(none)");
+    // NFSMW_RING_MEMORY=vram (the ring in the BAR window): guest memory only.
+    const char* guest = OverPcieNote(Gpu::kDiscrete, false, true);
+    CHECK(guest && std::string(guest).find("upload ring") == std::string::npos, "guest over PCIe: %s", guest ? guest : "(none)");
+    // With resizable BAR the copy is in VRAM: nothing to say.
+    CHECK(!OverPcieNote(Gpu::kDiscrete, true, true), "resizable BAR noted");
+    CHECK(!OverPcieNote(Gpu::kDiscrete, true, false), "copy in VRAM, ring cached noted");
+    // Integrated GPUs and unified memory (the Deck, the Frame, Apple) read
+    // system memory as their own.
+    CHECK(!OverPcieNote(Gpu::kIntegrated, false, false), "integrated noted");
+    CHECK(!OverPcieNote(Gpu::kOther, false, false), "other noted");
+}
+
 int main()
 {
     Unchanged();
     NoRebar();
+    OverPcie();
     Intel();
+    Windows();
     EnvOverrides();
     TestHook();
     Types();

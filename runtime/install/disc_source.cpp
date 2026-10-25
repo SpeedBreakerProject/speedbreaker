@@ -29,14 +29,29 @@
 
 #include <fcntl.h>
 #include <sys/stat.h>
+#ifdef _WIN32
+#include <platform/os.h>
+#else
 #include <unistd.h>
+#endif
+
+#include <platform/file_io.h>
 
 namespace install
 {
     namespace
     {
         namespace fs = std::filesystem;
+#ifndef _WIN32
         static_assert(sizeof(off_t) == 8, "large file offsets are required");
+#endif
+        // Opened for one front-to-back pass (Windows says so at the open;
+        // elsewhere AdviseSequential does).
+#ifdef _WIN32
+        constexpr int kReadOnce = O_RDONLY | O_CLOEXEC | _O_SEQUENTIAL;
+#else
+        constexpr int kReadOnce = O_RDONLY | O_CLOEXEC;
+#endif
 
         constexpr uint64_t kSectorSize = 2048;
         // Where the game partition starts: plain XISO (0), older rips
@@ -105,7 +120,7 @@ namespace install
             size_t done = 0;
             while (done < size)
             {
-                ssize_t n = pread(fd, p + done, std::min<size_t>(size - done, 1u << 30), off_t(offset + done));
+                int64_t n = platform::ReadAt(fd, p + done, std::min<size_t>(size - done, 1u << 30), offset + done);
                 if (n < 0)
                 {
                     if (errno == EINTR)
@@ -385,13 +400,13 @@ namespace install
         Result OpenImage(const fs::path& path, std::unique_ptr<DiscSource>& source, const OpenOptions& options)
         {
             auto image = std::make_shared<ImageFile>();
-            image->fd = open(path.c_str(), O_RDONLY | O_CLOEXEC);
+            image->fd = platform::OpenFile(path, kReadOnce);
             if (image->fd < 0)
                 return Fail(Error::NotFound, std::format("Cannot open {}: {}.", path.string(), strerror(errno)), path.string());
-            struct stat st;
-            if (fstat(image->fd, &st) != 0)
+            platform::FileInfo st;
+            if (platform::InfoOf(image->fd, st) != 0)
                 return Fail(Error::ReadError, std::format("Cannot read {}: {}.", path.string(), strerror(errno)), path.string());
-            image->size = uint64_t(st.st_size);
+            image->size = st.size;
             AdviseSequential(image->fd);
 
             // Try each partition offset with the magic, first to last, and keep
@@ -500,7 +515,7 @@ namespace install
             std::unique_ptr<FileReader> Open(const DiscFile& file, std::string& error) const override
             {
                 fs::path host = path / fs::path(file.path);
-                int fd = open(host.c_str(), O_RDONLY | O_CLOEXEC);
+                int fd = platform::OpenFile(host, kReadOnce);
                 if (fd < 0)
                 {
                     error = strerror(errno);
@@ -570,8 +585,8 @@ namespace install
             std::set<std::pair<uint64_t, uint64_t>> entered;
             auto firstEntry = [&](const fs::path& dir)
             {
-                struct stat st;
-                return stat(dir.c_str(), &st) == 0 && entered.insert({ uint64_t(st.st_dev), uint64_t(st.st_ino) }).second;
+                platform::FileInfo st;
+                return platform::InfoOf(dir, st) == 0 && entered.insert({ st.device, st.inode }).second;
             };
             firstEntry(root);
 

@@ -18,10 +18,16 @@
 #include <set>
 
 #include <fcntl.h>
+#ifdef _WIN32
+#include <platform/os.h>
+#else
 #include <sys/file.h>
 #include <sys/stat.h>
 #include <sys/statvfs.h>
 #include <unistd.h>
+#endif
+
+#include <platform/file_io.h>
 
 namespace install
 {
@@ -97,12 +103,7 @@ namespace install
 
         void SyncDirectory(const fs::path& dir)
         {
-            int fd = open(dir.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-            if (fd >= 0)
-            {
-                fsync(fd);
-                close(fd);
-            }
+            platform::SyncDirectory(dir);
         }
 
         // Anything at `path`, a dangling link included.
@@ -236,9 +237,9 @@ namespace install
             // The top of a mounted drive can't be renamed, and its siblings
             // are on the drive above it: the copy would fill the wrong disk
             // (on SteamOS, /run/media is in RAM) and then fail to move over.
-            struct stat destStat, parentStat;
-            if (stat(dest.c_str(), &destStat) == 0 && S_ISDIR(destStat.st_mode)
-                && stat(layout.parent.c_str(), &parentStat) == 0 && destStat.st_dev != parentStat.st_dev)
+            platform::FileInfo destStat, parentStat;
+            if (platform::InfoOf(dest, destStat) == 0 && destStat.directory
+                && platform::InfoOf(layout.parent, parentStat) == 0 && destStat.device != parentStat.device)
                 return Fail(Error::DestinationNotWritable, std::format("{} is a whole drive. Choose a folder on it instead, "
                     "such as {}.", dest.string(), (dest / kUserFolderName).string()), dest.string());
             return {};
@@ -331,9 +332,11 @@ namespace install
                     ? std::format("Cannot install to {}.", dest.string())
                     : std::format("Cannot install to {}: {} is a file, not a folder.", dest.string(), file.string()),
                     dest.string());
-            if (access(folder.c_str(), W_OK | X_OK) != 0)
+            // What Install makes there: folders (the missing ones up to the
+            // parent, then <dest>.partial); every file goes inside those.
+            if (int error = platform::CheckWritableFolder(folder, platform::NewEntry::Folder); error != 0)
                 return Fail(Error::DestinationNotWritable, std::format("Cannot write to {}: {}. Choose another folder.",
-                    folder.string(), strerror(errno)), folder.string());
+                    folder.string(), strerror(error)), folder.string());
             return {};
         }
 
@@ -360,10 +363,7 @@ namespace install
             if (std::optional<uint64_t> important = platform::ios::AvailableCapacityForImportantUsage(folder))
                 return important;
 #endif
-            struct statvfs vfs;
-            if (statvfs(folder.c_str(), &vfs) != 0)
-                return std::nullopt;
-            return uint64_t(vfs.f_bavail) * vfs.f_frsize;
+            return platform::FreeSpace(folder);
         }
 
         // `reclaimable`: bytes of the installer's own leftover .partial,
@@ -394,19 +394,12 @@ namespace install
         public:
             explicit FolderLock(const fs::path& dir)
             {
-                fd = open(dir.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-                if (fd >= 0 && flock(fd, LOCK_EX | LOCK_NB) != 0)
-                {
-                    busy = errno == EWOULDBLOCK;
-                    close(fd);
-                    fd = -1;
-                }
+                lock = platform::LockFolder(dir, busy);
             }
 
             ~FolderLock()
             {
-                if (fd >= 0)
-                    close(fd);
+                platform::UnlockFolder(lock);
             }
 
             FolderLock(const FolderLock&) = delete;
@@ -415,7 +408,7 @@ namespace install
             bool Busy() const { return busy; }
 
         private:
-            int fd = -1;
+            intptr_t lock = -1;
             bool busy = false;
         };
 
@@ -447,7 +440,7 @@ namespace install
                 entries.push_back(*it);
             if (ec)
             {
-                fprintf(stderr, "[install] cannot list %s: %s\n", from.c_str(), ec.message().c_str());
+                fprintf(stderr, "[install] cannot list %s: %s\n", from.string().c_str(), ec.message().c_str());
                 return false;
             }
 
@@ -470,15 +463,15 @@ namespace install
                 fs::path target = to / name;
                 if (Present(target))
                 {
-                    fprintf(stderr, "[install] cannot move %s: the new install already has %s\n", entry.path().c_str(),
-                        target.c_str());
+                    fprintf(stderr, "[install] cannot move %s: the new install already has %s\n", entry.path().string().c_str(),
+                        target.string().c_str());
                     complete = false;
                     continue;
                 }
                 fs::rename(entry.path(), target, typeEc);
                 if (typeEc)
                 {
-                    fprintf(stderr, "[install] cannot move %s into the new install: %s\n", entry.path().c_str(),
+                    fprintf(stderr, "[install] cannot move %s into the new install: %s\n", entry.path().string().c_str(),
                         typeEc.message().c_str());
                     complete = false;
                 }
@@ -494,13 +487,13 @@ namespace install
             if (!CarryOver(layout.previous, layout.destination, "", manifest))
             {
                 fprintf(stderr, "[install] kept the previous install at %s: it still holds files that could not be moved "
-                    "into %s\n", layout.previous.c_str(), layout.destination.c_str());
+                    "into %s\n", layout.previous.string().c_str(), layout.destination.string().c_str());
                 return;
             }
             std::error_code ec;
             fs::remove_all(layout.previous, ec);
             if (ec)
-                fprintf(stderr, "[install] could not delete the previous install at %s: %s\n", layout.previous.c_str(),
+                fprintf(stderr, "[install] could not delete the previous install at %s: %s\n", layout.previous.string().c_str(),
                     ec.message().c_str());
         }
 
@@ -516,7 +509,7 @@ namespace install
                 // Nothing took its place: put it back (a rename replaces an
                 // empty folder).
                 fs::rename(layout.previous, layout.destination, ec);
-                fprintf(stderr, "[install] restored %s from an interrupted reinstall%s%s\n", layout.destination.c_str(),
+                fprintf(stderr, "[install] restored %s from an interrupted reinstall%s%s\n", layout.destination.string().c_str(),
                     ec ? ": " : "", ec ? ec.message().c_str() : "");
             }
             else if (ReadInstallMarker(layout.destination))
@@ -540,7 +533,7 @@ namespace install
                 "bytes = {}\n",
                 manifest.version, manifest.Xex().sha256, manifest.files.size(), manifest.totalBytes);
             fs::path path = dir / kInstallMarker;
-            int fd = open(path.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+            int fd = platform::OpenFile(path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
             if (fd < 0)
                 return errno;
             int error = 0;
@@ -566,6 +559,11 @@ namespace install
                     return Fail(Error::WriteError, std::format("Cannot move the previous install at {} aside: {}.",
                         layout.destination.string(), ec.message()), layout.destination.string());
             }
+#ifdef _WIN32
+            // rename() replaces an empty folder; Windows' MoveFileExW doesn't.
+            if (!replacing && fs::is_directory(layout.destination, ec))
+                fs::remove(layout.destination, ec);
+#endif
             fs::rename(layout.partial, layout.destination, ec);
             if (ec)
             {
@@ -754,7 +752,7 @@ namespace install
             fs::remove_all(layout.partial, removeEc);
             return result;
         };
-        int tag = open((layout.partial / kPartialTag).c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+        int tag = platform::OpenFile(layout.partial / kPartialTag, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
         if (tag < 0)
             return failed(WriteFailure(errno, layout.partial / kPartialTag));
         close(tag);
@@ -781,7 +779,7 @@ namespace install
             p.currentFile = mf->path;
             Report(progress, p);
 
-            int fd = open(target.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0644);
+            int fd = platform::OpenFile(target, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0644);
             if (fd < 0)
                 return failed(WriteFailure(errno, target));
             r = StreamFile(source, *file, *mf, fd, target, buffer, p, progress, cancel);
@@ -817,7 +815,7 @@ namespace install
         platform::ios::ExcludeFromBackup(layout.destination);
 #endif
         fprintf(stderr, "[install] installed %zu files (%s) to %s\n", manifest.files.size(),
-            FormatSize(manifest.totalBytes).c_str(), layout.destination.c_str());
+            FormatSize(manifest.totalBytes).c_str(), layout.destination.string().c_str());
         return {};
     }
 

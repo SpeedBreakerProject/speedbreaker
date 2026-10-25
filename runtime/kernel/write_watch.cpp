@@ -4,10 +4,14 @@
 #include "memory.h"
 
 #include <cpu/guest_time.h>
+#ifndef _WIN32
 #include <sys/mman.h>
 #include <unistd.h>
+#endif
 #include <time.h>
+#ifndef _WIN32
 #include <dlfcn.h>
+#endif
 
 namespace writewatch
 {
@@ -753,8 +757,12 @@ namespace writewatch
             if (s_logGuard)
             {
                 static std::atomic<uint32_t> logged{ 0 };
+#ifdef _WIN32
+                struct { const char* dli_sname = nullptr; } dl;  // host names on Windows: DbgHelp (PLAN.md P3)
+#else
                 Dl_info dl{};
                 dladdr(t_faultPc, &dl);
+#endif
                 if (std::chrono::steady_clock::now() >= s_logGuardFrom && logged++ < 400)
                     fprintf(stderr, "[guard] stall %llu us (%s %08X): %s %08X+%X (submission %llu%s) in %s\n", (unsigned long long)us,
                         t_faultWrite ? "write" : "read", t_faultPhysical, s_gpuTag[sub].load(), s_gpuRange[0][sub].load(),
@@ -850,9 +858,16 @@ namespace writewatch
                 s_lastWriter[i].store(0);
                 s_lastWriterPc[i].store(0);
             }
+#ifdef _WIN32
+            HMODULE module = nullptr;
+            if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                    reinterpret_cast<LPCWSTR>(&Initialize), &module))
+                s_imageBase = reinterpret_cast<const uint8_t*>(module);
+#else
             Dl_info dl{};
             if (dladdr(reinterpret_cast<const void*>(&Initialize), &dl))
                 s_imageBase = static_cast<const uint8_t*>(dl.dli_fbase);
+#endif
         }
         if (s_logGuard)
         {

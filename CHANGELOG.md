@@ -4,6 +4,36 @@ What changed in each SpeedBreaker release, newest first. Each release's notes on
 its entry here, and the game shows the entry once, the first time a new version starts (offline:
 it's built into the game).
 
+## v0.1.9
+
+### What's new
+
+- **Nine more languages** (Settings > Game > Language): French, German, Italian, Spanish, Dutch,
+  Swedish, Danish, Polish and Finnish, from the USA disc's own files. The menus and the race text
+  switch (European languages show km/h) the next time the game starts; the movies and the speech
+  stay in English, as the USA disc has them. English stays the default. Thanks to
+  wendersonrodrigues, who found where the game picks its language (pull request #26).
+- **Fill Screen renders the screen's own shape**, so it's sharper on screens taller than 16:9: a
+  Steam Deck draws 1280x800 at 1x, pixel for pixel, instead of stretching 720 rows to 800. 16:9
+  screens look exactly as before. Thanks to krittinen for the report and the screenshots
+  (issue #34).
+
+### Fixed
+
+- Mac: a wired Xbox One or Series controller can't rumble (macOS takes the rumble and the
+  controller does nothing). The game now says so once: pair it over Bluetooth for rumble.
+
+### More about it
+
+- The line under the Language row says what your installed files give the language you choose.
+  The row isn't shown on iPhone and iPad.
+- SteamOS and Linux: the log names a graphics card's PCIe link and warns when the card reaches
+  the game's memory over PCIe, to help track down slow GPUs (issue #40).
+- `NFSMW_NATIVE_SHAPE=0` keeps the old 16:9-shaped frame for a run, to compare.
+- Updating keeps your saves, settings and the installed game, and needs no disc image: on a Mac,
+  drag the new app into Applications and choose Replace, then Open Anyway once more; on SteamOS,
+  unpack the new download over the old folder.
+
 ## v0.1.8
 
 ### What's new

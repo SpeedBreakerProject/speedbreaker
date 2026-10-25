@@ -18,20 +18,40 @@
 // /proc/self/exe at startup (functions with sizes and names, ~5 MB) and the
 // handler looks addresses up there. A stripped build falls back to
 // PPCFuncMappings, which names the recompiled functions.
+//
+// Windows: the unhandled-exception filter (platform/win32/fault.cpp) calls
+// the handler on the crashing thread, not in a signal handler, but the same
+// care holds: nothing it calls allocates or takes the C runtime's locks
+// (WriteFile on handles opened at startup, a buffer of its own). The stack
+// is walked with StackWalk64 from the exception's registers and named from
+// SpeedBreaker.pdb by DbgHelp (platform/stack.h), loaded at startup on a
+// thread of its own; DbgHelp is the one exception, as dladdr is above (its
+// own heap, its faults caught). Without the PDB, or if DbgHelp is busy or
+// the crash broke it, PPCFuncMappings names the recompiled functions and the
+// RtlVirtualUnwind walk below gives the frames.
 #include <stdafx.h>
 #include "report.h"
 #include "internal.h"
 #include "crash_marker.h"
 
+#include "symbol_names.h"
+
 #include <gpu/command_processor.h>
 #include <ui/ui.h>
 
+#ifndef _WIN32
 #include <cxxabi.h>
 #include <dlfcn.h>
 #include <execinfo.h>
+#endif
 #include <fcntl.h>
 #include <fstream>
+#ifdef _WIN32
+#include <platform/file_io.h>
+#include <platform/stack.h>
+#else
 #include <unistd.h>
+#endif
 #ifdef __linux__
 #include <elf.h>
 #include <link.h>
@@ -163,12 +183,39 @@ namespace report
         std::atomic<int> s_reportFd{ -1 };  // -1 once the session has ended cleanly (ClearCrashMarker)
         char s_pendingPath[1024];
         char s_finalPath[1024];
+#ifdef _WIN32
+        wchar_t s_pendingPathW[1024];  // the same, for MoveFileExW
+        wchar_t s_finalPathW[1024];
+#endif
         char s_header[2048];
         size_t s_headerSize = 0;
         struct timespec s_started{};
         std::atomic<bool> s_crashing{ false };
         thread_local bool t_reporting = false;  // this thread is writing the report
 
+#ifdef _WIN32
+        const char* ExceptionName(DWORD code)
+        {
+            switch (code)
+            {
+            case EXCEPTION_ACCESS_VIOLATION: return "EXCEPTION_ACCESS_VIOLATION (invalid memory access)";
+            case EXCEPTION_IN_PAGE_ERROR: return "EXCEPTION_IN_PAGE_ERROR (a mapped file couldn't be read)";
+            case EXCEPTION_ILLEGAL_INSTRUCTION: return "EXCEPTION_ILLEGAL_INSTRUCTION (illegal instruction)";
+            case EXCEPTION_PRIV_INSTRUCTION: return "EXCEPTION_PRIV_INSTRUCTION (privileged instruction)";
+            case EXCEPTION_INT_DIVIDE_BY_ZERO: return "EXCEPTION_INT_DIVIDE_BY_ZERO (arithmetic error)";
+            case EXCEPTION_INT_OVERFLOW: return "EXCEPTION_INT_OVERFLOW (arithmetic error)";
+            case EXCEPTION_STACK_OVERFLOW: return "EXCEPTION_STACK_OVERFLOW (stack overflow)";
+            case EXCEPTION_BREAKPOINT: return "EXCEPTION_BREAKPOINT (trap)";
+            case 0x40000015: return "abort (a failed check)";
+            // Only as a raised exception: a real __fastfail (a /GS stack
+            // cookie, the C runtime's own) skips every handler, this one too,
+            // and goes to Windows Error Reporting.
+            case 0xC0000409: return "STATUS_STACK_BUFFER_OVERRUN (fail fast)";
+            case 0xE06D7363: return "an uncaught C++ exception";
+            default: return "an exception";
+            }
+        }
+#else
         const char* SignalName(int sig)
         {
             switch (sig)
@@ -182,6 +229,7 @@ namespace report
             default: return "a signal";
             }
         }
+#endif
 
         // The target of an unconditional jump at `code`, or `code`.
         uintptr_t FollowJump(uintptr_t code)
@@ -232,28 +280,15 @@ namespace report
             return true;
         }
 
-        // A recompiled function's own name for a symbol that is one: its body
-        // (__imp__sub_825987E0) or its C++ wrapper or hook
-        // (_Z12sub_82441190R10PPCContextPh, where the compiler put the body
-        // inline). Async-signal-safe; `buffer` holds 13 bytes.
-        const char* GuestName(const char* name, char* buffer)
-        {
-            if (strncmp(name, "__imp__sub_", 11) == 0)
-                return name + 7;
-            if (strncmp(name, "_Z12sub_", 8) == 0 && strncmp(name + 16, "R10PPCContextPh", 15) == 0)
-            {
-                memcpy(buffer, name + 4, 12);
-                buffer[12] = 0;
-                return buffer;
-            }
-            return nullptr;
-        }
-
         const char* BaseName(const char* path)
         {
             const char* base = path;
             for (const char* p = path; p && *p; p++)
+#ifdef _WIN32
+                if (*p == '/' || *p == '\\')
+#else
                 if (*p == '/')
+#endif
                     base = p + 1;
             return base;
         }
@@ -306,6 +341,20 @@ namespace report
             s_symbols = new GuestSymbol[symbols.size()];
             std::copy(symbols.begin(), symbols.end(), s_symbols);
             s_symbolCount = symbols.size();
+#ifdef _WIN32
+            // DbgHelp and SpeedBreaker.pdb, as Linux's .symtab: on a thread of
+            // its own. Its first lookups, a runtime function and a recompiled
+            // body, read the tables a crash would need.
+            static const void* warm[2] = { reinterpret_cast<const void*>(&TestCrash), reinterpret_cast<const void*>(s_regionBegin) };
+            std::thread([] {
+                auto started = std::chrono::steady_clock::now();
+                platform::stack::LoadSymbols(warm, 2);
+                // The log says whether reports will have names (a tester's
+                // folder without SpeedBreaker.pdb, another build's).
+                fprintf(stderr, "[crash] names for crash and hang reports: %s (%.2f s)\n", platform::stack::SymbolsState(),
+                    std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count());
+            }).detach();
+#endif
         }
 
         void* ContextPc(void* context)
@@ -316,6 +365,8 @@ namespace report
             return reinterpret_cast<void*>(static_cast<ucontext_t*>(context)->uc_mcontext.gregs[REG_RIP]);
 #elif defined(__linux__) && defined(__aarch64__)
             return reinterpret_cast<void*>(static_cast<ucontext_t*>(context)->uc_mcontext.pc);
+#elif defined(_WIN32) && defined(_M_X64)
+            return reinterpret_cast<void*>(static_cast<CONTEXT*>(context)->Rip);
 #else
             (void)context;
             return nullptr;
@@ -324,6 +375,13 @@ namespace report
 
         int SignalFrames(void* const* frames, int count)
         {
+#ifdef _WIN32
+            // No signal frames: Windows' stacks come from the exception's
+            // own registers (WalkStack).
+            (void)frames;
+            (void)count;
+            return 0;
+#else
             for (int i = 0; i < count && i < 6; i++)
             {
                 Dl_info info{};
@@ -340,6 +398,7 @@ namespace report
 #endif
             }
             return std::min(count, 1);
+#endif
         }
 
         void FormatFrame(SafeBuf& out, const void* pc, bool returnAddress, bool demangle)
@@ -347,6 +406,36 @@ namespace report
             const uintptr_t shown = reinterpret_cast<uintptr_t>(pc);
             const uintptr_t address = returnAddress && shown ? shown - 1 : shown;
             out.Str("0x").Hex(shown, 12).Str("  ");
+#ifdef _WIN32
+            // SpeedBreaker.pdb's name (undecorated: platform::stack::Name), the
+            // recompiled ones as sub_<address>; else the generated table's.
+            // A public symbol, which has no size, that starts before the
+            // recompiled function the table puts there is another function.
+            (void)demangle;
+            uint32_t guest, length = 0;
+            uintptr_t start = 0, guestStart = 0;
+            char name[256], guestName[13];
+            const bool isGuest = FindGuest(address, guest, guestStart);
+            const char* recompiled = nullptr;
+            bool named = platform::stack::Name(reinterpret_cast<const void*>(address), name, sizeof(name), start, length);
+            if (named)
+            {
+                recompiled = detail::GuestName(name, guestName);
+                if (!recompiled && isGuest && length == 0 && guestStart > start)
+                    named = false;
+            }
+            if (named)
+                out.Str(recompiled ? recompiled : name).Str("+0x").Hex(shown - start);
+            else if (isGuest)
+                out.Str("sub_").Hex(guest, 8, true).Str("+0x").Hex(shown - guestStart);
+            else
+                out.Str("?");
+            HMODULE module = nullptr;
+            char file[MAX_PATH];
+            if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                    reinterpret_cast<LPCSTR>(address), &module) && GetModuleFileNameA(module, file, sizeof(file)))
+                out.Str("  (").Str(BaseName(file)).Str("+0x").Hex(shown - reinterpret_cast<uintptr_t>(module)).Char(')');
+#else
             Dl_info info{};
             bool found = dladdr(reinterpret_cast<const void*>(address), &info) != 0;
             uint32_t guest;
@@ -358,7 +447,7 @@ namespace report
                 char* readable = nullptr;
                 int status = -1;
                 char guestName[13];
-                if (const char* recompiled = GuestName(name, guestName))
+                if (const char* recompiled = detail::GuestName(name, guestName))
                     name = recompiled;
                 else if (demangle && (readable = abi::__cxa_demangle(name, nullptr, nullptr, &status)) && status == 0)
                     name = readable;
@@ -381,7 +470,7 @@ namespace report
                 int status = -1;
                 char guestName[13];
                 const char* name = info.dli_sname;
-                if (const char* recompiled = GuestName(name, guestName))
+                if (const char* recompiled = detail::GuestName(name, guestName))
                     name = recompiled;  // one the table didn't name
                 else if (demangle && (readable = abi::__cxa_demangle(name, nullptr, nullptr, &status)) && status == 0)
                     name = readable;
@@ -393,14 +482,17 @@ namespace report
                 out.Str("?");
             if (found && info.dli_fname && info.dli_fbase)
                 out.Str("  (").Str(BaseName(info.dli_fname)).Str("+0x").Hex(shown - reinterpret_cast<uintptr_t>(info.dli_fbase)).Char(')');
+#endif
         }
     }
 
     void PrepareCrashReports()
     {
+#ifndef _WIN32
         // Loads glibc's unwinder now: the first backtrace() dlopens it.
         void* frames[4];
         backtrace(frames, 4);
+#endif
         detail::BuildSymbols();
         clock_gettime(CLOCK_MONOTONIC, &s_started);
 
@@ -413,10 +505,21 @@ namespace report
         {
             memcpy(s_pendingPath, pending.c_str(), pending.size() + 1);
             memcpy(s_finalPath, finalPath.c_str(), finalPath.size() + 1);
+#ifdef _WIN32
+            std::wstring pendingW = (dir / (std::string(".crash-pending-") + SessionName())).wstring();
+            std::wstring finalW = (dir / (std::string("crash-") + SessionName() + ".txt")).wstring();
+            if (pendingW.size() < std::size(s_pendingPathW) && finalW.size() < std::size(s_finalPathW))
+            {
+                wmemcpy(s_pendingPathW, pendingW.c_str(), pendingW.size() + 1);
+                wmemcpy(s_finalPathW, finalW.c_str(), finalW.size() + 1);
+                s_reportFd = marker::Arm(s_pendingPathW);
+            }
+#else
             s_reportFd = marker::Arm(s_pendingPath);
+#endif
         }
         if (s_reportFd < 0)
-            fprintf(stderr, "[crash] can't prepare a crash report file in %s: %s\n", dir.c_str(), strerror(errno));
+            fprintf(stderr, "[crash] can't prepare a crash report file in %s: %s\n", dir.string().c_str(), strerror(errno));
 
         std::string header = std::format(
             "SpeedBreaker (NFS: Most Wanted, Xbox 360): crash report\n"
@@ -427,6 +530,142 @@ namespace report
         memcpy(s_header, header.data(), s_headerSize);
     }
 
+#ifdef _WIN32
+    namespace
+    {
+        // The stack from the exception's registers, a frame at a time
+        // (RtlVirtualUnwind, from the unwind tables every x64 function has;
+        // a leaf function has none, and its return address is at rsp).
+        // Allocates nothing. Stops at the edge of this thread's stack.
+        int WalkStack(CONTEXT context, void** frames, int max)
+        {
+            ULONG_PTR low = 0, high = 0;
+            GetCurrentThreadStackLimits(&low, &high);
+            int n = 0;
+            while (n < max && context.Rip)
+            {
+                frames[n++] = reinterpret_cast<void*>(context.Rip);
+                DWORD64 imageBase = 0;
+                if (PRUNTIME_FUNCTION function = RtlLookupFunctionEntry(context.Rip, &imageBase, nullptr))
+                {
+                    void* handlerData = nullptr;
+                    DWORD64 establisher = 0;
+                    RtlVirtualUnwind(UNW_FLAG_NHANDLER, imageBase, context.Rip, function, &context, &handlerData, &establisher, nullptr);
+                }
+                else
+                {
+                    if (context.Rsp < low || context.Rsp + 8 > high)
+                        break;
+                    context.Rip = *reinterpret_cast<const DWORD64*>(context.Rsp);
+                    context.Rsp += 8;
+                }
+                if (context.Rsp < low || context.Rsp >= high)
+                    break;
+            }
+            return n;
+        }
+    }
+
+    void WriteCrashReport(_EXCEPTION_POINTERS* info)
+    {
+        if (s_crashing.exchange(true))
+        {
+            // As on POSIX: another thread's report is being written; wait for
+            // it to end the process (or, on the reporting thread, return).
+            if (!t_reporting)
+                Sleep(10000);
+            return;
+        }
+        t_reporting = true;
+        // What was written just before (an assert's message) reaches the tail.
+        FlushLog();
+        // DbgHelp for this thread from here on, if another one (its loader,
+        // the watchdog naming a hang report's frames) lets go of it soon.
+        const bool dbghelp = platform::stack::EnterCrash(2000);
+
+        static char text[24 * 1024];
+        detail::SafeBuf b{ text, sizeof(text) - 1 };
+        const EXCEPTION_RECORD* record = info->ExceptionRecord;
+        const CONTEXT* context = info->ContextRecord;
+        b.Str("\n[crash] ").Str(ExceptionName(record->ExceptionCode)).Str(", exception 0x").Hex(record->ExceptionCode, 8, true);
+        if ((record->ExceptionCode == EXCEPTION_ACCESS_VIOLATION || record->ExceptionCode == EXCEPTION_IN_PAGE_ERROR) &&
+            record->NumberParameters >= 2)
+        {
+            auto* fault = reinterpret_cast<uint8_t*>(record->ExceptionInformation[1]);
+            ULONG_PTR kind = record->ExceptionInformation[0];
+            b.Str(kind == 1 ? " (a write)" : kind == 8 ? " (an execution)" : " (a read)");
+            if (g_memory.IsInMemoryRange(fault))
+                b.Str(" at guest address ").Hex(uint32_t(fault - g_memory.base), 8, true);
+            else
+                b.Str(" at host address 0x").Hex(reinterpret_cast<uintptr_t>(fault));
+        }
+        const char* thread = detail::CurrentThreadName();
+        b.Str(" in thread ").Str(*thread ? thread : "(unnamed)");
+        b.Str(", ");
+        AppendElapsed(b);
+        b.Str(" into the session, ").Dec(int64_t(gpu::FrameCount())).Str(" game frames\n");
+        if (PPCContext* ctx = GetPPCContext())
+        {
+            b.Str("[crash] guest registers: lr=").Hex(uint32_t(ctx->lr), 8, true).Str(" r1=").Hex(ctx->r1.u32, 8, true)
+                .Str(" r3=").Hex(ctx->r3.u32, 8, true).Str(" r4=").Hex(ctx->r4.u32, 8, true).Str(" r5=").Hex(ctx->r5.u32, 8, true)
+                .Str(" r31=").Hex(ctx->r31.u32, 8, true).Char('\n');
+        }
+        // As Linux's line, then the rest of the integer registers.
+        b.Str("[crash] host registers: rip=0x").Hex(context->Rip).Str(" rsp=0x").Hex(context->Rsp)
+            .Str(" rbp=0x").Hex(context->Rbp).Char('\n');
+        const struct
+        {
+            const char* name;
+            DWORD64 value;
+        } registers[] = { { "rax", context->Rax }, { "rbx", context->Rbx }, { "rcx", context->Rcx }, { "rdx", context->Rdx },
+            { "rsi", context->Rsi }, { "rdi", context->Rdi }, { "r8", context->R8 }, { "r9", context->R9 }, { "r10", context->R10 },
+            { "r11", context->R11 }, { "r12", context->R12 }, { "r13", context->R13 }, { "r14", context->R14 }, { "r15", context->R15 },
+            { "eflags", context->EFlags } };
+        for (size_t i = 0; i < std::size(registers); i++)
+        {
+            b.Str(i % 4 == 0 ? "[crash]   " : " ").Str(registers[i].name).Str("=0x").Hex(registers[i].value);
+            if (i % 4 == 3 || i + 1 == std::size(registers))
+                b.Char('\n');
+        }
+        // Where the names come from: SpeedBreaker.pdb, or why not (without
+        // DbgHelp, why: it didn't start, failed in an earlier walk, or isn't
+        // to be had in this crash).
+        b.Str("[crash] names: ").Str(platform::stack::SymbolsState()).Char('\n');
+        // Innermost first: the faulting code, then its callers.
+        b.Str("[crash] host stack (recompiled guest functions are sub_<guest address>):\n");
+        void* frames[64];
+        int count = dbghelp ? platform::stack::Walk(*context, frames, 64) : 0;
+        if (count == 0)
+            count = WalkStack(*context, frames, 64);
+        for (int n = 0; n < count; n++)
+        {
+            b.Str("  #").Dec(n).Str(n < 10 ? "   " : "  ");
+            detail::FormatFrame(b, frames[n], n > 0);
+            b.Char('\n');
+        }
+        detail::WriteDirect(text, b.size);
+
+        if (const int fd = s_reportFd.load(); fd >= 0)
+        {
+            detail::WriteAll(fd, s_header, s_headerSize);
+            detail::WriteAll(fd, text + 1, b.size - 1);  // (without the leading blank line)
+            static const char recent[] = "\nThe log's last lines:\n";
+            detail::WriteAll(fd, recent, sizeof(recent) - 1);
+            detail::WriteRecentOutput(fd, 300);
+            static const char system[] = "\nSystem (at startup):\n";
+            detail::WriteAll(fd, system, sizeof(system) - 1);
+            const char* summary = detail::LoggedSystemSummary();
+            detail::WriteAll(fd, summary, strlen(summary));
+            // The handle itself (the C runtime's _commit would take its lock).
+            FlushFileBuffers(reinterpret_cast<HANDLE>(_get_osfhandle(fd)));
+            // (Shared for deleting, so it moves while still open.)
+            bool renamed = MoveFileExW(s_pendingPathW, s_finalPathW, MOVEFILE_REPLACE_EXISTING) != 0;
+            b.size = 0;
+            b.Str("[crash] crash report: ").Str(renamed ? s_finalPath : s_pendingPath).Char('\n');
+            detail::WriteDirect(text, b.size);
+        }
+    }
+#else
     void WriteCrashReport(int sig, siginfo_t* info, void* context)
     {
         if (s_crashing.exchange(true))
@@ -523,6 +762,7 @@ namespace report
             detail::WriteDirect(text, b.size);
         }
     }
+#endif
 
     void ClearCrashMarker()
     {
@@ -530,7 +770,11 @@ namespace report
         if (s_crashing.load())
             return;
         if (const int fd = s_reportFd.exchange(-1); fd >= 0)
+#ifdef _WIN32
+            marker::Clear(fd, s_pendingPathW);
+#else
             marker::Clear(fd, s_pendingPath);
+#endif
     }
 
     void NoticePreviousCrash(bool lastClearsMarker)
@@ -550,8 +794,14 @@ namespace report
             std::filesystem::remove(left.path, fileError);
             // A version before v0.1.6 left one after every session.
             if (lastClearsMarker)
+#ifdef _WIN32
+                fprintf(stderr, "[crash] an earlier session (%s) ended without quitting: it was stopped from outside (Task Manager's End "
+                    "task, Windows ending it, the power going) or crashed too hard to write a report; there is no report to send\n",
+                    left.session.c_str());
+#else
                 fprintf(stderr, "[crash] an earlier session (%s) ended without quitting: it was stopped from outside (SIGKILL: a forced "
                     "quit, the power going) or crashed too hard to write a report; there is no report to send\n", left.session.c_str());
+#endif
         }
         detail::KeepNewest(dir.string(), "crash-", ".txt", 5);
 
@@ -572,11 +822,28 @@ namespace report
         }
         if (seen == newest)
             return;
-        fprintf(stderr, "[crash] an earlier session crashed: %s\n", (dir / newest).c_str());
+        fprintf(stderr, "[crash] an earlier session crashed: %s\n", (dir / newest).string().c_str());
         ui::Toast(std::format("The game crashed last time and saved a crash report. To send it: {}.", detail::kSaveBugReportHint), 15.0);
         std::ofstream out(seenPath, std::ios::trunc);
         out << newest << "\n";
     }
+
+#ifdef _WIN32
+    namespace
+    {
+        // NFSMW_TEST_CRASH=<s>:overflow: recursion until the stack runs out,
+        // each call a little deeper (not a tail call): the fault comes with
+        // the stack pointer at the very end of the stack, the hardest case
+        // for the report (a frame of a page or more stops short of it, in
+        // __chkstk).
+        __declspec(noinline) int Overflow(int depth)
+        {
+            volatile char frame[192];
+            frame[depth % 192] = char(depth);
+            return depth >= 0 ? Overflow(depth + 1) + frame[0] : 0;
+        }
+    }
+#endif
 
     [[noreturn]] void TestCrash()
     {
@@ -586,6 +853,16 @@ namespace report
             fprintf(stderr, "[test] NFSMW_TEST_CRASH: a failed check, then abort()\n");
             abort();
         }
+#ifdef _WIN32
+        // Windows only: a crash report needs room on the stack that ran out
+        // (SetThreadStackGuarantee, watchdog.cpp). Elsewhere the crash
+        // handler has no stack of its own (no sigaltstack) to report one.
+        if (v && strstr(v, ":overflow"))
+        {
+            fprintf(stderr, "[test] NFSMW_TEST_CRASH: a stack overflow\n");
+            Overflow(0);
+        }
+#endif
         fprintf(stderr, "[test] NFSMW_TEST_CRASH: a write to host address 0x10\n");
         static volatile uintptr_t address = 0x10;
         *reinterpret_cast<volatile int*>(address) = 1;

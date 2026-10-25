@@ -133,6 +133,12 @@ namespace video
         // renderer resets them in its command buffers).
         bool occlusionCounting = false;
         PFN_vkResetQueryPool resetQueryPool = nullptr;
+#ifdef _WIN32
+        // Windows on an Intel integrated GPU: the defaults measured on one
+        // (presenter.cpp, IntegratedGpuDefaults). The renderer's part:
+        // fewer and lighter passes, and Auto internal resolution at 1x.
+        bool integratedGpuDefaults = false;
+#endif
     };
 
     // nullptr when running headless.

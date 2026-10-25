@@ -34,6 +34,7 @@ namespace report::detail
     };
 
     // write(2) until done (EINTR, short writes). Async-signal-safe.
+    // Windows: WriteFile on the descriptor's handle.
     void WriteAll(int fd, const void* data, size_t size);
 
     // The original stderr and this session's log file (-1: none), for
@@ -55,9 +56,11 @@ namespace report::detail
 
     // Host code addresses as names (crash.cpp): on Linux from the
     // executable's .symtab, read by a thread at startup (dladdr sees no
-    // symbols of an executable there); else the recompiled functions from
-    // the generated table (PPCFuncMappings: guest address -> host function)
-    // and the rest through dladdr. Built once at startup (BuildSymbols).
+    // symbols of an executable there); on Windows from SpeedBreaker.pdb,
+    // which DbgHelp loads on a thread at startup (platform/stack.h); else the
+    // recompiled functions from the generated table (PPCFuncMappings: guest
+    // address -> host function) and the rest through dladdr. Built once at
+    // startup (BuildSymbols).
     void BuildSymbols();
     // "0x0000555555a0b3c4  sub_825A5B20+0x64  (SpeedBreaker+0xa0b3c4)".
     // Async-signal-safe (dladdr aside, which glibc and macOS implement

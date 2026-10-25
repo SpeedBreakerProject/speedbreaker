@@ -13,6 +13,7 @@
 #include <game/cover_callers.h>
 #include <gpu/covers.h>
 #include "gpu_choice.h"
+#include <gpu/pcie_link.h>
 #include "present_schedule.h"
 #include "hfr_schedule.h"
 #include <game/hfr.h>
@@ -40,6 +41,10 @@
 #include <report/report.h>
 #include <platform/thermal.h>
 #include <platform/quit_signals.h>
+#ifdef _WIN32
+#include "repeats.h"
+#include <platform/timer.h>
+#endif
 #include <kernel/memory_status.h>
 
 #include <SDL3/SDL.h>
@@ -190,6 +195,31 @@ namespace video
         float s_lastScaleX = 1.0f, s_lastScaleY = 1.0f;
         bool s_lastFreshImage = false;  // the frame being drawn is a new GPU frame
         std::string s_resolutionHint;  // Game Mode below the monitor's resolution
+#ifdef _WIN32
+        // The display the window is on, as SDL reports it (NoteDisplay): its
+        // refresh as a period, for the waiter thread's repeat count (0:
+        // unknown), and what was last logged. Main thread, but for the period.
+        std::atomic<double> s_panelPeriodNs{ 0.0 };
+        SDL_DisplayID s_notedDisplay = 0;
+        int s_notedW = 0, s_notedH = 0;
+        float s_notedHz = -1.0f;
+        // The system summary's "Present" (and bug reports'): the swapchain's
+        // present mode and images, and present timing's extensions.
+        std::string s_presentText, s_timingText;
+        void NoteDisplay(const char* why);
+        // NFSMW_TEST_DISPLAY_HZ=<hz>: the rate the display is taken to run at
+        // instead of SDL's (0: unset), for the log, the repeat count, the
+        // refresh multiple and the refresh-rate notice, tested on a 60 Hz
+        // laptop.
+        float TestDisplayHz()
+        {
+            static const float hz = [] {
+                const char* v = std::getenv("NFSMW_TEST_DISPLAY_HZ");
+                return v ? float(std::atof(v)) : 0.0f;
+            }();
+            return hz;
+        }
+#endif
         std::atomic<bool> s_focused{ true };
         std::atomic<bool> s_visible{ true };  // not minimized, hidden or covered
         // The app is inactive or in the background (iOS, and other systems
@@ -552,6 +582,19 @@ namespace video
             }
             if (lastOnScreen)
             {
+#ifdef _WIN32
+                // The last frame's time on screen against the time its
+                // vblanks gave it, in the panel's own refreshes (SDL's rate;
+                // the fit's period without one): a 144 Hz panel shows a 60 fps
+                // frame for 2 or 3 refreshes, 13.9 or 20.8 ms against 16.7,
+                // and each 3 counts one (the judder: the work notes' 144HZ-NOTE.md);
+                // 1/60 s rounded both to one period, so it counted none.
+                // At 60 Hz this is the count it always was (video/repeats.h).
+                double panelNs = s_panelPeriodNs.load(std::memory_order_relaxed);
+                double refreshNs = panelNs > 0.0 ? panelNs : display.valid ? display.periodNs : 1e9 / 60.0;
+                int64_t vblanks = std::max<int64_t>(1, std::llround(double(t.vblank - lastVblank) / vblank.PeriodNs()));
+                s_repeated += uint64_t(ExtraRefreshes(double(onScreen - lastOnScreen), vblanks, vblank.PeriodNs(), refreshNs));
+#else
                 // The last frame's time on screen, against the vblanks the
                 // game gave it (a gap of more than 0.5 s is a pause, not a repeat).
                 // At a multiple of 60 Hz (refresh_fit.h) a vblank is that
@@ -562,6 +605,7 @@ namespace video
                 const int64_t multiple = display.valid ? display.multiple : 1;
                 if (shownFor > vblanks * multiple && shownFor <= 30 * multiple)
                     s_repeated += uint64_t(shownFor - vblanks * multiple);
+#endif
             }
             lastOnScreen = onScreen;
             lastVblank = t.vblank;
@@ -674,7 +718,11 @@ namespace video
 #else
             constexpr bool kApple = false;
 #endif
+#ifdef _WIN32
+            const double hz = TestDisplayHz() > 0.0f ? double(TestDisplayHz()) : mode ? double(mode->refresh_rate) : 0.0;
+#else
             const double hz = mode ? double(mode->refresh_rate) : 0.0;
+#endif
             const int multiple = policy.For(hz, kApple);
             s_refreshMultiple.store(multiple, std::memory_order_relaxed);
             // The refresh-rate notice: the mode's rate and since when; the
@@ -850,6 +898,37 @@ namespace video
             vkGetSwapchainImagesKHR(s_device, s_swapchain, &count, nullptr);
             s_swapImages.resize(count);
             vkGetSwapchainImagesKHR(s_device, s_swapchain, &count, s_swapImages.data());
+#ifdef _WIN32
+            {
+                // The present mode with what else the surface offers, and
+                // the images the driver made (once per change; the system
+                // summary's "Present").
+                uint32_t modeCount = 0;
+                vkGetPhysicalDeviceSurfacePresentModesKHR(s_physical, s_surface, &modeCount, nullptr);
+                std::vector<VkPresentModeKHR> modes(modeCount);
+                vkGetPhysicalDeviceSurfacePresentModesKHR(s_physical, s_surface, &modeCount, modes.data());
+                std::string offered;
+                for (VkPresentModeKHR m : modes)
+                    offered += std::format("{}{}", offered.empty() ? "" : ", ",
+                        m == VK_PRESENT_MODE_IMMEDIATE_KHR ? "IMMEDIATE" : m == VK_PRESENT_MODE_MAILBOX_KHR ? "MAILBOX"
+                        : m == VK_PRESENT_MODE_FIFO_KHR ? "FIFO" : m == VK_PRESENT_MODE_FIFO_RELAXED_KHR ? "FIFO_RELAXED"
+                        : std::to_string(int(m)));
+                std::string text = std::format("{} (V-Sync {}), {} images (the surface offers {}, and {} images)",
+                    info.presentMode == VK_PRESENT_MODE_FIFO_KHR ? "FIFO" : info.presentMode == VK_PRESENT_MODE_MAILBOX_KHR ? "MAILBOX"
+                        : "IMMEDIATE", s_vsync ? "on" : "off", count, offered,
+                    caps.maxImageCount ? std::format("{} to {}", caps.minImageCount, caps.maxImageCount)
+                                       : std::format("{} or more", caps.minImageCount));
+                if (text != s_presentText)
+                {
+                    s_presentText = text;
+                    fprintf(stderr, "[video] swapchain: %s\n", text.c_str());
+                    if (s_contextReady)
+                        report::SetSystemItem("Present", s_presentText + "; " + s_timingText);
+                }
+                static bool first = true;
+                NoteDisplay(std::exchange(first, false) ? "seen at start" : "seen as the swapchain was rebuilt");
+            }
+#endif
             s_renderDone.resize(count);
             VkSemaphoreCreateInfo si{ VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO };
             for (auto& s : s_renderDone)
@@ -2420,6 +2499,119 @@ void main()
             }
         }
 
+#ifdef _WIN32
+        // Windows on an Intel integrated GPU starts with the defaults measured
+        // on one: a ThinkPad T14 Gen 1's UHD 620 (Gen9.5, driver 101.2135) on
+        // AC power, where after ~90 s of load the whole chip is held at 11.9 W
+        // (the GPU gets ~6 W). A race at 1x in its 1280x720 window ran 20.4
+        // fps, GPU-bound at 49 ms a frame (P4 tuning, 2026-10-07: 35
+        // interleaved runs, base runs within 0.19 fps of each other). Race and
+        // intro cinematic, frames a second:
+        //   - fewer and lighter render passes (the renderer, as on Apple but
+        //     for the pass barrier, which stays full: renderer.cpp,
+        //     s_passBarrierLevel): with occlusion counting +1.8 / +1.5
+        //     (alone: lighter +1.15 / +0.85, fewer +0.55 / +0.87; the
+        //     barrier's share of lighter ~0.1 in the race). No artifact seen
+        //     in the parked race's captures, by eye on zoomed crops: they
+        //     fire at wall-clock times, so they aren't the same game frame and
+        //     no pixel comparison was possible; the cinematic's weren't even
+        //     the same shot.
+        //   - Anti-Aliasing Off: +0.9 / +0.9 (its pass alone is 1.8 ms);
+        //     edges stair-step.
+        //   - Anisotropic Filtering 2x, not Auto's 4x: +0.3 / +0.4; the far
+        //     road a little softer (Off: +0.55, plainly blurred).
+        //   - Internal Resolution Auto at 1x (the renderer's budget, as on
+        //     iOS): Auto would take 2x2, four times the scene's pixels, for
+        //     a maximized window or a 1080p screen.
+        //   - Frame Rate stays 60: no setting there holds 30, so a 30 cap
+        //     gave the same frame rate.
+        // All of it with the barrier at level 2 then (4b9b0c3) against
+        // 7098f3f, each with the game's own defaults (3 runs against 4,
+        // interleaved, drift-corrected): race 20.2 -> 22.8 fps (+2.6, +2.3
+        // to +2.9; GPU -5.6 ms), cinematic 17.1 -> 19.4 (+2.3, +2.0 to +2.7;
+        // the one run without other processes' CPU +2.5); maximized at
+        // 1920x991 the race ran 8.7 fps (Auto's 2x2), then 22.2. No black
+        // frame but the game's own cuts; sync validation through the
+        // cinematic and the race found no hazard. Windows' Best performance
+        // power mode (the player's setting) lets the same chip hold ~25 W
+        // (the GPU 9-12 W, the thermal zone at 93-97 C): with these defaults
+        // the race ran 25-29 fps there (1280x720 or maximized, 7 runs) and
+        // the cinematic 23-24, and a 30 cap still gave the same rate
+        // (maximized, 25.4 against 25.6 at 60).
+        // Only Intel's: AMD's APUs (another driver, and several times this
+        // GPU in a Radeon 680M-890M) and discrete GPUs are unmeasured on
+        // Windows and keep the table's defaults and today's passes. Intel's
+        // Xe and Arc integrated GPUs, faster than the UHD 620 but sharing
+        // its driver's lineage, take them unmeasured: 1x Auto still renders
+        // a quarter of 2x2's pixels. The settings are device defaults: a
+        // value in settings.toml wins, as do the NFSMW_* variables (each pass
+        // toggle has one). Occlusion counting is on for every GPU (see
+        // Initialize).
+        bool IntegratedGpuDefaults(const VkPhysicalDeviceProperties& props)
+        {
+            constexpr uint32_t kIntel = 0x8086;
+            if (props.deviceType != VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU || props.vendorID != kIntel)
+            {
+                const char* kind = props.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU ? "a discrete GPU"
+                    : props.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU ? "an integrated GPU, not Intel's"
+                    : "not an integrated GPU";
+                fprintf(stderr, "[video] %s is %s: the full-quality defaults (the integrated-GPU ones were measured on Intel's)\n",
+                    props.deviceName, kind);
+                return false;
+            }
+            fprintf(stderr, "[video] %s is an Intel integrated GPU: fewer and lighter render passes, Internal Resolution Auto at 1x, "
+                "Anti-Aliasing Off and Anisotropic Filtering 2x by default (measured on a UHD 620, GPU-bound at ~20 fps in a race; "
+                "settings.toml and NFSMW_* variables win)\n", props.deviceName);
+            std::string why = std::format("an Intel integrated GPU on Windows, {}", props.deviceName);
+            settings::SetDeviceDefault(settings::Id::AntiAliasing, 0, why);
+            settings::SetDeviceDefault(settings::Id::Anisotropy, 2, why);
+            return true;
+        }
+
+        // Windows: the display the window is on, logged when it changes (at
+        // start, a swapchain rebuilt, another display, another mode). Its
+        // refresh rate decides how the game's 60 fps shows: at 120 or 240 Hz
+        // the guest vblank locks to every 2nd or 4th refresh (with present
+        // timing: video/refresh_multiple.h), at 144 Hz each frame stays for 2
+        // or 3 refreshes (the work notes' 144HZ-NOTE.md), and the repeat
+        // count measures in its refreshes (OnScreen). It passes the rate on
+        // for the refresh multiple (UpdateRefreshMultiple), so a rate changed
+        // in Windows' settings while the game runs counts too. The one notice
+        // a player sees about the rate is the refresh-rate notice
+        // (MaybeRefreshNotice, video/refresh_notice.h: 90, 144 and 165 Hz,
+        // not with variable refresh); the port's own refresh-rate toast
+        // (MaybeHintRefresh, held in labelled builds) is gone with it.
+        // NFSMW_TEST_DISPLAY_HZ=<hz> reports that rate instead (TestDisplayHz).
+        void NoteDisplay(const char* why)
+        {
+            if (!s_window)
+                return;
+            SDL_DisplayID id = SDL_GetDisplayForWindow(s_window);
+            const SDL_DisplayMode* mode = SDL_GetCurrentDisplayMode(id);
+            UpdateRefreshMultiple(mode);
+            const float testHz = TestDisplayHz();
+            float hz = testHz > 0.0f ? testHz : mode ? mode->refresh_rate : 0.0f;
+            s_panelPeriodNs.store(hz > 0.0f ? 1e9 / hz : 0.0, std::memory_order_relaxed);
+            int w = mode ? mode->w : 0, h = mode ? mode->h : 0;
+            if (id == s_notedDisplay && w == s_notedW && h == s_notedH && hz == s_notedHz)
+                return;
+            s_notedDisplay = id;
+            s_notedW = w;
+            s_notedH = h;
+            s_notedHz = hz;
+            const char* name = SDL_GetDisplayName(id);
+            const int multiple = RefreshFit::MultipleOf(hz);
+            std::string cadence = hz <= 0.0f ? std::string("; its refresh rate is unknown")
+                : multiple == 1 ? std::string()
+                : multiple >= 2 ? std::format("; the game runs at 60 fps, {} of these refreshes a frame: even once the guest vblank "
+                                              "locks to them (the [vblank] lines; it needs present timing)", multiple)
+                : std::format("; the game runs at 60 fps, {:.2f} of these refreshes a frame: whole refreshes each, so they can "
+                              "come unevenly unless G-SYNC/FreeSync is on ([perf] \"repeated\" counts the long ones)", hz / 60.0f);
+            fprintf(stderr, "[video] display %s: %dx%d at %.2f Hz%s (%s)%s\n", name ? name : "?", w, h, hz,
+                testHz > 0.0f ? " (NFSMW_TEST_DISPLAY_HZ)" : "", why, cadence.c_str());
+        }
+#endif
+
         // The device extensions the game can't start without: Initialize
         // enables them, and ChooseDevice puts a device with all of them first.
         constexpr const char* kNeededDeviceExtensions[] = { VK_KHR_SWAPCHAIN_EXTENSION_NAME,
@@ -2435,7 +2627,9 @@ void main()
         // that could present, which on a laptop with two GPUs was usually the
         // integrated one; where only one device can present it still is that
         // one. A device's queue family is its first with graphics that can
-        // present to the window, as before.
+        // present to the window, as before. On Windows the exe's
+        // NvOptimusEnablement and AmdPowerXpressRequestHighPerformance ask the
+        // same of the drivers (platform/startup.h).
         void ChooseDevice(const std::vector<VkPhysicalDevice>& devices)
         {
             std::vector<GpuCandidate> candidates;
@@ -2621,6 +2815,9 @@ void main()
         }
         VkPhysicalDeviceProperties props;
         vkGetPhysicalDeviceProperties(s_physical, &props);
+#ifdef _WIN32
+        const bool integratedGpuDefaults = IntegratedGpuDefaults(props);  // before anything reads those settings
+#endif
 
         // The renderer needs dynamic rendering, and imports guest memory as
         // a buffer where the device can (host-memory import; Turnip, the
@@ -2631,8 +2828,10 @@ void main()
         std::vector<VkExtensionProperties> avail(extAvail);
         vkEnumerateDeviceExtensionProperties(s_physical, nullptr, &extAvail, avail.data());
         bool presentId = false, presentWait = false, hostImport = false, shadingRate = false, displayTiming = false;
+        bool pciBusInfo = false;  // (a property query only: not enabled)
         for (auto& e : avail)
         {
+            pciBusInfo |= strcmp(e.extensionName, VK_EXT_PCI_BUS_INFO_EXTENSION_NAME) == 0;
             displayTiming |= strcmp(e.extensionName, VK_GOOGLE_DISPLAY_TIMING_EXTENSION_NAME) == 0;
             if (strcmp(e.extensionName, "VK_KHR_portability_subset") == 0)
                 devExts.push_back("VK_KHR_portability_subset");
@@ -2729,12 +2928,17 @@ void main()
             dynamicRendering.pNext = &presentIdFeatures;  // and presentWaitFeatures
         // NFSMW_OCCLUSION (=1 on, anything else off): count the game's
         // occlusion queries on the GPU (presenter.h), which the sun's glare
-        // fades by. On by default where checked (MoltenVK on an M4 Max,
-        // RADV on the Steam Machine, Turnip on the Steam Frame: cost within
-        // noise); off elsewhere. Needs precise occlusion queries (counting,
-        // not boolean); host query reset (core 1.2) is optional. Off, the
-        // device is created exactly as without it.
-#if defined(__APPLE__) || defined(__linux__)
+        // fades by. On by default on Apple, Linux and Windows, for every GPU
+        // there. Checked on MoltenVK (an M4 Max), RADV (the Steam Machine),
+        // Turnip (the Steam Frame) and Intel's Windows driver (a UHD 620: the
+        // sun's counts as the Mac's in the same view, the glare drawn; +0.2
+        // fps in 3 of 3 runs, GPU-bound), the cost within noise everywhere;
+        // NVIDIA's drivers and AMD's on Windows are on unchecked: precise
+        // occlusion queries are core Vulkan, and without them the glare never
+        // shows. Needs precise occlusion queries (counting, not boolean);
+        // host query reset (core 1.2) is optional. Off, the device is created
+        // exactly as without it.
+#if defined(__APPLE__) || defined(__linux__) || defined(_WIN32)
         constexpr bool kOcclusionByDefault = true;
 #else
         constexpr bool kOcclusionByDefault = false;
@@ -2817,6 +3021,14 @@ void main()
         fprintf(stderr, "[vblank] %s\n", s_presentTiming ? "presents are timed (VK_KHR_present_wait)"
             : timingOff ? "presents aren't timed (NFSMW_PRESENT_TIMING=0): the guest vblank can't lock to the display"
             : "no present timing (VK_KHR_present_wait) on this device: the guest vblank can't lock to the display");
+#ifdef _WIN32
+        // Which of the two the device has (NVIDIA's Windows driver is
+        // expected to have both, Intel's 101.2135 has neither).
+        s_timingText = std::format("VK_KHR_present_id {}, VK_KHR_present_wait {}{}", presentId ? "yes" : "no",
+            presentWait ? "yes" : "no", s_presentTiming ? ": presents timed" : timingOff ? ": not used (NFSMW_PRESENT_TIMING=0)"
+                : presentId && presentWait ? ": listed, but not usable" : ": presents not timed");
+        fprintf(stderr, "[vblank] %s on %s\n", s_timingText.c_str(), props.deviceName);
+#endif
 
         VkCommandPoolCreateInfo pci{ VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO };
         pci.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
@@ -2855,6 +3067,9 @@ void main()
             (PFN_vkCmdBeginRenderingKHR)vkGetDeviceProcAddr(s_device, "vkCmdBeginRenderingKHR"),
             (PFN_vkCmdEndRenderingKHR)vkGetDeviceProcAddr(s_device, "vkCmdEndRenderingKHR"), rateW, rateH, occlusionCounting,
             hostQueryReset.hostQueryReset ? (PFN_vkResetQueryPool)vkGetDeviceProcAddr(s_device, "vkResetQueryPool") : nullptr };
+#ifdef _WIN32
+        s_context.integratedGpuDefaults = integratedGpuDefaults;
+#endif
         s_contextReady = true;
         s_settingsGeneration = settings::Generation();
         fprintf(stderr, "[video] %s, swapchain %ux%u%s\n", props.deviceName, s_swapExtent.width, s_swapExtent.height, GeometryNote().c_str());
@@ -2889,13 +3104,33 @@ void main()
                     vkGetPhysicalDeviceProperties2(s_physical, &props2);
                     driver = std::format("{} {}", driverProps.driverName, driverProps.driverInfo);
                 }
+                // Issue #40: a discrete GPU's PCIe link (Linux: sysfs), which
+                // bounds it when guest memory is in system memory (gpu/pcie_link.h).
+                std::string link;
+#if defined(__linux__) && !defined(__ANDROID__)
+                if (pciBusInfo && props.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU && props.apiVersion >= VK_API_VERSION_1_1)
+                {
+                    VkPhysicalDevicePCIBusInfoPropertiesEXT pci{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PCI_BUS_INFO_PROPERTIES_EXT };
+                    VkPhysicalDeviceProperties2 props2{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2 };
+                    props2.pNext = &pci;
+                    vkGetPhysicalDeviceProperties2(s_physical, &props2);
+                    link = gpu::pcie::Describe(gpu::pcie::Read(gpu::pcie::SysfsDir(pci.pciDomain, pci.pciBus, pci.pciDevice, pci.pciFunction)));
+                    if (!link.empty())
+                        fprintf(stderr, "[video] PCIe link: %s\n", link.c_str());
+                }
+#else
+                (void)pciBusInfo;
+#endif
                 uint32_t loader = VK_API_VERSION_1_0;
                 vkEnumerateInstanceVersion(&loader);
-                report::SetSystemItem("GPU", std::format("{} ({}, {:04x}:{:04x}), {}, Vulkan {}.{}.{} (loader {}.{}.{})",
+                report::SetSystemItem("GPU", std::format("{} ({}, {:04x}:{:04x}), {}, Vulkan {}.{}.{} (loader {}.{}.{}){}",
                     props.deviceName, type, props.vendorID, props.deviceID, driver, VK_API_VERSION_MAJOR(props.apiVersion),
                     VK_API_VERSION_MINOR(props.apiVersion), VK_API_VERSION_PATCH(props.apiVersion), VK_API_VERSION_MAJOR(loader),
-                    VK_API_VERSION_MINOR(loader), VK_API_VERSION_PATCH(loader)));
+                    VK_API_VERSION_MINOR(loader), VK_API_VERSION_PATCH(loader), link.empty() ? std::string() : ", " + link));
                 UpdateDisplayItem();
+#ifdef _WIN32
+                report::SetSystemItem("Present", s_presentText + "; " + s_timingText);
+#endif
             }
             if (s_gameMode && mode && nativeW > 0 && int64_t(mode->w) * mode->h < int64_t(nativeW) * nativeH)
                 s_resolutionHint = std::format("Steam gives this game {}x{} of your {}x{} display. For full sharpness, set this game's "
@@ -3463,6 +3698,28 @@ void main()
             const int64_t gridSince = s_gridFixedSince.load(std::memory_order_relaxed);
             in.gridFixed = gridSince != 0;
             in.gridStableSec = gridSince ? double(NowNs() - gridSince) / 1e9 : 0.0;
+#ifdef _WIN32
+            // Without present timing (Intel's 101.2135 driver has none) there
+            // is no grid check, so a fixed refresh can't be told from
+            // variable refresh: no notice. With NFSMW_TEST_DISPLAY_HZ the grid
+            // is taken as fixed at that rate (the panel tested on a laptop
+            // whose driver has none).
+            if (!s_presentTiming)
+            {
+                if (TestDisplayHz() > 0.0f)
+                {
+                    in.gridFixed = true;
+                    in.gridStableSec = in.modeStableSec;
+                }
+                else
+                {
+                    decided = key;
+                    fprintf(stderr, "[video] refresh notice for %d Hz: not shown: no present timing on this device (VK_KHR_present_wait), "
+                        "so a fixed refresh rate can't be told from variable refresh\n", key);
+                    return;
+                }
+            }
+#endif
             in.shownBefore = settings::RefreshNoticeShown(key);
             {
                 double period = 0;
@@ -3567,6 +3824,15 @@ void main()
             else if (e.type == SDL_EVENT_WINDOW_RESTORED || e.type == SDL_EVENT_WINDOW_SHOWN || e.type == SDL_EVENT_WINDOW_EXPOSED ||
                 e.type == SDL_EVENT_WINDOW_MAXIMIZED)
                 s_visible.store(true, std::memory_order_relaxed);
+#ifdef _WIN32
+            else if (e.type == SDL_EVENT_WINDOW_DISPLAY_CHANGED || e.type == SDL_EVENT_DISPLAY_CURRENT_MODE_CHANGED ||
+                e.type == SDL_EVENT_DISPLAY_DESKTOP_MODE_CHANGED)
+            {
+                // Another display, or its refresh rate changed in Windows'
+                // settings: logged, and the refresh multiple (NoteDisplay).
+                NoteDisplay(e.type == SDL_EVENT_WINDOW_DISPLAY_CHANGED ? "the window moved to another display" : "a display's mode changed");
+            }
+#endif
             else if (e.type == SDL_EVENT_WINDOW_ENTER_FULLSCREEN || e.type == SDL_EVENT_WINDOW_LEAVE_FULLSCREEN)
             {
                 // The window's state only. A change the game didn't ask for
@@ -4261,7 +4527,11 @@ void main()
         if (at > ready && at - ready < 100'000'000)
         {
             queueLock.unlock();
+#ifdef _WIN32
+            platform::SleepUntil(at);  // a high-resolution timer: a 1 ms sleep_until wakes ~1.3 ms late here
+#else
             std::this_thread::sleep_until(std::chrono::steady_clock::time_point(std::chrono::nanoseconds(at)));
+#endif
             queueLock.lock();
             presented = NowNs();
         }

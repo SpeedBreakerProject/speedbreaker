@@ -13,10 +13,23 @@ add_library(XenonUtilsLite STATIC
 target_include_directories(XenonUtilsLite PUBLIC ${XR}/XenonUtils ${XR}/thirdparty/simde
     PRIVATE ${XR}/thirdparty/libmspack/libmspack/mspack ${XR}/thirdparty/tiny-AES-c ${XR}/thirdparty/TinySHA1)
 target_compile_definitions(XenonUtilsLite PRIVATE NOMINMAX)
-target_compile_options(XenonUtilsLite PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-include cstdlib>)
+if(SB_MSVC_FRONTEND)
+    target_compile_options(XenonUtilsLite PRIVATE $<$<COMPILE_LANGUAGE:CXX>:/FIcstdlib>)
+else()
+    target_compile_options(XenonUtilsLite PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-include cstdlib>)
+endif()
 
 file(GLOB_RECURSE RUNTIME_SOURCES CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/*.cpp)
 list(FILTER RUNTIME_SOURCES EXCLUDE REGEX "/thirdparty/")
+# The platform layer (platform/*.h): Windows' implementation in
+# platform/win32, everyone else's in platform/posix.
+if(WIN32)
+    list(FILTER RUNTIME_SOURCES EXCLUDE REGEX "/platform/posix/")
+    # Built without -march, below (SpeedBreakerCpuCheck).
+    list(FILTER RUNTIME_SOURCES EXCLUDE REGEX "/platform/win32/cpu_check\\.cpp$")
+else()
+    list(FILTER RUNTIME_SOURCES EXCLUDE REGEX "/platform/win32/")
+endif()
 # Nayuki's QR Code generator (thirdparty/qrcodegen, vendored, C): the
 # download page's code in Check for Updates. Part of the runtime itself, not
 # a library of its own, so the iOS app (scripts/ios/build.sh) links it too.
@@ -143,9 +156,17 @@ endif()
 # logs, crash reports and Settings > Advanced: generated/build_info.inc,
 # checked on every build but rewritten only when it changes
 # (report/build_info.cmake), so a no-op build stays one.
+# -DSB_BUILD_LABEL="Windows beta" names a build that goes to other people:
+# its build line starts "SpeedBreaker v<version> Windows beta <date>
+# (<commit>)" (logs, Settings > Advanced, reports), and its bug reports' file
+# names carry it too (scripts/windows/make_zip.py packs it).
+set(SB_BUILD_LABEL "" CACHE STRING "A label for a build that goes to other people (\"Windows beta\"); empty for none")
+if(NOT SB_BUILD_LABEL STREQUAL "" AND NOT SB_BUILD_LABEL MATCHES "^[A-Za-z0-9]+( [A-Za-z0-9]+)*$")
+    message(FATAL_ERROR "SB_BUILD_LABEL: letters, digits and single spaces only (it goes into file names): \"${SB_BUILD_LABEL}\"")
+endif()
 add_custom_target(nfsmw_build_info
     COMMAND ${CMAKE_COMMAND} -DSOURCE_DIR=${CMAKE_SOURCE_DIR} -DOUTPUT=${CMAKE_CURRENT_BINARY_DIR}/generated/build_info.inc
-        -DVERSION=${CMAKE_PROJECT_VERSION} -DBUILD_TYPE=${CMAKE_BUILD_TYPE} -P ${CMAKE_CURRENT_SOURCE_DIR}/report/build_info.cmake
+        -DVERSION=${CMAKE_PROJECT_VERSION} -DBUILD_TYPE=${CMAKE_BUILD_TYPE} "-DLABEL=${SB_BUILD_LABEL}" -P ${CMAKE_CURRENT_SOURCE_DIR}/report/build_info.cmake
     BYPRODUCTS ${CMAKE_CURRENT_BINARY_DIR}/generated/build_info.inc
     VERBATIM)
 add_dependencies(SpeedBreaker nfsmw_build_info)
@@ -167,7 +188,55 @@ target_include_directories(SpeedBreaker SYSTEM PRIVATE ${FFMPEG_INCLUDE_DIR} ${X
 # cases with assert(), and those must fail loudly, never fall through.
 target_compile_options(SpeedBreaker PRIVATE -Wno-unused-label -Wno-unused-variable -fno-strict-aliasing -UNDEBUG)
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
-    target_compile_options(SpeedBreaker PRIVATE -march=x86-64-v3)
+    if(SB_MSVC_FRONTEND)
+        target_compile_options(SpeedBreaker PRIVATE /clang:-march=x86-64-v3)
+    else()
+        target_compile_options(SpeedBreaker PRIVATE -march=x86-64-v3)
+    endif()
+endif()
+if(WIN32)
+    enable_language(RC)
+    # Debug information for the runtime (crash reports, debuggers), in the
+    # objects (/Z7) and then the PDB; the recompiled code goes without.
+    target_compile_options(SpeedBreaker PRIVATE /Z7)
+    # The CPU check runs before any static initializer of the x86-64-v3
+    # code, so it is built without -march, as an object library (a static
+    # library's lone constructor would never be linked in).
+    add_library(SpeedBreakerCpuCheck OBJECT ${CMAKE_CURRENT_SOURCE_DIR}/platform/win32/cpu_check.cpp)
+    target_link_libraries(SpeedBreaker PRIVATE SpeedBreakerCpuCheck)
+    # The icon, the version and the manifest (UTF-8 code page, per-monitor
+    # DPI awareness, long paths, Windows 10 and 11).
+    target_sources(SpeedBreaker PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/platform/win32/speedbreaker.rc)
+    set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/platform/win32/speedbreaker.rc PROPERTIES
+        OBJECT_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/platform/win32/speedbreaker.manifest;${CMAKE_CURRENT_SOURCE_DIR}/platform/win32/speedbreaker.ico")
+    # /STACK: std::thread threads run guest code (the command processor),
+    # and Windows reserves 1 MB by default; 8 MB is Linux's.
+    # /DEBUG always, and with it /OPT:NOICF: without /DEBUG lld-link folds
+    # identical functions, and thousands of one-line guest bodies (blr)
+    # would share one address, aliasing PPCFuncMappings' host pointers.
+    # /MANIFEST:NO: the manifest is in the .rc. /MAP: the link map, where
+    # the runtime's overrides of generated functions can be checked.
+    # /PDBALTPATH: the debug record names SpeedBreaker.pdb alone, not the
+    # folder it was built in.
+    target_link_options(SpeedBreaker PRIVATE /STACK:8388608 /DEBUG /PDBALTPATH:SpeedBreaker.pdb /OPT:REF /OPT:NOICF /INCREMENTAL:NO /MANIFEST:NO
+        /MAP:$<TARGET_FILE_DIR:SpeedBreaker>/SpeedBreaker.map)
+    # Console for development builds; -DSB_WINDOWS_GUI=ON for a release (no
+    # console window; main() stays the entry point, and
+    # platform::PrepareProcess gives stdin, stdout and stderr a terminal's
+    # console or NUL, so the session log still gets everything: preset
+    # windows-clang-tester).
+    option(SB_WINDOWS_GUI "Link SpeedBreaker.exe for the Windows subsystem (release builds)" OFF)
+    if(SB_WINDOWS_GUI)
+        target_link_options(SpeedBreaker PRIVATE /SUBSYSTEM:WINDOWS /ENTRY:mainCRTStartup)
+        # main.cpp: a message box when there's no window (nothing else to see).
+        target_compile_definitions(SpeedBreaker PRIVATE SB_WINDOWS_GUI=1)
+    else()
+        target_link_options(SpeedBreaker PRIVATE /SUBSYSTEM:CONSOLE)
+    endif()
+    # The timer resolution (winmm), crash reports (dbghelp), WaitOnAddress
+    # (synchronization), and the shell's known folders (shell32, ole32);
+    # FFmpeg's own (avcodec: ole32, user32; avutil: user32, bcrypt).
+    target_link_libraries(SpeedBreaker PRIVATE winmm dbghelp synchronization bcrypt user32 shell32 ole32 advapi32)
 endif()
 if(IOS)
     # The CPU level both the iPad Pro (M2) and the iPhone 15 Pro (A17 Pro)

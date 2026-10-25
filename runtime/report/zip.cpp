@@ -528,7 +528,11 @@ namespace report
             return false;
 
         struct tm local{};
+#ifdef _WIN32
+        localtime_s(&local, &modified);
+#else
         localtime_r(&modified, &local);
+#endif
         int year = std::max(local.tm_year + 1900, 1980);
         Entry e;
         e.name = name;

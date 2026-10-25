@@ -1,6 +1,7 @@
 // SpeedBreaker runtime. GPL-3.0-or-later (see COPYING). See settings.h.
 #include "settings.h"
 #include <user/paths.h>
+#include <game/language.h>  // Settings > Game > Language: the languages
 
 #include <algorithm>
 #include <array>
@@ -13,6 +14,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <format>
+#include <iterator>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -22,7 +24,13 @@
 
 #include <fcntl.h>
 #include <sys/stat.h>
+#ifdef _WIN32
+#include <platform/os.h>
+#else
 #include <unistd.h>
+#endif
+
+#include <platform/file_io.h>
 #ifdef __APPLE__
 #include <TargetConditionals.h>  // TARGET_OS_IOS: __APPLE__ alone means macOS or iOS
 #endif
@@ -93,6 +101,22 @@ namespace settings
         // Screen Resolution scales an iOS view (Core Animation scales it up
         // to the screen); elsewhere the window's size is the player's.
         constexpr bool kPresentScaleHidden = !kFullscreenHidden;
+
+        // Settings > Game > Language: game/language.h's table, in its order.
+        constexpr auto kLanguageEntries = [] {
+            std::array<EnumEntry, std::size(game::language::kLanguages)> entries {};
+            for (size_t i = 0; i < entries.size(); i++)
+                entries[i] = { game::language::kLanguages[i].id, game::language::kLanguages[i].token, game::language::kLanguages[i].name };
+            return entries;
+        }();
+        // The game folder can't be reached on iPhone and iPad, and the
+        // installed files decide what a language gives (the note under the
+        // row): the row isn't shown there.
+#if defined(__APPLE__) && TARGET_OS_IOS
+        constexpr bool kLanguageHidden = true;
+#else
+        constexpr bool kLanguageHidden = false;
+#endif
 
         constexpr EnumEntry kAspectEntries[] = {
             { int32_t(AspectMode::Auto), "auto", "Fill Screen" },
@@ -256,7 +280,7 @@ namespace settings
               .env = "NFSMW_TEXTURE_MIPS", .defaultValue = 1 },
             { .id = Id::InternalResolution, .category = Category::Graphics, .type = Type::Enum, .apply = Apply::Live,
               .table = "video", .key = "internal_resolution", .label = "Internal Resolution",
-              .description = "Render the 3D scene above the 360's 720p. Sun shadows follow this setting up to 2x. 1.5x is 1080p, a little over half the pixels of 2x. Auto: from the screen (1440p: 2x, or 3x2 filling an ultrawide).",
+              .description = "Render the 3D scene above the 360's 720p. Sun shadows follow this setting up to 2x. 1.5x is 1080p, a little over half the pixels of 2x. On a screen of another shape filled by Fill Screen, each step renders that shape: 1x on a Steam Deck is its own 1280x800. Auto: from the screen (1440p: 2x; a Steam Deck: its 1280x800).",
               .env = "NFSMW_RESOLUTION", .defaultValue = kResolutionAuto, .entries = kResolutionEntries },
             { .id = Id::WindowWidth, .category = Category::Display, .type = Type::Int, .apply = Apply::Restart, .hidden = true,
               .table = "video", .key = "window_width", .label = "Window Width",
@@ -413,6 +437,11 @@ namespace settings
               .table = "advanced", .key = "performance_overlay", .label = "Performance Overlay",
               .description = "Show the frame rate and frame time in a corner of the screen.",
               .env = "NFSMW_PERF_OVERLAY", .defaultValue = 0 },
+            // Game
+            { .id = Id::GameLanguage, .category = Category::Game, .type = Type::Enum, .apply = Apply::Restart, .hidden = kLanguageHidden,
+              .table = "game", .key = "language", .label = "Language",
+              .description = "The language of the game's menus and race text: English (the USA disc's), or French, German, Italian, Spanish, Dutch, Swedish, Danish, Polish or Finnish, from the same disc's files. The movies and the speech stay in English, as the disc has them.",
+              .env = "NFSMW_LANGUAGE", .defaultValue = double(game::language::kEnglish), .entries = kLanguageEntries },
         };
         static_assert(std::size(kOptions) == kCount, "one row per settings::Id");
 
@@ -460,6 +489,7 @@ namespace settings
         double s_baseline[kCount]{};               // stored values as last loaded or saved (Dirty)
         std::atomic<double> s_deviceDefault[kCount]{};  // SetDeviceDefault's, where s_hasDeviceDefault
         std::atomic<bool> s_hasDeviceDefault[kCount]{};
+        bool s_inFile[kCount]{};                   // settings.toml holds it (the last Load read it, or a Save wrote it)
         bool s_frozen = false;                     // Restart options hold their launch values (first Load)
         std::mutex s_saveMutex;                    // whole saves, so the last snapshot is the last file
 
@@ -504,6 +534,11 @@ namespace settings
             return list;
         }
 
+        // xbox_usb_rumble_note: the "no rumble over USB" note for an Xbox
+        // controller on a Mac (hid/rumble_note.h) was closed.
+        constexpr const char* kRumbleNoteKey = "xbox_usb_rumble_note";
+        std::atomic<bool> s_rumbleNoteShown{ false };
+
         std::vector<int> ParseRates(std::string_view text)
         {
             std::vector<int> out;
@@ -535,9 +570,13 @@ namespace settings
             if (!rates.empty())
                 rates = std::format("# Screen refresh rates (Hz) the refresh-rate notice was closed for: it isn't shown for them again.\n"
                     "{} = \"{}\"\n", kRefreshNoticesKey, rates);
-            if (version.empty() && rates.empty())
+            std::string rumble;
+            if (s_rumbleNoteShown.load(std::memory_order_relaxed))
+                rumble = std::format("# The \"no rumble over USB\" note for an Xbox controller on a Mac was closed: it isn't shown again.\n"
+                    "{} = true\n", kRumbleNoteKey);
+            if (version.empty() && rates.empty() && rumble.empty())
                 return "";
-            return std::format("\n[{}]\n{}{}", kAppTable, version, rates);
+            return std::format("\n[{}]\n{}{}{}", kAppTable, version, rates, rumble);
         }
 
         // `text` (a settings.toml) without its [app] table: from a line that
@@ -912,7 +951,7 @@ namespace settings
         // of a regular file.
         ReadStatus ReadFile(const std::filesystem::path& path, std::string& out, std::string& error)
         {
-            int fd = open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NONBLOCK);
+            int fd = platform::OpenFile(path, O_RDONLY | O_CLOEXEC | O_NONBLOCK);
             if (fd < 0)
             {
                 if (errno == ENOENT)
@@ -920,15 +959,15 @@ namespace settings
                 error = strerror(errno);
                 return ReadStatus::Failed;
             }
-            struct stat st;
-            if (fstat(fd, &st) != 0)
+            platform::FileInfo st;
+            if (platform::InfoOf(fd, st) != 0)
                 error = strerror(errno);
-            else if (S_ISDIR(st.st_mode))
+            else if (st.directory)
                 error = "it's a folder";
-            else if (!S_ISREG(st.st_mode))
+            else if (!st.regular)
                 error = "it isn't a regular file";
-            else if (uint64_t(st.st_size) > kMaxFileSize)
-                error = std::format("it's {} KB, too big for a settings file", uint64_t(st.st_size) / 1024);
+            else if (st.size > kMaxFileSize)
+                error = std::format("it's {} KB, too big for a settings file", st.size / 1024);
             if (!error.empty())
             {
                 close(fd);
@@ -1099,13 +1138,13 @@ namespace settings
             RemoveStaleTemps(target);
             std::filesystem::path temp = target;
             temp += std::format(".{}.tmp", long(getpid()));
-            int fd = open(temp.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0644);
+            int fd = platform::OpenFile(temp, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0644);
             if (fd < 0 && errno == EEXIST)
             {
                 // Saves within a process are serialised, so this was left by
                 // a crashed process that had the same pid.
-                unlink(temp.c_str());
-                fd = open(temp.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0644);
+                platform::RemoveFile(temp);
+                fd = platform::OpenFile(temp, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0644);
             }
             if (fd < 0)
                 return std::format("can't write {}: {}", target.string(), strerror(errno));
@@ -1133,20 +1172,25 @@ namespace settings
                 error = errno;
             if (error)
             {
-                unlink(temp.c_str());
+                platform::RemoveFile(temp);
                 return std::format("can't write {}: {}", target.string(), strerror(error));
             }
-            if (rename(temp.c_str(), target.c_str()) != 0)
+            // (Windows: MoveFileExW, which replaces the old file in one step
+            // too; a plain _wrename would fail on every save after the first.)
+            if ((error = platform::AtomicReplace(temp, target)) != 0)
             {
-                error = errno;
-                unlink(temp.c_str());
+                platform::RemoveFile(temp);
                 return std::format("can't replace {}: {}", target.string(), strerror(error));
             }
+#ifdef _WIN32
+            platform::SyncDirectory(dir);  // (nothing to do on NTFS)
+#else
             if (int dirFd = open(dir.empty() ? "." : dir.c_str(), O_RDONLY | O_CLOEXEC); dirFd >= 0)
             {
                 fsync(dirFd);  // best effort: some file systems refuse it on directories
                 close(dirFd);
             }
+#endif
             return "";
         }
 
@@ -1204,6 +1248,7 @@ namespace settings
         case Category::Input: return "Input";
         case Category::Controls: return "Controls";
         case Category::Wheel: return "Wheel";
+        case Category::Game: return "Game";
         case Category::Advanced: return "Advanced";
         default: return "";
         }
@@ -1227,13 +1272,41 @@ namespace settings
         std::optional<double> v = Normalize(o, value);
         if (!v)
             return;
+        std::string note;
+        bool changed = false;
         {
             std::lock_guard lock(s_mutex);
+            double previous = Default(i);
             s_deviceDefault[i].store(*v, std::memory_order_relaxed);
             s_hasDeviceDefault[i].store(true, std::memory_order_release);
+            if (detail::g_state.load(std::memory_order_relaxed) == 2)
+            {
+                // After Load (a GPU's defaults: its device exists only once
+                // the window does): the stored value becomes what Load would
+                // have given, unless the file holds the option, something
+                // set it since, or it applies at a restart.
+                double stored = s_stored[i].load(std::memory_order_relaxed);
+                if (s_inFile[i])
+                    note = std::format("; settings.toml's {} stays", TomlValue(o, stored));
+                else if (stored != previous || s_baseline[i] != previous)
+                    note = std::format("; {} (set since the start) stays", TomlValue(o, stored));
+                else if (o.apply == Apply::Restart)
+                    note = "; too late for this run's stored value";
+                else if (stored != *v)
+                {
+                    s_stored[i].store(*v, std::memory_order_relaxed);
+                    s_baseline[i] = *v;  // not a change to save: Save would write it, a later Load give it
+                    changed = RecomputeLocked(i);
+                    detail::g_generation.fetch_add(1, std::memory_order_release);
+                }
+            }
+            if (s_envSet[i].load(std::memory_order_relaxed))
+                note += std::format("; {} overrides it for this run", o.env);
         }
         fprintf(stderr, "[settings] %s.%s defaults to %s on this device (%s)%s\n", o.table, o.key, TomlValue(o, *v).c_str(),
-            std::string(why).c_str(), detail::g_state.load(std::memory_order_acquire) == 2 ? "; too late for this run's stored value" : "");
+            std::string(why).c_str(), note.c_str());
+        if (changed)
+            Notify({ &id, 1 });
     }
 
     double DefaultValue(Id id)
@@ -1420,13 +1493,14 @@ namespace settings
         std::array<std::optional<double>, kCount> fileValues;
         std::string text, readError, lastError, lastVersion;
         std::vector<int> notices;
+        bool rumbleNote = false;
         size_t fromFile = 0;
         ReadStatus status = ReadFile(path, text, readError);
         if (status == ReadStatus::Missing)
-            fprintf(stderr, "[settings] no %s yet: defaults\n", path.c_str());
+            fprintf(stderr, "[settings] no %s yet: defaults\n", path.string().c_str());
         else if (status == ReadStatus::Failed)
         {
-            fprintf(stderr, "[settings] can't read %s: %s; defaults\n", path.c_str(), readError.c_str());
+            fprintf(stderr, "[settings] can't read %s: %s; defaults\n", path.string().c_str(), readError.c_str());
             lastError = std::format("Couldn't read {}: {}. The settings are at their defaults.", path.string(), readError);
         }
         else
@@ -1461,8 +1535,8 @@ namespace settings
                 bad += ".bad";
                 std::error_code ec;
                 std::filesystem::copy_file(path, bad, std::filesystem::copy_options::overwrite_existing, ec);
-                fprintf(stderr, "[settings] %s doesn't parse: %s (line %u, column %u); defaults (kept as %s)\n", path.c_str(),
-                    error.c_str(), unsigned(where.line), unsigned(where.column), ec ? "nothing: the copy failed" : bad.c_str());
+                fprintf(stderr, "[settings] %s doesn't parse: %s (line %u, column %u); defaults (kept as %s)\n", path.string().c_str(),
+                    error.c_str(), unsigned(where.line), unsigned(where.column), ec ? "nothing: the copy failed" : bad.string().c_str());
                 lastError = std::format("{} has a mistake at line {}, column {} ({}). The settings are at their defaults; {}.",
                     path.string(), where.line, where.column, error,
                     ec ? "saving them will replace the file" : std::format("the file was kept as {}", bad.string()));
@@ -1472,7 +1546,7 @@ namespace settings
                 const toml::table* table = tableNode.as_table();
                 if (!table)
                 {
-                    fprintf(stderr, "[settings] %s: %s outside a table; ignored\n", path.filename().c_str(),
+                    fprintf(stderr, "[settings] %s: %s outside a table; ignored\n", path.filename().string().c_str(),
                         std::string(tableKey.str()).c_str());
                     continue;
                 }
@@ -1484,7 +1558,16 @@ namespace settings
                         if (auto v = node.as_string())
                             notices = ParseRates(v->get());
                         else
-                            fprintf(stderr, "[settings] %s: %s = %s isn't a list of rates; ignored\n", path.filename().c_str(), name.c_str(),
+                            fprintf(stderr, "[settings] %s: %s = %s isn't a list of rates; ignored\n", path.filename().string().c_str(), name.c_str(),
+                                NodeText(node).c_str());
+                        continue;
+                    }
+                    if (tableKey.str() == kAppTable && key.str() == kRumbleNoteKey)
+                    {
+                        if (auto v = node.as_boolean())
+                            rumbleNote = v->get();
+                        else
+                            fprintf(stderr, "[settings] %s: %s = %s isn't true or false; ignored\n", path.filename().string().c_str(), name.c_str(),
                                 NodeText(node).c_str());
                         continue;
                     }
@@ -1493,14 +1576,14 @@ namespace settings
                         if (auto v = node.as_string())
                             lastVersion = v->get();
                         else
-                            fprintf(stderr, "[settings] %s: %s = %s isn't a version; ignored\n", path.filename().c_str(), name.c_str(),
+                            fprintf(stderr, "[settings] %s: %s = %s isn't a version; ignored\n", path.filename().string().c_str(), name.c_str(),
                                 NodeText(node).c_str());
                         continue;
                     }
                     const Option* o = Find(tableKey.str(), key.str());
                     if (!o)
                     {
-                        fprintf(stderr, "[settings] %s: unknown key %s; ignored\n", path.filename().c_str(), name.c_str());
+                        fprintf(stderr, "[settings] %s: unknown key %s; ignored\n", path.filename().string().c_str(), name.c_str());
                         continue;
                     }
                     std::string source = std::format("{}: {} = {}", path.filename().string(), name, NodeText(node));
@@ -1512,7 +1595,7 @@ namespace settings
                 }
             }
             if (error.empty())
-                fprintf(stderr, "[settings] %s: %zu value%s from the file\n", path.c_str(), fromFile, fromFile == 1 ? "" : "s");
+                fprintf(stderr, "[settings] %s: %zu value%s from the file\n", path.string().c_str(), fromFile, fromFile == 1 ? "" : "s");
         }
 
         std::vector<Id> changed;
@@ -1523,6 +1606,7 @@ namespace settings
                 double stored = fileValues[i].value_or(Default(i));
                 s_stored[i].store(stored, std::memory_order_relaxed);
                 s_baseline[i] = stored;
+                s_inFile[i] = fileValues[i].has_value();
                 ReadEnvLocked(i, true);
                 if (RecomputeLocked(i))
                     changed.push_back(Id(i));
@@ -1532,6 +1616,7 @@ namespace settings
             LastErrorText() = lastError;
             LastVersionText() = lastVersion;
             RefreshNoticesList() = notices;
+            s_rumbleNoteShown.store(rumbleNote, std::memory_order_relaxed);
             s_fileFound = status != ReadStatus::Missing;
             s_fileLoaded = status == ReadStatus::Ok && lastError.empty();
             detail::g_generation.fetch_add(1, std::memory_order_release);
@@ -1572,6 +1657,8 @@ namespace settings
                 std::copy(values.begin(), values.end(), s_baseline);
                 if (LoadedPath().empty())
                     LoadedPath() = path;
+                if (path == LoadedPath())
+                    std::fill(std::begin(s_inFile), std::end(s_inFile), true);  // a save writes every option
             }
         }
         if (!error.empty())
@@ -1579,7 +1666,7 @@ namespace settings
             fprintf(stderr, "[settings] %s\n", error.c_str());
             return false;
         }
-        fprintf(stderr, "[settings] saved %s\n", path.c_str());
+        fprintf(stderr, "[settings] saved %s\n", path.string().c_str());
         return true;
     }
 
@@ -1625,7 +1712,7 @@ namespace settings
         ReadStatus status = ReadFile(path, text, error);
         if (status == ReadStatus::Failed)
         {
-            fprintf(stderr, "[settings] the version isn't recorded: can't read %s: %s\n", path.c_str(), error.c_str());
+            fprintf(stderr, "[settings] the version isn't recorded: can't read %s: %s\n", path.string().c_str(), error.c_str());
             return false;
         }
         if (status == ReadStatus::Missing)
@@ -1683,7 +1770,8 @@ namespace settings
         ReadStatus status = ReadFile(path, text, error);
         if (status == ReadStatus::Failed)
         {
-            fprintf(stderr, "[settings] the refresh notice's %d Hz isn't recorded: can't read %s: %s\n", hz, path.c_str(), error.c_str());
+            fprintf(stderr, "[settings] the refresh notice's %d Hz isn't recorded: can't read %s: %s\n", hz, path.string().c_str(),
+                error.c_str());
             return false;
         }
         if (status == ReadStatus::Missing)
@@ -1692,6 +1780,53 @@ namespace settings
         if (std::string failed = WriteAtomically(path, WithoutAppTable(text) + AppTable(lastVersion, notices)); !failed.empty())
         {
             fprintf(stderr, "[settings] the refresh notice's %d Hz isn't recorded: %s\n", hz, failed.c_str());
+            return false;
+        }
+        std::lock_guard lock(s_mutex);
+        s_fileFound = s_fileLoaded = true;
+        if (LoadedPath().empty())
+            LoadedPath() = path;
+        return true;
+    }
+
+    bool RumbleNoteShown()
+    {
+        return s_rumbleNoteShown.load(std::memory_order_relaxed);
+    }
+
+    bool RecordRumbleNote()
+    {
+        std::lock_guard saveLock(s_saveMutex);
+        std::filesystem::path path;
+        std::string lastVersion;
+        std::vector<int> notices;
+        {
+            std::lock_guard lock(s_mutex);
+            if (s_rumbleNoteShown.exchange(true, std::memory_order_relaxed))
+                return true;  // this run doesn't show it again, saved or not
+            if (s_fileFound && !s_fileLoaded)
+            {
+                fprintf(stderr, "[settings] the rumble note isn't recorded: settings.toml didn't load\n");
+                return false;
+            }
+            path = LoadedPath().empty() ? DefaultPath() : LoadedPath();
+            lastVersion = LastVersionText();
+            notices = RefreshNoticesList();
+        }
+        // Only the [app] table changes, as for RecordVersion.
+        std::string text, error;
+        ReadStatus status = ReadFile(path, text, error);
+        if (status == ReadStatus::Failed)
+        {
+            fprintf(stderr, "[settings] the rumble note isn't recorded: can't read %s: %s\n", path.string().c_str(), error.c_str());
+            return false;
+        }
+        if (status == ReadStatus::Missing)
+            text = "# SpeedBreaker settings. The settings menu writes every option here when one\n"
+                   "# changes; until then each one keeps its default.\n";
+        if (std::string failed = WriteAtomically(path, WithoutAppTable(text) + AppTable(lastVersion, notices)); !failed.empty())
+        {
+            fprintf(stderr, "[settings] the rumble note isn't recorded: %s\n", failed.c_str());
             return false;
         }
         std::lock_guard lock(s_mutex);

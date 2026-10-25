@@ -30,6 +30,32 @@
 // shared mapping, then a copy in uncached system memory; ring in VRAM), the
 // Steam Frame and other unified-memory devices (a copy in their one
 // host-visible device memory), and Apple's (imported).
+//
+// Windows. NVIDIA's Windows driver exposes CPU-mapped VRAM as its own
+// heap, a 256 MB window (214-256 MB) unless resizable BAR is on in the
+// firmware and the driver's profile for the game turns it on, which it does
+// only for games it knows: the window kit 1 (the first Windows tester
+// build) put the 512 MB copy in, so it quit at startup on such a card. The
+// plan is the same on Windows; what differs is the import. Guest physical
+// memory there is a view of one pagefile-backed section, mapped at each of
+// its three windows into placeholders (platform/win32/memory.cpp:
+// VirtualAlloc2, MapViewOfFile3), and the import is of the 0xA0000000 view.
+// Intel's Windows driver imports it, and on the ThinkPad that tested the
+// port the write watch's VirtualProtect (read-only and no-access pages, in
+// all three views) leaves the imported memory working both ways: the
+// laptop.md P0 probe, item f, and every run since. That is the failure
+// ANV's import has (ImportRefusal) and Windows' can't: Windows gives drivers
+// no MMU notifier, so a driver that maps a process's pages for its device
+// locks them for as long as it uses them, and a protection change reaches
+// only the CPU's page tables. Whether NVIDIA's and AMD's Windows drivers take
+// a file mapping's view is unknown. If one doesn't, it refuses at once
+// (vkGetMemoryHostPointerPropertiesEXT or vkAllocateMemory), the renderer
+// logs that, and the copy in system memory comes next. So a discrete GPU
+// without resizable BAR imports first on Windows too: the copy in system
+// memory would put guest memory in the same place (system RAM the GPU
+// reads over PCIe) and add the CPU's page copies (writewatch::SyncShadow)
+// every frame, and copies back of what resolves wrote when the CPU reads
+// it. The copy goes first only where it lives in VRAM.
 #pragma once
 #include <cstdint>
 #include <cstdio>
@@ -323,6 +349,25 @@ namespace gpu::memplan
             why += "; NFSMW_SHADOW_MEMORY=gtt";
         p.why = why;
         return p;
+    }
+
+    // A discrete GPU that reads guest memory from system memory (imported, or
+    // a copy outside VRAM: no resizable BAR) fetches every vertex, constant
+    // and texture load, and stores every resolve, across PCIe. On the devices
+    // we measured, the ring alone in system memory doubled the GPU's time
+    // (NOTES: Steam Machine); issue #40's RTX 5060 Ti, on a PCIe 3.0 x8 link
+    // with both there, took 20-25 ms a frame at 1x. For the log: nullptr when
+    // the GPU reads its guest memory locally (VRAM, or an integrated GPU's
+    // own memory), else what to try.
+    inline const char* OverPcieNote(Gpu gpu, bool guestInVram, bool ringInVram)
+    {
+        if (gpu != Gpu::kDiscrete || guestInVram)
+            return nullptr;
+        return ringInVram
+            ? "the GPU reads guest memory over PCIe (it is in system memory); where Resizable BAR is off, turning it on "
+              "(\"Above 4G Decoding\" and \"Re-Size BAR\" in the firmware) puts it in VRAM"
+            : "the GPU reads guest memory and the upload ring over PCIe (both are in system memory); where Resizable BAR "
+              "is off, turning it on (\"Above 4G Decoding\" and \"Re-Size BAR\" in the firmware) puts them in VRAM";
     }
 
     // The upload ring. `guestType`: the memory type guest memory's copy went

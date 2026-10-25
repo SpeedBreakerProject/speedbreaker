@@ -664,7 +664,7 @@ namespace gpu
                             double(guard.snapReading - lastGuard.snapReading) / 120, double(guard.snapWaits - lastGuard.snapWaits) / 120,
                             double(guard.snapGaveUp - lastGuard.snapGaveUp) / 120);
                     fprintf(stderr, "[perf] %.1f fps (worst frame %.1f ms) | CP busy %.1f ms/frame (%.2f us/draw) | per frame: %.0f draws (%.0f skipped as later tiles, %.0f constant uploads), %.1f passes, %.1f resolves, %.1f submits, %.1f uploads, GPU busy %.1f ms (executing %.1f ms%s) | guard: %.1f faults (%.1f opened), %.2f stalls, %.2f ms stalled%s | %.0f KB snapshots | shadow: %.0f KB up, %.0f KB back, %.2f waits"
-                        " | scaled: %.1f loads, %.0f MB untiled, %.0f MB resolved, %.2f allocations, %.2f evictions, %.2f fallbacks | post-processing GPU %.2f ms (AA %.2f ms)"
+                        " | scaled: %.1f loads, %.0f MB untiled, %.0f MB resolved, %.2f allocations, %.2f evictions, %.2f fallbacks, %.1f stored into textures | post-processing GPU %.2f ms (AA %.2f ms)"
                         " | display: %llu dropped, %llu repeated | world: %llu frames, %llu without a step, %llu with 2+ | late %llu"
                         " | memory: %.0f MB (targets %.0f in %u, textures %.0f in %u, scaled %.0f, front %.0f), device %.0f of %.0f MB,"
                         " image blocks %u (%.0f MB: %.0f MB in %u images), %u spare (%.0f MB), %u images alone (%.0f MB)"
@@ -684,7 +684,7 @@ namespace gpu
                         double(scaled.untiledBytes - lastScaled.untiledBytes) / 1048576.0 / 120,
                         double(scaled.resolvedBytes - lastScaled.resolvedBytes) / 1048576.0 / 120,
                         double(scaled.allocations - lastScaled.allocations) / 120, double(scaled.evictions - lastScaled.evictions) / 120,
-                        double(scaled.fallbacks - lastScaled.fallbacks) / 120, double(post.totalNs - lastPost.totalNs) / 1e6 / postFrames,
+                        double(scaled.fallbacks - lastScaled.fallbacks) / 120, double(scaled.hosted - lastScaled.hosted) / 120, double(post.totalNs - lastPost.totalNs) / 1e6 / postFrames,
                         double(post.aaNs - lastPost.aaNs) / 1e6 / postFrames,
                         (unsigned long long)(shown.dropped - lastShown.dropped), (unsigned long long)(shown.repeated - lastShown.repeated),
                         (unsigned long long)(world.frames - lastWorld.frames), (unsigned long long)(world.noStep - lastWorld.noStep),

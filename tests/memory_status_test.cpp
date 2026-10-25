@@ -10,6 +10,12 @@
 #include <cstdlib>
 #include <string>
 
+#ifdef _WIN32
+// The MSVC C runtime has _putenv_s, not setenv and unsetenv ("" removes).
+static int setenv(const char* name, const char* value, int) { return _putenv_s(name, value); }
+static int unsetenv(const char* name) { return _putenv_s(name, ""); }
+#endif
+
 using namespace memstatus;
 
 static int g_failures = 0;

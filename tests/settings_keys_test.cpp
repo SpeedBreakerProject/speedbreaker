@@ -18,7 +18,11 @@
 #include <string>
 #include <string_view>
 
+#ifdef _WIN32
+#include <process.h>  // _getpid
+#else
 #include <unistd.h>  // mkdtemp
+#endif
 
 static int g_failures = 0;
 #define CHECK(cond, ...) do { if (!(cond)) { g_failures++; printf("  FAIL %s:%d: %s: ", __FILE__, __LINE__, #cond); printf(__VA_ARGS__); printf("\n"); } } while (0)
@@ -113,6 +117,17 @@ int main()
     CHECK(EnvOverride(Id::KeyA) == nullptr, "nothing overrides a key");
 
     // A scratch folder of our own.
+#ifdef _WIN32
+    // Windows has no mkdtemp: a folder named after this process, made new.
+    const std::filesystem::path dir = std::filesystem::temp_directory_path() / ("speedbreaker-keys-" + std::to_string(_getpid()));
+    std::error_code scratchError;
+    std::filesystem::remove_all(dir, scratchError);
+    if (!std::filesystem::create_directory(dir, scratchError))
+    {
+        printf("can't make a scratch folder: %s\n", scratchError.message().c_str());
+        return 2;
+    }
+#else
     std::string pattern = (std::filesystem::temp_directory_path() / "speedbreaker-keys-XXXXXX").string();
     if (!mkdtemp(pattern.data()))
     {
@@ -120,6 +135,7 @@ int main()
         return 2;
     }
     const std::filesystem::path dir = pattern;
+#endif
     const std::filesystem::path file = dir / "settings.toml";
 
     // The file: names in, in any case; "none" empties a key; anything else

@@ -6,6 +6,9 @@
 #ifdef __APPLE__
 #include <TargetConditionals.h>
 #endif
+#ifdef _WIN32
+#include <platform/folders.h>
+#endif
 
 #include "portable.h"
 
@@ -32,11 +35,13 @@ inline std::filesystem::path GetGamePath()
     return "game/files";
 }
 
-// The per-user folders are named for the project: SpeedBreaker (macOS) or
-// speedbreaker (Linux), nfsmw-recomp until 2026-10. MigrateUserFolders
-// (user/paths.cpp, first thing at startup) renames an old folder; where that
-// fails, the old one is used as it is.
+// The per-user folders are named for the project: SpeedBreaker (macOS,
+// Windows) or speedbreaker (Linux), nfsmw-recomp until 2026-10.
+// MigrateUserFolders (user/paths.cpp, first thing at startup) renames an old
+// folder; where that fails, the old one is used as it is.
 #ifdef __APPLE__
+inline constexpr const char* kUserFolderName = "SpeedBreaker";
+#elif defined(_WIN32)
 inline constexpr const char* kUserFolderName = "SpeedBreaker";
 #else
 inline constexpr const char* kUserFolderName = "speedbreaker";
@@ -61,8 +66,18 @@ inline const char*& CacheFolderName()
 //   iOS: the same in the app's container; $XDG_DATA_HOME and
 //        $XDG_CACHE_HOME when set (test runs: iOS sets HOME itself)
 //   Linux: $XDG_DATA_HOME or ~/.local/share, $XDG_CACHE_HOME or ~/.cache
+//   Windows: %LOCALAPPDATA% (per user, never roams: a 6.6 GB install must
+//        not), caches in its SpeedBreaker\Cache; $XDG_DATA_HOME and
+//        $XDG_CACHE_HOME when set (test runs). Never HOME, which Git Bash
+//        and MSYS2 set: where the data went would depend on the launcher.
 inline std::filesystem::path UserDataBase()
 {
+#ifdef _WIN32
+    if (const char* xdg = std::getenv("XDG_DATA_HOME"))
+        return xdg;
+    std::filesystem::path local = platform::GetKnownFolder(platform::KnownFolder::LocalAppData);
+    return local.empty() ? std::filesystem::path(".") : local;
+#else
     const char* home = std::getenv("HOME");
     std::filesystem::path base = home ? home : ".";
 #ifdef __APPLE__
@@ -76,10 +91,16 @@ inline std::filesystem::path UserDataBase()
         return xdg;
     return base / ".local/share";
 #endif
+#endif
 }
 
 inline std::filesystem::path CacheBase()
 {
+#ifdef _WIN32
+    if (const char* xdg = std::getenv("XDG_CACHE_HOME"))
+        return xdg;
+    return UserDataBase();  // (GetCachePath adds SpeedBreaker\Cache)
+#else
     const char* home = std::getenv("HOME");
     std::filesystem::path base = home ? home : ".";
 #ifdef __APPLE__
@@ -93,6 +114,7 @@ inline std::filesystem::path CacheBase()
         return xdg;
     return base / ".cache";
 #endif
+#endif
 }
 
 // This computer's own data and cache folders, portable mode or not
@@ -104,6 +126,10 @@ inline std::filesystem::path HomeUserPath()
 
 inline std::filesystem::path HomeCachePath()
 {
+#ifdef _WIN32
+    if (!std::getenv("XDG_CACHE_HOME"))
+        return CacheBase() / CacheFolderName() / "Cache";
+#endif
     return CacheBase() / CacheFolderName();
 }
 

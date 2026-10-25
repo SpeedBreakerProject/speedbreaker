@@ -16,7 +16,11 @@
 // Each runtime thread's host stack is taken where it stands: the watchdog
 // signals it (SIGURG, otherwise unused here) and its handler records
 // backtrace() into the thread's slot. The recompiled game's calls are host
-// calls, so the stack of a guest thread is its guest call chain.
+// calls, so the stack of a guest thread is its guest call chain. Windows has
+// no signals to send: the watchdog suspends each thread in turn, copies its
+// registers and the top of its stack, resumes it, and walks the copy
+// (platform/stack.h), through a handle each thread opens on itself as it
+// registers.
 #include <stdafx.h>
 #include "report.h"
 #include "internal.h"
@@ -29,10 +33,17 @@
 #include <video/presenter.h>
 
 #include <SDL3/SDL_events.h>
+#ifndef _WIN32
 #include <execinfo.h>
+#endif
 #include <fstream>
+#ifdef _WIN32
+#include <platform/fault.h>
+#include <platform/stack.h>
+#else
 #include <pthread.h>
 #include <unistd.h>
+#endif
 
 namespace report
 {
@@ -40,12 +51,19 @@ namespace report
     {
         constexpr int kMaxThreads = 256;
         constexpr int kMaxFrames = 48;
+#ifndef _WIN32
         constexpr int kSampleSignal = SIGURG;
+#endif
 
         struct ThreadSlot
         {
             std::atomic<bool> used{ false };
+#ifdef _WIN32
+            HANDLE handle = nullptr;  // the thread's own, to suspend it and read its registers
+            uintptr_t stackHigh = 0;  // its stack's top (the stack grows down from it)
+#else
             pthread_t thread{};
+#endif
             char name[32] = "";
             PPCContext* guest = nullptr;  // under s_threadsMutex
             std::atomic<uint32_t> request{ 0 };  // the sample asked for
@@ -72,12 +90,18 @@ namespace report
                     return;
                 std::lock_guard lock(s_threadsMutex);
                 s_threads[t_slot].guest = nullptr;
+#ifdef _WIN32
+                if (s_threads[t_slot].handle)
+                    CloseHandle(s_threads[t_slot].handle);
+                s_threads[t_slot].handle = nullptr;
+#endif
                 s_threads[t_slot].used.store(false, std::memory_order_release);
                 t_slot = -1;
             }
         };
         thread_local Unregister t_unregister;
 
+#ifndef _WIN32
         void SampleHandler(int, siginfo_t*, void* context)
         {
             int saved = errno;
@@ -90,6 +114,7 @@ namespace report
             }
             errno = saved;
         }
+#endif
 
         // Under s_threadsMutex.
         void RegisterLocked(const char* name)
@@ -107,7 +132,23 @@ namespace report
                 t_unregister.armed = true;
             }
             ThreadSlot& s = s_threads[t_slot];
+#ifdef _WIN32
+            if (!s.handle)
+            {
+                s.handle = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_LIMITED_INFORMATION, FALSE,
+                    GetCurrentThreadId());
+                ULONG_PTR low = 0, high = 0;
+                GetCurrentThreadStackLimits(&low, &high);
+                s.stackHigh = high;
+                // A stack overflow's crash report runs on the stack that ran
+                // out: 64 KB kept back for it (the report, StackWalk64 and
+                // DbgHelp's lookups), where Windows keeps a few KB.
+                ULONG guarantee = 64 * 1024;
+                SetThreadStackGuarantee(&guarantee);
+            }
+#else
             s.thread = pthread_self();
+#endif
             snprintf(s.name, sizeof(s.name), "%s", name);
             s.guest = nullptr;
             s.used.store(true, std::memory_order_release);
@@ -123,8 +164,59 @@ namespace report
             std::vector<void*> frames;
         };
 
+#ifdef _WIN32
+        int s_unwound = 0;  // the last sample's threads walked without DbgHelp
+#endif
+
         std::vector<ThreadSample> SampleThreads()
         {
+#ifdef _WIN32
+            // Each thread in turn: suspended only while its registers and the
+            // top of its stack are copied into memory allocated before
+            // (platform::stack::Capture), then walked from the copy.
+            static std::vector<uint8_t> copy(1 << 20);
+            static platform::stack::Snapshot snapshot;
+            snapshot.buffer = copy.data();
+            snapshot.capacity = copy.size();
+            std::vector<ThreadSample> samples;
+            s_unwound = 0;
+            std::lock_guard lock(s_threadsMutex);
+            for (int i = 0; i < kMaxThreads; i++)
+            {
+                ThreadSlot& s = s_threads[i];
+                if (!s.used.load(std::memory_order_acquire) || i == t_slot)
+                    continue;
+                ThreadSample sample;
+                sample.name = s.name;
+                if (s.guest)
+                {
+                    // Racy, as on POSIX (the thread runs on), but the context
+                    // stays: it goes away only through SetThreadGuestContext,
+                    // which waits for this lock.
+                    sample.hasGuest = true;
+                    sample.lr = uint32_t(s.guest->lr);
+                    sample.r1 = s.guest->r1.u32;
+                }
+                sample.frames.reserve(kMaxFrames);
+                sample.answered = s.handle && platform::stack::Capture(s.handle, s.stackHigh, snapshot);
+                if (sample.answered)
+                {
+                    void* frames[kMaxFrames];
+                    int count = platform::stack::Walk(snapshot.context, frames, kMaxFrames, &snapshot);
+                    if (count == 0)
+                    {
+                        // DbgHelp unusable (it didn't start, or failed in an
+                        // earlier walk) or busy: the unwind tables alone.
+                        count = platform::stack::Unwind(snapshot, frames, kMaxFrames);
+                        s_unwound++;
+                    }
+                    sample.pc = reinterpret_cast<void*>(snapshot.context.Rip);
+                    sample.frames.assign(frames, frames + count);
+                }
+                samples.push_back(std::move(sample));
+            }
+            return samples;
+#else
             static std::once_flag installed;
             std::call_once(installed, [] {
                 struct sigaction sa{};
@@ -181,6 +273,7 @@ namespace report
                 samples.push_back(std::move(sample));
             }
             return samples;
+#endif
         }
 
         // Innermost first: where the signal found the thread, then its
@@ -219,6 +312,19 @@ namespace report
         // read nothing for 4.6 s before the report); the boot's load read
         // 35 MB in 2 s.
         constexpr uint64_t kLoadingBytes = 4ull << 20;
+        // Windows: a pipeline compile finished in the last 10 s counts as
+        // loading too. Intel's driver (UHD 620, 101.2135) takes 400-800 ms a
+        // pipeline, and the first race's ~120 held one frame for 19.5-21.6 s
+        // on a cold cache with nothing read meanwhile: a hang report for a
+        // game that was only compiling (the ThinkPad, 2026-10-06). A real
+        // deadlock stops the compiles too (they come from the command
+        // processor's draws), so it is reported 10 s after the last one at
+        // most. Elsewhere as before for now: compiles there take 20-80 ms.
+#ifdef _WIN32
+        constexpr bool kCompilesAreLoading = true;
+#else
+        constexpr bool kCompilesAreLoading = false;
+#endif
 
         void WriteHangReport(const std::string& reason, double sinceFrame, double sinceRead, int episode)
         {
@@ -238,6 +344,14 @@ namespace report
             // The game's sound runs on the render callback, and some of its
             // waits on its sound commands (GitHub issue #20).
             text += "\nAudio:\n" + apu::DescribeState();
+#ifdef _WIN32
+            // Where the stacks' names come from (SpeedBreaker.pdb, or why
+            // not), as in crash reports.
+            text += std::format("\nNames: {}", platform::stack::SymbolsState());
+            if (s_unwound)
+                text += std::format("; {} of the stacks below walked from the unwind tables, without DbgHelp", s_unwound);
+            text += "\n";
+#endif
             text += "\nThreads, where each one is (host stacks, innermost first; recompiled guest functions are "
                     "sub_<guest address>):\n";
             for (const ThreadSample& s : samples)
@@ -245,7 +359,11 @@ namespace report
                 text += "  " + s.name;
                 if (s.hasGuest)
                     text += std::format("  (guest lr={:08X} r1={:08X})", s.lr, s.r1);
+#ifdef _WIN32
+                text += s.answered ? ":\n" : ": couldn't be suspended to read its stack\n";
+#else
                 text += s.answered ? ":\n" : ": didn't answer (blocked in the kernel?)\n";
+#endif
                 text += FormatStack(s.pc, s.frames);
             }
             text += "\nThe log's last lines:\n" + RecentOutput(400);
@@ -263,11 +381,22 @@ namespace report
             }
             detail::KeepNewest(dir.string(), "hang-", ".txt", 5);
             if (saved)
-                fprintf(stderr, "[hang] %s. Hang report: %s\n", reason.c_str(), path.c_str());
+                fprintf(stderr, "[hang] %s. Hang report: %s\n", reason.c_str(), path.string().c_str());
             else
-                fprintf(stderr, "[hang] %s. Couldn't write the hang report to %s\n", reason.c_str(), path.c_str());
+                fprintf(stderr, "[hang] %s. Couldn't write the hang report to %s\n", reason.c_str(), path.string().c_str());
             ui::Toast(std::format("The game seems to have stopped. A hang report was saved; to send it: {}.", detail::kSaveBugReportHint), 20.0);
         }
+
+#ifdef _WIN32
+        // The crash report's unhandled-exception filter, put back if a DLL
+        // loaded since (a driver, an overlay) installed its own over it.
+        void KeepCrashFilter()
+        {
+            static std::atomic<int> replaced{ 0 };
+            if (!platform::KeepCrashFilter() && replaced.fetch_add(1) < 3)
+                fprintf(stderr, "[crash] something replaced the crash report's exception filter; it is back\n");
+        }
+#endif
 
         void Watchdog(Thresholds limits)
         {
@@ -280,15 +409,23 @@ namespace report
             auto lastTick = now, lastFrameAt = now, lastFrameSeen = now, lastReadAt = now, resetAt = now;
             uint64_t lastFrames = gpu::FrameCount(), lastBytes = g_fileBytesRead.load(std::memory_order_relaxed);
             uint64_t gapBytes = lastBytes;  // read since the last frame
+            uint64_t lastPipelines = g_pipelinesBuilt.load(std::memory_order_relaxed);
+            uint64_t gapPipelines = lastPipelines;  // compiled since the last frame
             uint64_t lastEpoch = guesttime::Epoch();  // suspensions so far
-            // Bytes read per tick over the last 10 s (20 ticks).
-            uint64_t window[20] = {};
+            // Bytes read (and pipelines compiled) per tick over the last 10 s
+            // (20 ticks).
+            uint64_t window[20] = {}, pipelineWindow[20] = {};
             size_t windowPos = 0;
             bool episode = false, pausedInGap = false;
             int episodes = 0;
             while (true)
             {
                 std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                if (g_endingWithMessage.load(std::memory_order_relaxed))
+                    continue;  // (the game is ending with a message: no hang to report)
+#ifdef _WIN32
+                KeepCrashFilter();
+#endif
                 now = clock::now();
                 // Stopped (a debugger, SIGSTOP) or the machine slept: start over.
                 if (seconds(now - lastTick) > 5.0)
@@ -299,13 +436,19 @@ namespace report
                 lastTick = now;
 
                 uint64_t bytes = g_fileBytesRead.load(std::memory_order_relaxed);
+                uint64_t pipelines = g_pipelinesBuilt.load(std::memory_order_relaxed);
+                pipelineWindow[windowPos % 20] = pipelines - lastPipelines;
                 window[windowPos++ % 20] = bytes - lastBytes;
                 if (bytes != lastBytes)
                     lastReadAt = now;
                 lastBytes = bytes;
-                uint64_t recentBytes = 0;
+                lastPipelines = pipelines;
+                uint64_t recentBytes = 0, recentPipelines = 0;
                 for (uint64_t b : window)
                     recentBytes += b;
+                for (uint64_t n : pipelineWindow)
+                    recentPipelines += n;
+                const bool compiling = kCompilesAreLoading && recentPipelines > 0;
 
                 const bool visible = video::WindowVisible();
                 // Suspended now, or at any time since the last tick however
@@ -321,6 +464,9 @@ namespace report
                     double gap = seconds(now - lastFrameAt);
                     if (episode)
                         fprintf(stderr, "[watchdog] frames again, %.1f s after the last one\n", seconds(now - lastFrameSeen));
+                    else if (gap >= 2.0 && !pausedInGap && kCompilesAreLoading)
+                        fprintf(stderr, "[watchdog] %.1f s without a new frame (%.1f MB read, %llu pipelines compiled meanwhile)\n",
+                            gap, double(bytes - gapBytes) / (1 << 20), (unsigned long long)(pipelines - gapPipelines));
                     else if (gap >= 2.0 && !pausedInGap)
                         fprintf(stderr, "[watchdog] %.1f s without a new frame (%.1f MB read meanwhile)\n", gap,
                             double(bytes - gapBytes) / (1 << 20));
@@ -329,6 +475,7 @@ namespace report
                     lastFrames = frames;
                     lastFrameAt = lastFrameSeen = now;
                     gapBytes = bytes;
+                    gapPipelines = pipelines;
                 }
                 if (paused)
                 {
@@ -357,7 +504,7 @@ namespace report
                 std::string reason;
                 if (limits.cpWait > 0 && waited >= limits.cpWait)
                     reason = std::format("the command processor has waited {:.0f} s in one WAIT_REG_MEM", waited);
-                else if (limits.noFrame > 0 && noFrame >= limits.noFrame && recentBytes < kLoadingBytes)
+                else if (limits.noFrame > 0 && noFrame >= limits.noFrame && recentBytes < kLoadingBytes && !compiling)
                     reason = std::format("no new frame for {:.0f} s, and nothing is loading", noFrame);
                 if (reason.empty())
                     continue;
@@ -497,7 +644,22 @@ namespace report
         {
             // A thread with a guest context but no name of its own (the vsync thread).
             char name[32] = "";
+#ifdef _WIN32
+            // Its description (SetThreadDescription), if anything gave it one.
+            using GetThreadDescriptionFn = HRESULT(WINAPI*)(HANDLE, PWSTR*);
+            static const auto getDescription = reinterpret_cast<GetThreadDescriptionFn>(
+                GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "GetThreadDescription"));
+            PWSTR description = nullptr;
+            if (getDescription && SUCCEEDED(getDescription(GetCurrentThread(), &description)) && description)
+            {
+                if (WideCharToMultiByte(CP_UTF8, 0, description, -1, name, int(sizeof(name)), nullptr, nullptr) == 0)
+                    name[0] = 0;  // (longer than a slot's name: none)
+                name[sizeof(name) - 1] = 0;
+                LocalFree(description);
+            }
+#else
             pthread_getname_np(pthread_self(), name, sizeof(name));
+#endif
             snprintf(t_name, sizeof(t_name), "%s", name[0] ? name : "unnamed");
             RegisterLocked(t_name);
         }
@@ -509,6 +671,9 @@ namespace report
     {
         if (s_started.exchange(true))
             return;
+#ifdef _WIN32
+        KeepCrashFilter();  // the window and the GPU's driver are up by now
+#endif
         ArmTestSwitches();
         Thresholds limits;
         if (const char* v = std::getenv("NFSMW_HANG_SECS"))

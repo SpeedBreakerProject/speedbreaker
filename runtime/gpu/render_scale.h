@@ -50,6 +50,28 @@
 // else it is used at 1x; a resolve needs an even origin, which the 8-pixel
 // alignment gives (else it isn't kept at host resolution, logged once).
 //
+// Native rows and columns (GitHub #34): on a screen of another shape the
+// axis a Vert+ or Hor+ picture extends gets the host pixels the screen has
+// there, so a Steam Deck's 1280x800 renders 1280x800 at 1x, not 720 rows
+// stretched: 800 rows for 720 is 10/9, and a den above 2 (9; 3 for 5/3 at
+// 1.5x; 720 for a MacBook's 803 rows) is a texel axis. Its edges are where
+// the rasteriser puts them for any ratio: guest edge g is host edge
+// ceil(g num / den - 1/2), the first host pixel whose centre lies at or past
+// it (sbHostEdge; the same floor(g num / den) for a den of 1 or 2), and guest
+// pixel g owns the host pixels whose centres lie inside it, one or two at
+// 10/9. A texel axis has no blocks: each texel keeps ceil(num / den) samples
+// along it (sbStride; 2 at 10/9, 8 KB a 4 KB page), the ones it owns first,
+// the rest repeating its last (a reader that disagrees about where a texel's
+// samples end still reads that texel, never another's or garbage). Which
+// texel owns which host pixels depends on the texel's coordinate, not on
+// bits of its word, so a resolve counts it in the source target (the
+// screen's coordinates in untiled rendering: tile strips at rows 256 and 512
+// are 284 and 569 host rows down at 10/9), and so does a texture or the
+// front buffer reading the surface from its own first texel: the scene's
+// strips, its side-by-side halves and the right-half texture read back
+// sample for sample (render_scale_test). Any surface size or resolve origin
+// works (Exact is always true there).
+//
 // The block arithmetic is written once, in tokens that are both GLSL and
 // C++ (SB_SCALE_FUNCTIONS, as gpu/depth24_glsl.h does for its pack): the shaders
 // get it as text (GLSL_SCALE_CODE, spliced into renderer.cpp's resolve,
@@ -65,14 +87,24 @@
 // uint arithmetic only (wrapping 32-bit in both languages); `1u` literals,
 // min/max of two uints, if, ?:. Every function's name starts "sb".
 #define SB_SCALE_FUNCTIONS                                                                                       \
-    /* Host edge of guest edge g: floor(g num / den). */                                                         \
-    uint sbHostEdge(uint g, uint num, uint den) { return g * num / den; }                                        \
-    /* The host pixels covering guest pixels [0, g): ceil(g num / den), a target's or image's size. */           \
+    /* Host edge of guest edge g: floor(g num / den); for a den above 2 (a texel axis) the rasteriser's, */       \
+    /* ceil(g num / den - 1/2), the same for a den of 1 or 2. */                                                 \
+    uint sbHostEdge(uint g, uint num, uint den)                                                                  \
+    {                                                                                                            \
+        return den > 2u ? (2u * g * num + den - 1u) / (2u * den) : g * num / den;                                \
+    }                                                                                                            \
+    /* The host pixels touching guest pixels [0, g): ceil(g num / den) (a box filter's reach). */                \
     uint sbHostSize(uint g, uint num, uint den) { return (g * num + den - 1u) / den; }                            \
-    /* The guest edge whose host edge is h (h from sbHostEdge): ceil(h den / num). */                             \
-    uint sbGuestEdge(uint h, uint num, uint den) { return (h * den + num - 1u) / num; }                           \
+    /* The guest edge whose host edge is h (h from sbHostEdge). */                                               \
+    uint sbGuestEdge(uint h, uint num, uint den)                                                                 \
+    {                                                                                                            \
+        return den > 2u ? (2u * h * den + 2u * num - den) / (2u * num) : (h * den + num - 1u) / num;             \
+    }                                                                                                            \
     /* The guest pixel owning host pixel h: the g with HostEdge(g) <= h < HostEdge(g + 1). */                     \
-    uint sbOwner(uint h, uint num, uint den) { return ((h + 1u) * den + num - 1u) / num - 1u; }                   \
+    uint sbOwner(uint h, uint num, uint den)                                                                     \
+    {                                                                                                            \
+        return den > 2u ? ((2u * h + 1u) * den) / (2u * num) : ((h + 1u) * den + num - 1u) / num - 1u;            \
+    }                                                                                                            \
     /* How much of host pixel h lies in guest pixel g, in 1/den of a pixel (num for the whole guest pixel). */   \
     uint sbOverlap(uint g, uint h, uint num, uint den)                                                           \
     {                                                                                                            \
@@ -82,6 +114,10 @@
     }                                                                                                            \
     /* The one host pixel a depth resolve reads for guest pixel g. */                                            \
     uint sbCenterHost(uint g, uint num, uint den) { return den == 1u ? g * num : ((2u * g + 1u) * num) / (2u * den); } \
+    /* A block's samples along an axis: num, or on a texel axis ceil(num / den), a texel's most. */              \
+    uint sbStride(uint num, uint den) { return den > 2u ? (num + den - 1u) / den : num; }                         \
+    /* A block's texels along an axis: den, or 1 on a texel axis. */                                             \
+    uint sbLayoutDen(uint den) { return den > 2u ? 1u : den; }                                                   \
     /* A word of a 4 KB page of 32-bit tiled texels (0..1023): its block (the sub-texel bits out). */             \
     uint sbBlockIndex(uint w, uint denX, uint denY)                                                              \
     {                                                                                                            \
@@ -104,11 +140,43 @@
     uint sbSubX(uint w, uint denX) { return denX == 2u ? (w & 1u) : 0u; }                                        \
     uint sbSubY(uint w, uint denY) { return denY == 2u ? ((w >> 2u) & 1u) : 0u; }                                \
     /* A 4 KB page's samples: its blocks' x theirs. */                                                           \
-    uint sbSlotWords(uint numX, uint numY, uint denX, uint denY) { return 1024u / (denX * denY) * (numX * numY); } \
-    /* Host sample (i, j) of word w's block, i < numX and j < numY from the block's corner: its word in the slot. */ \
+    uint sbSlotWords(uint numX, uint numY, uint denX, uint denY)                                                 \
+    {                                                                                                            \
+        return 1024u / (sbLayoutDen(denX) * sbLayoutDen(denY)) * (sbStride(numX, denX) * sbStride(numY, denY));  \
+    }                                                                                                            \
+    /* Host sample (i, j) of word w's block, i and j from the block's corner (below its strides): its word in the slot. */ \
     uint sbSampleWord(uint w, uint i, uint j, uint numX, uint numY, uint denX, uint denY)                        \
     {                                                                                                            \
-        return sbBlockIndex(w, denX, denY) * (numX * numY) + j * numX + i;                                       \
+        return sbBlockIndex(w, denX, denY) * (sbStride(numX, denX) * sbStride(numY, denY)) + j * sbStride(numX, denX) + i; \
+    }                                                                                                            \
+    /* A reader's host pixel h: the first texel of the block holding it (h / num x den: the block's corner), */  \
+    /* or on a texel axis its owner. */                                                                          \
+    uint sbBlockTexel(uint h, uint num, uint den) { return den > 2u ? sbOwner(h, num, den) : h / num * den; }     \
+    /* ... and its sample there, from the block's corner. */                                                     \
+    uint sbBlockSample(uint h, uint num, uint den)                                                               \
+    {                                                                                                            \
+        return den > 2u ? h - sbHostEdge(sbOwner(h, num, den), num, den) : h - h / num * num;                    \
+    }                                                                                                            \
+    /* A writer's samples [lo, hi) of the texel at sub in its block: the host pixels it owns, from the */        \
+    /* block's corner; on a texel axis all its stride (past the ones it owns, its last again). */                \
+    uint sbSampleLo(uint sub, uint num, uint den) { return den > 2u ? 0u : sbHostEdge(sub, num, den); }          \
+    uint sbSampleHi(uint sub, uint num, uint den) { return den > 2u ? sbStride(num, den) : sbHostEdge(sub + 1u, num, den); } \
+    /* Where sample i (from sbSampleLo) of guest pixel g (sub in its block) is in a target counted from guest */ \
+    /* pixel 0: on a texel axis its i-th host pixel, or its last one past them. */                               \
+    uint sbSampleHost(uint g, uint sub, uint i, uint num, uint den)                                              \
+    {                                                                                                            \
+        if (den > 2u)                                                                                            \
+            return sbHostEdge(g, num, den) + min(i, sbHostEdge(g + 1u, num, den) - sbHostEdge(g, num, den) - 1u); \
+        return sbHostEdge(g - sub, num, den) + i;                                                                \
+    }                                                                                                            \
+    /* A writer's sample i (from sbSampleLo) of a reader's texel t (sub in its block, t counted from the */      \
+    /* reader's own first texel): the reader's host pixel the untile fills with it, or ~0u for a texel */        \
+    /* axis's repeated padding past the host pixels t owns (a resolve storing straight into a texture). */       \
+    uint sbReaderHost(uint t, uint sub, uint i, uint num, uint den)                                              \
+    {                                                                                                            \
+        if (den > 2u)                                                                                            \
+            return i < sbHostEdge(t + 1u, num, den) - sbHostEdge(t, num, den) ? sbHostEdge(t, num, den) + i : ~0u; \
+        return sbHostEdge(t - sub, num, den) + i;                                                                \
     }
 
 #define SB_SCALE_STRINGIFY_(...) #__VA_ARGS__
@@ -129,19 +197,27 @@ namespace gpu
         SB_SCALE_FUNCTIONS
     };
 
-    // One axis: num host pixels for every den guest pixels (den 1 or 2).
+    // One axis: num host pixels for every den guest pixels, reduced (den 1
+    // or 2: blocks; above 2: a texel axis, num / den above 1).
     struct AxisScale
     {
         uint32_t num = 1, den = 1;
 
         bool operator==(const AxisScale&) const = default;
         bool IsOne() const { return num == den; }
+        // No blocks: each texel's samples apart (a den above 2).
+        bool Texel() const { return den > 2; }
         float Value() const { return float(num) / float(den); }
         uint32_t Edge(uint32_t g) const { return ScaleGlsl{}.sbHostEdge(g, num, den); }
-        uint32_t Size(uint32_t g) const { return ScaleGlsl{}.sbHostSize(g, num, den); }
+        // The host pixels of g guest ones (a target's or image's size): on a
+        // texel axis those the g own, so every host pixel has an owner.
+        uint32_t Size(uint32_t g) const { return Texel() ? Edge(g) : ScaleGlsl{}.sbHostSize(g, num, den); }
         uint32_t GuestEdge(uint32_t h) const { return ScaleGlsl{}.sbGuestEdge(h, num, den); }
-        // Guest length g covers whole host pixels (every block whole).
-        bool Exact(uint32_t g) const { return g % den == 0; }
+        // A block's samples along the axis (a texel's most on a texel axis).
+        uint32_t Stride() const { return ScaleGlsl{}.sbStride(num, den); }
+        // Guest length g covers whole host pixels (every block whole; any
+        // length on a texel axis).
+        bool Exact(uint32_t g) const { return Texel() || g % den == 0; }
         // A guest coordinate clamped to 0 first (rectangles' signed edges).
         int32_t EdgeAt(int32_t g) const { return g <= 0 ? 0 : int32_t(Edge(uint32_t(g))); }
     };
@@ -152,8 +228,9 @@ namespace gpu
 
         bool operator==(const RenderScale&) const = default;
         bool IsOne() const { return x.IsOne() && y.IsOne(); }
-        // Host samples a block of den.x x den.y guest texels has.
-        uint32_t SamplesPerBlock() const { return x.num * y.num; }
+        // Host samples a block of den.x x den.y guest texels has (one texel
+        // on a texel axis, its most).
+        uint32_t SamplesPerBlock() const { return x.Stride() * y.Stride(); }
         // A 4 KB guest page's host samples (words) in the scaled memory.
         uint32_t SlotWords() const { return ScaleGlsl{}.sbSlotWords(x.num, y.num, x.den, y.den); }
         // A width x height surface maps to whole host pixels and blocks.
@@ -174,6 +251,20 @@ namespace gpu
         return { cap(internal.x), cap(internal.y) };
     }
 
+    // The scaled resolve memory's default size in MB (renderer.cpp's
+    // EnsureScaledMemory): 512 on a discrete GPU; on an integrated one, whose
+    // VRAM is the system's (a Steam Deck's 1 GB carve-out), room for 16,384
+    // guest pages at `s` (64 MB of guest memory; a career start and its
+    // first race resolve ~4,200 pages at every scale), at most 512: 128 MB at
+    // a Steam Deck's native rows (1x10/9), 256 at 2x.
+    inline uint64_t ScaledPoolMegabytes(const RenderScale& s, bool discrete)
+    {
+        constexpr uint64_t kIntegratedSlots = 16384;
+        if (discrete)
+            return 512;
+        return std::min<uint64_t>(512, (kIntegratedSlots * 4ull * s.SlotWords() + (1u << 20) - 1) >> 20);
+    }
+
     // An axis from a number of half steps (2: 1x, 3: 1.5x, 4: 2x, 6: 3x),
     // reduced (4/2 is 2/1).
     inline AxisScale AxisFromHalves(uint32_t halves)
@@ -182,17 +273,39 @@ namespace gpu
         return halves % 2 == 0 ? AxisScale{ halves / 2, 1 } : AxisScale{ halves, 2 };
     }
 
-    // "1", "1.5", "2" (the log's and settings' spelling).
+    // num / den with no common factor.
+    inline AxisScale Reduced(uint32_t num, uint32_t den)
+    {
+        uint32_t a = num, b = den;
+        while (b)
+        {
+            const uint32_t t = a % b;
+            a = b;
+            b = t;
+        }
+        return a > 1 ? AxisScale{ num / a, den / a } : AxisScale{ num, den };
+    }
+
+    // The axis that gives `guest` pixels `host` host pixels exactly (720
+    // rows for 800: 10/9), reduced; 1x for a host below the guest.
+    inline AxisScale AxisFor(uint32_t host, uint32_t guest)
+    {
+        if (guest == 0 || host <= guest)
+            return {};
+        return Reduced(host, guest);
+    }
+
+    // "1", "1.5", "2", "1.111" (10/9) (the log's and settings' spelling).
     inline std::string AxisName(const AxisScale& a)
     {
         if (a.den == 1)
             return std::to_string(a.num);
         char text[16];
-        snprintf(text, sizeof(text), "%g", double(a.num) / double(a.den));
+        snprintf(text, sizeof(text), a.Texel() ? "%.4g" : "%g", double(a.num) / double(a.den));
         return text;
     }
 
-    // "1x1", "1.5x1.5", "3x2": as the log has always named the scale.
+    // "1x1", "1.5x1.5", "3x2", "1x1.111": as the log has always named the scale.
     inline std::string ScaleName(const RenderScale& s)
     {
         return AxisName(s.x) + "x" + AxisName(s.y);
@@ -216,29 +329,53 @@ namespace gpu
         return true;
     }
 
+    // One axis of NFSMW_RENDER_SCALE from `text`, `end` past it: a number
+    // (AxisFromNumber's), or a ratio <num>/<den> from 1 to 4 ("10/9": a
+    // Steam Deck's native rows at 1x), reduced.
+    inline bool ParseAxis(const char* text, const char*& end, AxisScale& out)
+    {
+        char* stop = nullptr;
+        const double v = std::strtod(text, &stop);
+        if (stop == text)
+            return false;
+        if (*stop != '/')
+        {
+            end = stop;
+            return AxisFromNumber(v, out);
+        }
+        const char* second = stop + 1;
+        const unsigned long den = std::strtoul(second, &stop, 10);
+        const double num = v;
+        if (stop == second || den == 0 || den > 4096 || num != std::floor(num) || num < double(den) || num > 4.0 * double(den))
+            return false;
+        const AxisScale r = Reduced(uint32_t(num), uint32_t(den));
+        if (r.den == 2 && r.num != 3)
+            return false;  // 2.5x, 3.5x: not offered (as AxisFromNumber)
+        end = stop;
+        out = r;
+        return true;
+    }
+
     // NFSMW_RENDER_SCALE: "<s>" or "<sx>x<sy>", each 1, 1.5, 2, 3 or 4
-    // ("2", "1.5", "3x2", "1.5x1"); whole numbers above 4 are clamped to 4,
-    // as before. False for anything else (the caller logs it).
+    // ("2", "1.5", "3x2", "1.5x1") or a ratio ("1x10/9"); whole numbers above
+    // 4 are clamped to 4, as before. False for anything else (the caller
+    // logs it).
     inline bool ParseRenderScale(const char* text, RenderScale& out)
     {
         if (!text || !*text)
             return false;
-        char* end = nullptr;
-        const double a = std::strtod(text, &end);
-        if (end == text)
+        const char* end = nullptr;
+        RenderScale s;
+        if (!ParseAxis(text, end, s.x))
             return false;
-        double b = a;
+        s.y = s.x;
         if (*end == 'x' || *end == 'X')
         {
             const char* second = end + 1;
-            b = std::strtod(second, &end);
-            if (end == second)
+            if (!ParseAxis(second, end, s.y))
                 return false;
         }
         if (*end != '\0')
-            return false;
-        RenderScale s;
-        if (!AxisFromNumber(a, s.x) || !AxisFromNumber(b, s.y))
             return false;
         out = s;
         return true;

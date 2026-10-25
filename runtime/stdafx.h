@@ -21,7 +21,7 @@
 #include <string>
 #include <vector>
 
-#include <sys/mman.h>
+#include <platform/os.h>  // the OS headers: POSIX, or <windows.h> and a few POSIX names
 #ifdef __APPLE__
 #include <TargetConditionals.h>  // TARGET_OS_IOS: __APPLE__ alone means macOS or iOS
 #endif

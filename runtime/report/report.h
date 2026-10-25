@@ -18,6 +18,8 @@
 //   - Crash reports (crash.cpp): the crash handler writes
 //     logs/crash-<session>.txt with async-signal-safe calls only; what it
 //     needs is prepared at startup. The next launch tells the player once.
+//     (Windows: from the unhandled-exception filter, with names from
+//     SpeedBreaker.pdb through DbgHelp: platform/stack.h.)
 //   - Hang reports (watchdog.cpp): a watchdog notices the game has stopped
 //     (no new frame, or the command processor in one WAIT_REG_MEM, for far
 //     longer than any loading screen or movie) and writes
@@ -26,14 +28,18 @@
 //   - Bug reports (bug_report.cpp): one .zip on the Desktop (else the user
 //     data folder; on iOS the Documents folder the Files app shows) with all
 //     of that, settings.toml and a screenshot. Home-folder paths in it read
-//     "~".
+//     "~" (Windows: the user's folder reads "%USERPROFILE%").
 #pragma once
 #include <atomic>
 #include <cstdint>
 #include <filesystem>
 #include <string>
 
+#ifdef _WIN32
+struct _EXCEPTION_POINTERS;
+#else
 #include <signal.h>
+#endif
 
 struct PPCContext;
 
@@ -75,8 +81,15 @@ namespace report
     const char* VersionString();
     // One line: the version and id, when it was built, compiler, platform,
     // build type: "v0.1.0 (fae4bd1), built 2026-10-07 21:30 UTC, clang
-    // 21.1.0, macOS arm64, Release" (the log's first line).
+    // 21.1.0, macOS arm64, Release" (the log's first line). A labelled
+    // build's starts with its ReleaseName instead of the version and id.
     const char* BuildString();
+    // A labelled build (SB_BUILD_LABEL, runtime/CMakeLists.txt): "v0.1.3
+    // Windows beta 2026-10-11 (59d1ef3)", and the label and commit for file
+    // names, which carry the version already: "windows-beta-2026-10-11-59d1ef3".
+    // "" for every other build.
+    const char* ReleaseName();
+    const char* ReleaseFileTag();
 
     // --- System summary (system_info.cpp) ---
 
@@ -97,7 +110,14 @@ namespace report
     void PrepareCrashReports();
     // The crash handler (a signal handler; async-signal-safe): logs the
     // crash and writes the report. The caller exits afterwards.
+#ifdef _WIN32
+    // Windows: from the unhandled-exception filter or SIGABRT's handler
+    // (platform/win32/fault.cpp), with the exception and its registers;
+    // nothing allocates or takes the C runtime's locks but DbgHelp's lookups.
+    void WriteCrashReport(_EXCEPTION_POINTERS* info);
+#else
     void WriteCrashReport(int sig, siginfo_t* info, void* context);
+#endif
     // The session is ending cleanly (the quit path, any return from main()):
     // its crash marker is removed (crash_marker.h), so one the next launch
     // finds is a session that didn't. Last, just before the exit: a crash
@@ -121,6 +141,7 @@ namespace report
     //   NFSMW_TEST_CRASH=<s>[:abort]  crash in VdSwap (the game's render
     //                                 thread) <s> seconds after launch;
     //                                 ":abort" aborts after a message instead
+    //                                 (Windows also ":overflow": a stack overflow)
     //   NFSMW_TEST_HANG=<s>[+<d>]     from <s> seconds, the command processor's
     //                                 waits never pass (for <d> seconds, or for good)
     //   NFSMW_TEST_SUSPEND=<s>+<d>[b][,...]
@@ -138,8 +159,13 @@ namespace report
 
     // Fed by hot paths (relaxed; costs nothing that shows).
     inline std::atomic<uint64_t> g_fileBytesRead{ 0 };   // NtReadFile
+    inline std::atomic<uint64_t> g_pipelinesBuilt{ 0 };  // pipeline compiles finished (renderer.cpp)
     inline std::atomic<bool> g_testCrash{ false };       // VdSwap calls TestCrash()
     inline std::atomic<bool> g_testHang{ false };        // WAIT_REG_MEM never passes
+    // A startup failure ends the game with a message (Windows: the renderer
+    // finding no memory the driver accepts): while the message waits for the
+    // player no frames come, and the watchdog must not call that a hang.
+    inline std::atomic<bool> g_endingWithMessage{ false };
     [[noreturn]] void TestCrash();
 
     // --- Bug reports (bug_report.cpp) ---
@@ -159,5 +185,7 @@ namespace report
     std::string BugReportMessage();
 
     // HOME (and its real path) as "~", for text that leaves the machine.
+    // Windows: the user's profile folder (USERPROFILE, the shell's, and its
+    // 8.3 name) as "%USERPROFILE%", in either case and with either slash.
     std::string ScrubHome(std::string text);
 }

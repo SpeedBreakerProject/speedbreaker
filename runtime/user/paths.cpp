@@ -2,6 +2,7 @@
 #include <stdafx.h>
 #include "paths.h"
 
+#ifndef _WIN32
 namespace
 {
     namespace fs = std::filesystem;
@@ -35,10 +36,15 @@ namespace
             linkEc ? std::format("; no link at the old name ({})", linkEc.message()) : ", the old name now a link to it");
     }
 }
+#endif
 
 std::string MigrateUserFolders()
 {
+#ifdef _WIN32
+    return {};  // no nfsmw-recomp build ever ran on Windows: nothing to rename
+#else
     if (portable::Current().Active())
         return {};  // the home folder's data isn't SpeedBreaker's in portable mode: leave it as it is
     return MigrateFolder(UserDataBase(), DataFolderName()) + MigrateFolder(CacheBase(), CacheFolderName());
+#endif
 }

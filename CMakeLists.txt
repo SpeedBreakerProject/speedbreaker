@@ -5,6 +5,9 @@
 #         -DCMAKE_CXX_COMPILER=/opt/homebrew/opt/llvm/bin/clang++
 #   ninja -C build/main -j6
 #
+# Windows (clang-cl, lld-link, the static C runtime; see CMakePresets.json):
+#   cmake --preset windows-clang -B <build dir> -DCMAKE_PREFIX_PATH=<deps> -DFFMPEG_XMA=<deps>
+#
 # Needs ppc/ (XenonRecomp output from your own default.xex) and tools/
 # (scripts/setup_tools.sh). -DSB_TESTS=ON adds the unit tests (tests/; run
 # them with ctest from the build folder).
@@ -66,20 +69,57 @@ endif()
 # apps' versions, the SteamOS bundles' VERSION file and the release tag
 # (v<version>). CHANGELOG.md has an entry for each version (the in-game
 # "What's new" note is built from it).
-project(SpeedBreaker VERSION 0.1.8 LANGUAGES C CXX)
+project(SpeedBreaker VERSION 0.1.9 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+# clang-cl (the MSVC front end): its spellings of the flags the other
+# platforms pass GCC-style.
+if(CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
+    set(SB_MSVC_FRONTEND ON)
+else()
+    set(SB_MSVC_FRONTEND OFF)
+endif()
+
+if(WIN32)
+    if(NOT SB_MSVC_FRONTEND OR NOT CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+        message(FATAL_ERROR "Windows builds need clang-cl (the generated code is Clang-only): see CMakePresets.json")
+    endif()
+    # One self-contained exe: the static C/C++ runtime (/MT) in every
+    # configuration, which every dependency must match (lld-link refuses a
+    # mix).
+    set(CMAKE_MSVC_RUNTIME_LIBRARY MultiThreaded)
+    # xbox.h includes <windows.h> in every translation unit.
+    add_compile_definitions(NOMINMAX WIN32_LEAN_AND_MEAN _CRT_SECURE_NO_WARNINGS _CRT_NONSTDC_NO_WARNINGS)
+    # C++ exceptions with /EHs, not CMake's /EHsc: the c lets the compiler
+    # assume extern "C" functions never throw, and every recompiled function
+    # is extern "C" (PPC_FUNC_IMPL) with GuestThreadExit thrown through it
+    # (ExTerminateThread). Under /EHsc that throw ends in std::terminate.
+    string(REPLACE "/EHsc" "/EHs" CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS}")
+    if(NOT CMAKE_CXX_FLAGS MATCHES "/EHs")
+        string(APPEND CMAKE_CXX_FLAGS " /EHs")
+    endif()
+endif()
 
 # Binaries name their sources from the repository root (assert messages,
 # debug information), never by the folders they were built in: a published
 # build carries no one's home folder (a build folder inside the checkout
 # reads ./build/...). The real path too, for a checkout reached through a
 # symlink; both map to the same name, so their order doesn't matter.
+# clang-cl takes the option through /clang:, and only C and C++ get it there
+# (the resource compiler, platform/win32/speedbreaker.rc, doesn't know it).
 file(REAL_PATH "${CMAKE_SOURCE_DIR}" SB_SOURCE_REAL)
-add_compile_options("-ffile-prefix-map=${CMAKE_SOURCE_DIR}=.")
-if(NOT SB_SOURCE_REAL STREQUAL CMAKE_SOURCE_DIR)
-    add_compile_options("-ffile-prefix-map=${SB_SOURCE_REAL}=.")
+if(SB_MSVC_FRONTEND)
+    add_compile_options("$<$<COMPILE_LANGUAGE:C,CXX>:/clang:-ffile-prefix-map=${CMAKE_SOURCE_DIR}=.>")
+    if(NOT SB_SOURCE_REAL STREQUAL CMAKE_SOURCE_DIR)
+        add_compile_options("$<$<COMPILE_LANGUAGE:C,CXX>:/clang:-ffile-prefix-map=${SB_SOURCE_REAL}=.>")
+    endif()
+else()
+    add_compile_options("-ffile-prefix-map=${CMAKE_SOURCE_DIR}=.")
+    if(NOT SB_SOURCE_REAL STREQUAL CMAKE_SOURCE_DIR)
+        add_compile_options("-ffile-prefix-map=${SB_SOURCE_REAL}=.")
+    endif()
 endif()
 
 # macOS: a call to an API newer than the deployment target is an error unless

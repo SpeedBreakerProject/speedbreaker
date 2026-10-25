@@ -2,6 +2,9 @@
 // GPL-3.0-or-later. Modified for SpeedBreaker.
 #include "../stdafx.h"
 #include "memory.h"
+#ifdef _WIN32
+#include <platform/memory.h>
+#endif
 
 #ifndef _WIN32
 #include <cerrno>
@@ -97,16 +100,13 @@ bool Memory::MapPhysicalMirrors()
 Memory::Memory()
 {
 #ifdef _WIN32
-    base = (uint8_t*)VirtualAlloc((void*)0x100000000ull, PPC_MEMORY_SIZE, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-
-    if (base == nullptr)
-        base = (uint8_t*)VirtualAlloc(nullptr, PPC_MEMORY_SIZE, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-
+    // SpeedBreaker: the same layout through placeholders: the physical
+    // windows alias one section, the rest is private (platform/memory.h).
+    // A view must fill its placeholder, so the 0xE window is unshifted.
+    base = platform::MapGuestSpace();
     if (base == nullptr)
         return;
-
-    DWORD oldProtect;
-    VirtualProtect(base, 4096, PAGE_NOACCESS, &oldProtect);
+    eWindowShift = 0;
 #else
     // NFSMW_TEST_RESERVE_FAIL=1|2: fail the reservation or the mirrors as an
     // iOS without room would (memory_status.h), to see the startup message

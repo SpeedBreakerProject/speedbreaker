@@ -14,6 +14,12 @@ from you.
   Resolution to **Native**.
 - **From source:** the README's "Building from source", or
   [scripts/steamos/README.md](../scripts/steamos/README.md) for SteamOS.
+- **Windows (a beta build for testers):** unzip the kit somewhere (not
+  inside the zip) and run `SpeedBreaker.exe`; its `README-TESTER.txt` has
+  the rest. It is made with the `windows-clang-tester` CMake preset (no
+  console window: everything goes to the session log; labelled "Windows
+  beta") and packed with `scripts/windows/make_zip.py`, which checks that no
+  game file, user name or user-folder path goes in.
 
 ## The menu
 
@@ -31,10 +37,13 @@ from you.
 1. Open the menu, go to the **Advanced** page (LB/RB, or Q/E) and choose
    **Save Bug Report** (A, or Enter).
 2. A notice at the bottom of the screen says where the file went:
-   `speedbreaker-bug-report-v<version>-<date>_<time>.zip` on your **Desktop**
-   (on SteamOS, `/home/deck/Desktop`: switch to Desktop Mode to pick it up;
-   on iPhone and iPad, the Files app's SpeedBreaker folder), or, if there is
-   no Desktop, in the game's data folder (below).
+   `speedbreaker-bug-report-v<version>-<date>_<time>.zip` (a Windows beta adds
+   its label: `...-windows-beta-<build date>-<commit>.zip`) on your
+   **Desktop** (on SteamOS, `/home/deck/Desktop`: switch to Desktop Mode to
+   pick it up; on iPhone and iPad, the Files app's SpeedBreaker folder; on
+   Windows, the Desktop Explorer shows, OneDrive's if it backs that up), or,
+   if there is no Desktop (or it can't take the file), in the game's data
+   folder (below).
 3. Send that .zip with a few words: what you were doing, what you expected,
    what happened, and roughly how long into the session (the logs count
    seconds from launch).
@@ -54,8 +63,9 @@ close the window), launch again and save one then: the hang report is kept.
 A bug report holds the last five sessions' logs, any crash and hang
 reports, your settings.toml, a summary of the machine (OS, CPU, memory, GPU
 and driver, display, the settings in effect) and a screenshot of the last
-game frame without the menu over it. Paths in your home folder show as `~`.
-Nothing is sent anywhere by the game: you send the file.
+game frame without the menu over it. Paths in your home folder show as `~`
+(on Windows, your user folder shows as `%USERPROFILE%`). Nothing is sent
+anywhere by the game: you send the file.
 
 ## Where the logs live
 
@@ -67,13 +77,18 @@ reports:
   (`$XDG_DATA_HOME/speedbreaker/logs/` if that is set; in portable mode,
   `data/logs/` in the game's folder, next to `portable.txt`)
 - macOS: `~/Library/Application Support/SpeedBreaker/logs/`
+- Windows: `%LOCALAPPDATA%\SpeedBreaker\logs\` (paste it into Explorer's
+  address bar; in portable mode, `data\logs\` next to `SpeedBreaker.exe`
+  and `portable.txt`). Keep `SpeedBreaker.pdb` next to `SpeedBreaker.exe`:
+  crash and hang reports take the names of the game's functions from it.
 
 On SteamOS the launcher also leaves the latest session's output in
 `last-run.log`, in the game's folder (`~/Games/SpeedBreaker/` for the
 download).
 
 The first lines of every log say which build it is
-(`[build] SpeedBreaker v<version> (<commit>), built ...`, also shown at the
-bottom of Settings > Advanced), whether this version is new since the last
-run (`[version] updated from v<a> to v<b>`, or `first run`), and describe the
-machine (`[system] ...`).
+(`[build] SpeedBreaker v<version> (<commit>), built ...`, or for a Windows
+beta `[build] SpeedBreaker v<version> Windows beta <date> (<commit>): built
+...`, also shown at the bottom of Settings > Advanced), whether this version
+is new since the last run (`[version] updated from v<a> to v<b>`, or `first
+run`), and describe the machine (`[system] ...`).

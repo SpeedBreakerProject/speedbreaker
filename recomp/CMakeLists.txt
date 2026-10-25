@@ -16,14 +16,29 @@ target_include_directories(NfsmwRecompLib PUBLIC
     ${ROOT}/tools/XenonRecomp/thirdparty/simde)
 target_compile_options(NfsmwRecompLib PRIVATE
     -Wno-unused-label -Wno-unused-variable -Wno-unused-but-set-variable
-    -fno-strict-aliasing
-    # Checked indirect calls (runtime/cpu/indirect.cpp). SHELL: keeps each
-    # -include with its file (CMake drops a repeated plain -include).
-    "SHELL:-include \"${ROOT}/runtime/cpu/indirect.h\""
-    # mftb reads the game's clock, which stands still while it's suspended.
-    "SHELL:-include \"${ROOT}/runtime/cpu/guest_time.h\"")
+    -fno-strict-aliasing)
+if(SB_MSVC_FRONTEND)
+    # clang-cl has no -include: /FI, in the same order. The third, on
+    # Windows only, aligns the guest's jmp_bufs for the CRT's setjmp
+    # (runtime/platform/win32/guest_setjmp.h).
+    target_compile_options(NfsmwRecompLib PRIVATE
+        "/FI${ROOT}/runtime/cpu/indirect.h"
+        "/FI${ROOT}/runtime/cpu/guest_time.h"
+        "/FI${ROOT}/runtime/platform/win32/guest_setjmp.h")
+else()
+    target_compile_options(NfsmwRecompLib PRIVATE
+        # Checked indirect calls (runtime/cpu/indirect.cpp). SHELL: keeps each
+        # -include with its file (CMake drops a repeated plain -include).
+        "SHELL:-include \"${ROOT}/runtime/cpu/indirect.h\""
+        # mftb reads the game's clock, which stands still while it's suspended.
+        "SHELL:-include \"${ROOT}/runtime/cpu/guest_time.h\"")
+endif()
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
-    target_compile_options(NfsmwRecompLib PRIVATE -march=x86-64-v3)
+    if(SB_MSVC_FRONTEND)
+        target_compile_options(NfsmwRecompLib PRIVATE /clang:-march=x86-64-v3)
+    else()
+        target_compile_options(NfsmwRecompLib PRIVATE -march=x86-64-v3)
+    endif()
 endif()
 if(IOS)
     target_compile_options(NfsmwRecompLib PRIVATE -mcpu=apple-a15)
