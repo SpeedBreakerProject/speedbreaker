@@ -117,15 +117,24 @@ pipeline work; these are comparative diagnostics, not exclusive shader-core
 execution times. At most 2048 selected draws are timed in the frame.
 
 For interactive shadow timing, set `NFSMW_SHADOW_BENCHMARK=1` before launch.
-Press F9 to time the next frame's draws to the 1600-pitch shadow target; press
-F10 to start continuous capture and press it again to stop. Results are logged
-per shader pair. Continuous capture records asynchronously and does not wait
-for the GPU every frame; at most 1,048,576 draw intervals are stored. F9 and
-F10-stop reports are processed on a background thread after the relevant GPU
-work completes, so neither hotkey waits for the GPU on the swap thread. A new
-capture cannot start until the previous report finishes, preventing query reuse
-while results are being read. Timestamp intervals can overlap and their sum is
-not exclusive shader-core time.
+Press F9 to time the next frame's complete render passes to the 1600-pitch
+shadow target; press F10 to start continuous capture and press it again to
+stop. The report gives the total and per-frame GPU pass intervals, pass counts,
+and query availability/errors. Query pools are recycled only after their
+submission fences complete, so continuous captures are not limited by a
+run-wide draw count. F9 and F10-stop reports are processed after the relevant
+GPU work completes, without waiting on the swap thread. A new capture cannot
+start until the previous report finishes. Pass intervals include the work
+between their GPU timestamps and are not exclusive shader-core time; compare
+them across runs with the same route, settings, and capture duration.
+
+To verify shadow-resolution scaling, launch with `NFSMW_TRACE_SHADOW_SCALE=1`.
+The `[shadow-scale]` lines distinguish eligible full-map resolves, registration
+of a resolved image, and subsequent sampling from the scaled target versus
+fallback to the guest-memory copy (with the failed condition). The trace is
+off by default and reports distinct states as the scale changes. For a useful
+comparison, start in a scene with visible shadows, then try 1x and 2x Internal
+Resolution and attach `last-run.log`.
 
 To trace writes to guest physical memory, launch with
 `NFSMW_TRACE_GUEST_WRITES=<hex-address>[,<hex-size>]`. The default size is

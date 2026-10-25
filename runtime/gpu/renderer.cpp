@@ -135,6 +135,12 @@ namespace gpu::renderer
         // calls, 2 skip resolve copies, 4 skip texture loads, 8 bind 1x1
         // placeholders instead of textures.
         const uint32_t s_exp = [] { const char* v = std::getenv("NFSMW_GPU_EXP"); return v ? uint32_t(std::atoi(v)) : 0u; }();
+        const bool s_traceShadowScale = [] {
+            const char* v = std::getenv("NFSMW_TRACE_SHADOW_SCALE");
+            return v && v[0] && v[0] != '0';
+        }();
+        uint32_t s_shadowResolveTraceCount = 0;
+        std::unordered_set<uint64_t> s_shadowSampleTraceStates;
         // Fewer render passes and texture reloads (NFSMW_PASS_MERGE,
         // NFSMW_CLEAR_FLUSH_RECT, NFSMW_DIRECT_CUBE, NFSMW_FUSE_PARTIAL): on
         // by default where passes cost most, the tile GPUs: under MoltenVK
@@ -684,6 +690,7 @@ namespace gpu::renderer
         // with the samples of segments [s0, s1).
         struct ZpdSegment { uint64_t id; uint32_t query, num, den; };
         struct ZpdEnd { uint32_t address; uint64_t s0, s1, frame; std::chrono::steady_clock::time_point queued; };
+        struct ShadowPassQuery { uint32_t query; uint64_t frame; };
         struct Submission
         {
             VkCommandBuffer cmd = VK_NULL_HANDLE;
@@ -702,6 +709,8 @@ namespace gpu::renderer
             // here, harvested at completion, then the END reports, in order.
             std::vector<ZpdSegment> zpdSegments;
             std::vector<ZpdEnd> zpdEnds;
+            std::vector<ShadowPassQuery> shadowPassQueries;
+            uint32_t shadowPassQueryNext = 0;
 #ifdef _WIN32
             // NFSMW_BLACK_CHECK=1: the present whose front image this
             // submission probes (its entry in s_black.host, else -1).
@@ -798,17 +807,27 @@ namespace gpu::renderer
             const char* v = std::getenv("NFSMW_SHADOW_BENCHMARK");
             return v && strcmp(v, "1") == 0;
         }();
-        constexpr uint32_t kShadowBenchmarkDrawLimit = 1'048'576;
+        constexpr uint32_t kShadowBenchmarkPassLimit = 4096;
         VkQueryPool s_shaderProfileQueries = VK_NULL_HANDLE;
+        VkQueryPool s_shadowPassQueries[kSlots] = {};
+        bool s_shadowPassQueryPoolInitialized[kSlots] = {};
+        uint32_t s_shadowTimestampValidBits = 0;
+        bool s_shadowBenchmarkAvailable = false;
         struct ShaderProfileDraw { uint32_t query; uint64_t vsHash, psHash, frame; };
         std::vector<ShaderProfileDraw> s_shaderProfileDraws;
         struct ShadowBenchmarkReport
         {
-            std::vector<ShaderProfileDraw> draws;
             uint64_t firstFrame = 0, lastFrame = 0, submission = 0;
-            uint32_t dropped = 0;
             bool continuous = false;
         };
+        struct ShadowBenchmarkStats
+        {
+            uint64_t passes = 0, timed = 0, unavailable = 0, invalid = 0, apiErrors = 0, overLimit = 0;
+            uint64_t framesWithPasses = 0, currentFrame = 0;
+            double sumUs = 0, maxPassUs = 0, currentFrameUs = 0, maxFrameUs = 0;
+            bool hasCurrentFrame = false;
+        } s_shadowBenchmarkStats;
+        std::mutex s_shadowBenchmarkStatsMutex;
         std::mutex s_shadowBenchmarkReportMutex;
         std::condition_variable s_shadowBenchmarkReportCv;
         std::deque<ShadowBenchmarkReport> s_shadowBenchmarkReports;
@@ -818,8 +837,8 @@ namespace gpu::renderer
         bool s_shadowBenchmarkActive = false;
         bool s_shadowBenchmarkContinuous = false;
         bool s_shadowBenchmarkSinglePending = false;
+        uint64_t s_frame = 0;
         uint64_t s_shadowBenchmarkFirstFrame = 0;
-        uint32_t s_shadowBenchmarkQueryResetThrough = 0;
         uint32_t s_shaderProfileQueryNext = 0;
         uint32_t s_shaderProfileDropped = 0;
         bool s_shaderProfiling = false;
@@ -1001,6 +1020,17 @@ namespace gpu::renderer
             s_recording = true;
             s_stateEpoch++;
             s_recordStart = std::chrono::steady_clock::now();
+            if (s_shadowBenchmarkAvailable && !s_shadowPassQueryPoolInitialized[s_slot])
+            {
+                vkCmdResetQueryPool(s_cmd, s_shadowPassQueries[s_slot], 0, kShadowBenchmarkPassLimit * 2);
+                s_shadowPassQueryPoolInitialized[s_slot] = true;
+            }
+            else if (s_shadowBenchmarkAvailable && sub.shadowPassQueryNext)
+            {
+                vkCmdResetQueryPool(s_cmd, s_shadowPassQueries[s_slot], 0, sub.shadowPassQueryNext);
+            }
+            sub.shadowPassQueryNext = 0;
+            sub.shadowPassQueries.clear();
             if (s_timestamps)
             {
                 vkCmdResetQueryPool(s_cmd, s_timestamps, s_slot * 2, 2);
@@ -1113,6 +1143,56 @@ namespace gpu::renderer
                 s_zpdResults->Put(s.id, guest, raw);
                 ZpdLog("segment %llu: %s%llu host samples x %u/%u = %llu", (unsigned long long)s.id, available ? "" : "not available, ",
                     (unsigned long long)raw, s.num, s.den, (unsigned long long)guest);
+            }
+        }
+
+        void ShadowBenchmarkHarvest(uint32_t slot, Submission& sub)
+        {
+            const uint32_t queryCount = sub.shadowPassQueryNext;
+            std::vector<uint64_t> results(size_t(queryCount) * 2);
+            VkResult result = vkGetQueryPoolResults(s_dev, s_shadowPassQueries[slot], 0, queryCount,
+                results.size() * sizeof(uint64_t), results.data(), 2 * sizeof(uint64_t),
+                VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WITH_AVAILABILITY_BIT | VK_QUERY_RESULT_WAIT_BIT);
+                std::lock_guard lock(s_shadowBenchmarkStatsMutex);
+                ShadowBenchmarkStats& stats = s_shadowBenchmarkStats;
+                if (result != VK_SUCCESS)
+                {
+                stats.apiErrors++;
+                return;
+            }
+            const uint64_t mask = s_shadowTimestampValidBits == 64
+                ? UINT64_MAX
+                : (uint64_t(1) << s_shadowTimestampValidBits) - 1;
+            for (const ShadowPassQuery& pass : sub.shadowPassQueries)
+            {
+                const uint32_t query = pass.query;
+                if (query + 1 >= queryCount)
+                {
+                    stats.invalid++;
+                    continue;
+                }
+                if (!results[size_t(query) * 2 + 1] || !results[size_t(query + 1) * 2 + 1])
+                {
+                    stats.unavailable++;
+                    continue;
+                }
+                const uint64_t ticks = (results[size_t(query + 1) * 2] - results[size_t(query) * 2]) & mask;
+                const double us = double(ticks) * s_timestampPeriod / 1000.0;
+                if (!stats.hasCurrentFrame || stats.currentFrame != pass.frame)
+                {
+                    if (stats.hasCurrentFrame)
+                    {
+                        stats.framesWithPasses++;
+                        stats.maxFrameUs = std::max(stats.maxFrameUs, stats.currentFrameUs);
+                    }
+                    stats.hasCurrentFrame = true;
+                    stats.currentFrame = pass.frame;
+                    stats.currentFrameUs = 0;
+                }
+                stats.currentFrameUs += us;
+                stats.timed++;
+                stats.sumUs += us;
+                stats.maxPassUs = std::max(stats.maxPassUs, us);
             }
         }
 
@@ -1306,6 +1386,8 @@ namespace gpu::renderer
                             VK_QUERY_RESULT_64_BIT) == VK_SUCCESS && ts[1] > ts[0])
                         s_gpuExecNs += uint64_t(double(ts[1] - ts[0]) * s_timestampPeriod);
                 }
+                if (s_shadowBenchmarkAvailable && !sub.shadowPassQueries.empty())
+                    ShadowBenchmarkHarvest(slot, sub);
                 if (!sub.zpdSegments.empty())
                     ZpdHarvest(slot, sub);
 #ifdef _WIN32
@@ -1325,6 +1407,7 @@ namespace gpu::renderer
                         ZpdStore(end);
                     sub.zpdEnds.clear();
                     sub.zpdSegments.clear();
+                    sub.shadowPassQueries.clear();
                     sub.unsignaled = 0;
                     for (VkEvent event : sub.events)
                     {
@@ -2108,22 +2191,17 @@ namespace gpu::renderer
 
         uint32_t ShaderProfileBegin(RenderTarget* depth)
         {
-            if (!s_shaderProfiling || (!s_shadowBenchmarkActive && !s_shaderProfileQueriesReset))
+            if (!s_shaderProfiling || !s_shaderProfileQueriesReset)
                 return UINT32_MAX;
             const ShaderProfileRequest& request = s_shaderProfileRequest;
-            const bool selected = s_shadowBenchmarkActive
-                ? depth && depth->depth && depth->pitch == 1600
-                : request.kind == ShaderProfileKind::kShadowTargets
+            const bool selected = request.kind == ShaderProfileKind::kShadowTargets
                 ? depth && depth->depth && depth->pitch == 1600
                 : request.kind == ShaderProfileKind::kPixelShader ? s_ps->hash == request.hash
                 : request.kind == ShaderProfileKind::kVertexShader && s_vs->hash == request.hash;
             if (!selected)
                 return UINT32_MAX;
-            const uint32_t drawLimit = s_shadowBenchmarkActive ? kShadowBenchmarkDrawLimit : kShaderProfileDrawLimit;
-            if (s_shaderProfileQueryNext + 2 > drawLimit * 2 ||
-                (s_shadowBenchmarkActive && s_shaderProfileQueryNext + 2 > s_shadowBenchmarkQueryResetThrough))
+            if (s_shaderProfileQueryNext + 2 > kShaderProfileDrawLimit * 2)
             {
-                s_shaderProfileDropped++;
                 return UINT32_MAX;
             }
             const uint32_t query = s_shaderProfileQueryNext;
@@ -2540,6 +2618,7 @@ namespace gpu::renderer
         RenderTarget* s_passColor[4] = {};
         RenderTarget* s_passDepth = nullptr;
         bool s_passActive = false;
+        uint32_t s_passShadowQuery = UINT32_MAX;
         VkExtent2D s_passExtent{};  // the attachments' common size
         VkRect2D s_passArea{};      // what this pass loads and stores (tile GPUs move only this)
         // NFSMW_PASS_MERGE bitmask (Draw; default 3 with kFewerPasses, else
@@ -2559,6 +2638,11 @@ namespace gpu::renderer
             ZpdEndSegment();  // a segment never outlives its pass
             s_vk->cmdEndRendering(s_cmd);
             s_passActive = false;
+            if (s_passShadowQuery != UINT32_MAX)
+            {
+                vkCmdWriteTimestamp(s_cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, s_shadowPassQueries[s_slot], s_passShadowQuery + 1);
+                s_passShadowQuery = UINT32_MAX;
+            }
             if (s_profiling && !s_passInfos.empty() && s_passInfos.back().query + 1 < s_passQueryNext)
                 vkCmdWriteTimestamp(s_cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, s_passQueries, s_passInfos.back().query + 1);
             PassEndBarrier();
@@ -2653,6 +2737,8 @@ namespace gpu::renderer
 
         void BeginPass(RenderTarget* const color[4], RenderTarget* depth, VkRect2D area)
         {
+            const bool measureShadowPass = s_shadowBenchmarkActive && s_shadowBenchmarkAvailable &&
+                depth && depth->depth && depth->pitch == 1600;
             for (uint32_t i = 0; i < 4; i++)
                 InvalidateShadowResolve(color[i]);
             InvalidateShadowResolve(depth);
@@ -2670,6 +2756,8 @@ namespace gpu::renderer
                 if (attached(pc.rt))
                     area = Union(area, pc.rect);
             EndPass();
+            if (measureShadowPass && s_submissions[s_slot].shadowPassQueryNext + 2 > kShadowBenchmarkPassLimit * 2)
+                SubmitRecorded(5);
             Begin();
             uint32_t w = UINT32_MAX, h = UINT32_MAX;
             VkRenderingAttachmentInfoKHR colors[4]{};
@@ -2797,17 +2885,22 @@ namespace gpu::renderer
                 s_gapLast = now;
                 s_passQueryNext += 2;
             }
-            if (s_shaderProfiling && s_shadowBenchmarkActive &&
-                s_shaderProfileQueryNext >= s_shadowBenchmarkQueryResetThrough &&
-                s_shadowBenchmarkQueryResetThrough < kShadowBenchmarkDrawLimit * 2)
+            if (measureShadowPass)
             {
-                constexpr uint32_t kResetChunk = 32768;
-                const uint32_t count = std::min(kResetChunk,
-                    kShadowBenchmarkDrawLimit * 2 - s_shadowBenchmarkQueryResetThrough);
-                vkCmdResetQueryPool(s_cmd, s_shaderProfileQueries, s_shadowBenchmarkQueryResetThrough, count);
-                s_shadowBenchmarkQueryResetThrough += count;
+                Submission& sub = s_submissions[s_slot];
+                std::lock_guard lock(s_shadowBenchmarkStatsMutex);
+                s_shadowBenchmarkStats.passes++;
+                if (sub.shadowPassQueryNext + 2 <= kShadowBenchmarkPassLimit * 2)
+                {
+                    s_passShadowQuery = sub.shadowPassQueryNext;
+                    sub.shadowPassQueryNext += 2;
+                    sub.shadowPassQueries.push_back({ s_passShadowQuery, s_frame + 1 });
+                    vkCmdWriteTimestamp(s_cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, s_shadowPassQueries[s_slot], s_passShadowQuery);
+                }
+                else
+                    s_shadowBenchmarkStats.overLimit++;
             }
-            else if (s_shaderProfiling && !s_shadowBenchmarkActive && !s_shaderProfileQueriesReset)
+            if (s_shaderProfiling && !s_shaderProfileQueriesReset)
             {
                 vkCmdResetQueryPool(s_cmd, s_shaderProfileQueries, 0, kShaderProfileDrawLimit * 2);
                 s_shaderProfileQueriesReset = true;
@@ -3158,7 +3251,7 @@ namespace gpu::renderer
         }();
         const int64_t s_pipelineWaitUs = [] { const char* v = std::getenv("NFSMW_PIPELINE_WAIT_US"); return v ? int64_t(std::atoll(v)) : 3000; }();
         const bool s_logPipelines = std::getenv("NFSMW_PIPELINE_LOG") != nullptr;
-        uint64_t s_frame = 0, s_drawsAtSwap = 0, s_waitPipelinesUntil = 120;  // boot: wait in full
+        uint64_t s_drawsAtSwap = 0, s_waitPipelinesUntil = 120;  // boot: wait in full
         uint32_t s_pipelineSkips = 0;         // draws skipped this frame, their pipeline not ready
         int64_t s_pipelineWaitLeftUs = 0;     // this frame's wait budget left
 
@@ -4616,16 +4709,61 @@ void main()
             }
             if (!cube && !volume && format == 22 && width == 1600 && height == 1600 && maxLevel == 0)
             {
-                if (auto it = s_shadowTargetsByResolve.find(base); it != s_shadowTargetsByResolve.end())
+                auto it = s_shadowTargetsByResolve.find(base);
+                RenderTarget* target = it == s_shadowTargetsByResolve.end() ? nullptr : it->second.target;
+                uint64_t sampleSequence = 0;
+                int traceReason = 0;
+                if (!target)
+                    traceReason = 0;
+                else
                 {
-                    RenderTarget* target = it->second.target;
-                    if (target->scale == s_shadowScale && target->sampleView &&
-                        f.tiled && pitchTexels == 1600 && f.endianness == xenos::Endian::kNone &&
-                        f.swizzle == 0x688 && writewatch::WriteSequence(base, size) == it->second.writeSequence)
+                    sampleSequence = writewatch::WriteSequence(base, size);
+                    if (target->scale != s_shadowScale)
+                        traceReason = 1;
+                    else if (!target->sampleView)
+                        traceReason = 2;
+                    else if (!f.tiled || pitchTexels != 1600 || f.endianness != xenos::Endian::kNone || f.swizzle != 0x688)
+                        traceReason = 3;
+                    else if (sampleSequence != it->second.writeSequence)
+                        traceReason = 4;
+                    else
+                        traceReason = 5;
+                    if (traceReason == 5)
                     {
                         sampler = GetSampler(f, maxLevel);
+                        if (s_traceShadowScale)
+                        {
+                            uint64_t traceKey = base;
+                            auto mix = [&](uint64_t value) { traceKey ^= value + 0x9E3779B97F4A7C15ull + (traceKey << 6) + (traceKey >> 2); };
+                            mix(uint64_t(s_shadowScale.x.num) << 48 | uint64_t(s_shadowScale.x.den) << 32 |
+                                uint64_t(s_shadowScale.y.num) << 16 | uint64_t(s_shadowScale.y.den));
+                            mix(uint64_t(traceReason));
+                            if (s_shadowSampleTraceStates.size() < 32 && s_shadowSampleTraceStates.insert(traceKey).second)
+                                fprintf(stderr, "[shadow-scale] sample scaled target base %08X at %s, host %ux%u (write %llu)\n",
+                                    base, gpu::ScaleName(target->scale).c_str(), target->width, target->height,
+                                    (unsigned long long)sampleSequence);
+                        }
                         return target->sampleView;
                     }
+                }
+                if (s_traceShadowScale)
+                {
+                    uint64_t traceKey = base;
+                    auto mix = [&](uint64_t value) { traceKey ^= value + 0x9E3779B97F4A7C15ull + (traceKey << 6) + (traceKey >> 2); };
+                    mix(uint64_t(s_shadowScale.x.num) << 48 | uint64_t(s_shadowScale.x.den) << 32 |
+                        uint64_t(s_shadowScale.y.num) << 16 | uint64_t(s_shadowScale.y.den));
+                    mix(uint64_t(traceReason));
+                    if (s_shadowSampleTraceStates.size() < 32 && s_shadowSampleTraceStates.insert(traceKey).second)
+                        fprintf(stderr, "[shadow-scale] sample fallback base %08X (%s): registered %s, scale %s, target %s, tiled %u, "
+                            "pitch %u, endian %u, swizzle %03X, write %llu/%llu\n", base,
+                            traceReason == 0 ? "no resolved target" : traceReason == 1 ? "scale mismatch"
+                                : traceReason == 2 ? "no depth sample view" : traceReason == 3 ? "texture layout mismatch"
+                                : "guest copy changed after resolve",
+                            target ? "yes" : "no", target ? gpu::ScaleName(target->scale).c_str() : "n/a",
+                            target ? target->sampleView ? "yes" : "no" : "n/a",
+                            uint32_t(f.tiled), pitchTexels, uint32_t(f.endianness), f.swizzle,
+                            (unsigned long long)sampleSequence,
+                            (unsigned long long)(target ? it->second.writeSequence : 0));
                 }
             }
             // Drawn into scaled targets: a texture that scaled resolves wrote
@@ -6167,6 +6305,13 @@ void main()
                         !destInfo.copy_dest_array && uint32_t(destInfo.copy_dest_endian) == uint32_t(xenos::Endian::kNone) &&
                         !destInfo.copy_dest_swap && destInfo.copy_dest_exp_bias == 0 && rc.destPitch == 1600 &&
                         r.x0 == 0 && r.y0 == 0 && r.x1 == 1600 && r.y1 == 1600;
+                    if (s_traceShadowScale && source->depth && source->pitch == 1600 && s_shadowResolveTraceCount++ < 16)
+                        fprintf(stderr, "[shadow-scale] resolve %s: source %s %ux%u, depthSource %u, format %u, dest %08X pitch %u, "
+                            "rect (%d,%d)-(%d,%d), array %u endian %u swap %u exp %d gpu-exp %u\n",
+                            directShadowResolve && !(s_exp & 2) ? "eligible" : "fallback",
+                            gpu::ScaleName(source->scale).c_str(), source->width, source->height, uint32_t(depthSource), format,
+                            rc.destBase, rc.destPitch, r.x0, r.y0, r.x1, r.y1, uint32_t(destInfo.copy_dest_array),
+                            uint32_t(destInfo.copy_dest_endian), uint32_t(destInfo.copy_dest_swap), destInfo.copy_dest_exp_bias, s_exp);
                     if (!wholeBlocks)
                         LogOnce(0x2500, "resolve at (%d,%d) (tile shift %d,%d) from a %s target isn't whole blocks: kept at 1x only, "
                             "its 1x average up to half a host pixel off", r.x0, r.y0, shiftX, shiftY, gpu::ScaleName(source->scale).c_str());
@@ -6483,7 +6628,12 @@ void main()
                     {
                         uint64_t writeSequence = writewatch::WriteSequence(rangeBase, rangeBytes);
                         if (writeSequence)
+                        {
                             s_shadowTargetsByResolve[rc.destBase] = { source, writeSequence };
+                            if (s_traceShadowScale && s_shadowResolveTraceCount <= 16)
+                                fprintf(stderr, "[shadow-scale] registered base %08X range %08X+%u write %llu\n",
+                                    rc.destBase, rangeBase, rangeBytes, (unsigned long long)writeSequence);
+                        }
                     }
                     // The fused texture holds this write: its pages' sequence
                     // now, and any write after it is newer (0: per-page
@@ -7937,6 +8087,13 @@ void main()
             Flush();
             s_renderScale = scale;
             s_shadowScale = gpu::ShadowScale(scale);
+            if (s_traceShadowScale)
+            {
+                s_shadowResolveTraceCount = 0;
+                s_shadowSampleTraceStates.clear();
+                fprintf(stderr, "[shadow-scale] internal %s -> %s; shadow scale %s\n",
+                    gpu::ScaleName(old).c_str(), gpu::ScaleName(scale).c_str(), gpu::ScaleName(s_shadowScale).c_str());
+            }
             s_shadowTargetsByResolve.clear();
             PrewarmResolvePipelines(scale);
             size_t targets = 0;
@@ -8192,6 +8349,12 @@ void main()
             VkPhysicalDeviceProperties props;
             vkGetPhysicalDeviceProperties(s_vk->physical, &props);
             s_timestampPeriod = props.limits.timestampPeriod;
+            uint32_t queueFamilyCount = 0;
+            vkGetPhysicalDeviceQueueFamilyProperties(s_vk->physical, &queueFamilyCount, nullptr);
+            std::vector<VkQueueFamilyProperties> queueFamilies(queueFamilyCount);
+            vkGetPhysicalDeviceQueueFamilyProperties(s_vk->physical, &queueFamilyCount, queueFamilies.data());
+            if (s_vk->queueFamily < queueFamilyCount)
+                s_shadowTimestampValidBits = queueFamilies[s_vk->queueFamily].timestampValidBits;
             VkQueryPoolCreateInfo qpci{ VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO };
             qpci.queryType = VK_QUERY_TYPE_TIMESTAMP;
             qpci.queryCount = kSlots * 2;
@@ -8206,12 +8369,24 @@ void main()
                 qpci.queryCount = 512;
                 Check(vkCreateQueryPool(s_dev, &qpci, nullptr, &s_passQueries), "pass query pool");
             }
-            if (s_shaderProfileRequest.kind != ShaderProfileKind::kOff || s_shadowBenchmarkEnabled)
+            if (s_shaderProfileRequest.kind != ShaderProfileKind::kOff)
             {
-                qpci.queryCount = (s_shadowBenchmarkEnabled ? kShadowBenchmarkDrawLimit : kShaderProfileDrawLimit) * 2;
+                qpci.queryCount = kShaderProfileDrawLimit * 2;
                 Check(vkCreateQueryPool(s_dev, &qpci, nullptr, &s_shaderProfileQueries), "shader profile query pool");
-                if (s_shadowBenchmarkEnabled)
-                    s_shaderProfileDraws.reserve(kShadowBenchmarkDrawLimit);
+            }
+            if (s_shadowBenchmarkEnabled)
+            {
+                if (!s_shadowTimestampValidBits)
+                    fprintf(stderr, "[shadow-benchmark] unavailable: graphics queue does not support timestamp queries\n");
+                else
+                {
+                    qpci.queryCount = kShadowBenchmarkPassLimit * 2;
+                    for (uint32_t slot = 0; slot < kSlots; slot++)
+                        Check(vkCreateQueryPool(s_dev, &qpci, nullptr, &s_shadowPassQueries[slot]), "shadow pass query pool");
+                    s_shadowBenchmarkAvailable = true;
+                    fprintf(stderr, "[shadow-benchmark] GPU timing enabled: %u timestamp bits, up to %u shadow passes per submission\n",
+                        s_shadowTimestampValidBits, kShadowBenchmarkPassLimit);
+                }
             }
         }
         // NFSMW_OCCLUSION=1: a pool of occlusion queries per slot, so a reset
@@ -8301,6 +8476,8 @@ void main()
     {
         if (!s_shadowBenchmarkEnabled)
             return ShadowBenchmarkAction::kDisabled;
+        if (!s_shadowBenchmarkAvailable)
+            return ShadowBenchmarkAction::kUnavailable;
         if (s_shaderProfileRequest.kind != ShaderProfileKind::kOff)
             return ShadowBenchmarkAction::kUnavailable;
         if (!toggleContinuous)
@@ -10858,44 +11035,41 @@ void main()
                 s_submitCv.wait(lock, [&] { return s_completedSubmission >= report.submission; });
             }
 
-            struct Totals { uint64_t draws = 0; double sumUs = 0, maxUs = 0; };
-            std::map<std::pair<uint64_t, uint64_t>, Totals> totals;
-            uint32_t failed = 0, timed = 0;
-            double sumUs = 0;
-            for (const ShaderProfileDraw& draw : report.draws)
+            ShadowBenchmarkStats stats;
             {
-                uint64_t timestamps[2] = {};
-                VkResult result = vkGetQueryPoolResults(s_dev, s_shaderProfileQueries, draw.query, 2, sizeof(timestamps), timestamps,
-                    sizeof(uint64_t), VK_QUERY_RESULT_64_BIT);
-                if (result != VK_SUCCESS || timestamps[1] <= timestamps[0])
+                std::lock_guard lock(s_shadowBenchmarkStatsMutex);
+                if (s_shadowBenchmarkStats.hasCurrentFrame)
                 {
-                    failed++;
-                    continue;
+                    s_shadowBenchmarkStats.framesWithPasses++;
+                    s_shadowBenchmarkStats.maxFrameUs = std::max(
+                        s_shadowBenchmarkStats.maxFrameUs, s_shadowBenchmarkStats.currentFrameUs);
                 }
-                const double us = double(timestamps[1] - timestamps[0]) * s_timestampPeriod / 1000.0;
-                Totals& t = totals[{ draw.vsHash, draw.psHash }];
-                t.draws++;
-                t.sumUs += us;
-                t.maxUs = std::max(t.maxUs, us);
-                timed++;
-                sumUs += us;
+                stats = s_shadowBenchmarkStats;
+                s_shadowBenchmarkStats = {};
             }
             if (report.continuous)
             {
                 const uint64_t frames = report.lastFrame >= report.firstFrame ? report.lastFrame - report.firstFrame + 1 : 0;
-                fprintf(stderr, "[shadow-benchmark] frames %llu-%llu: %llu frames, %u draws timed, %.1f us summed intervals "
-                                "(%.2f us/frame), %u query failures, %u draws over limit\n",
+                fprintf(stderr, "[shadow-benchmark] frames %llu-%llu: %llu frames, %llu/%llu shadow passes timed, "
+                                "%.1f us pass intervals (%.2f us/frame; max frame %.1f us, max pass %.1f us), "
+                                "%llu query failures (%llu unavailable, %llu invalid timestamps, %llu API errors), "
+                                "%llu passes over limit\n",
                     (unsigned long long)report.firstFrame, (unsigned long long)report.lastFrame, (unsigned long long)frames,
-                    timed, sumUs, frames ? sumUs / double(frames) : 0.0, failed, report.dropped);
+                    (unsigned long long)stats.timed, (unsigned long long)stats.passes, stats.sumUs,
+                    frames ? stats.sumUs / double(frames) : 0.0, stats.maxFrameUs, stats.maxPassUs,
+                    (unsigned long long)(stats.unavailable + stats.invalid + stats.apiErrors),
+                    (unsigned long long)stats.unavailable, (unsigned long long)stats.invalid,
+                    (unsigned long long)stats.apiErrors, (unsigned long long)stats.overLimit);
             }
             else
-                fprintf(stderr, "[shadow-benchmark] frame %llu: %u draws timed, %.1f us summed intervals, %u query failures, %u draws over limit\n",
-                    (unsigned long long)report.lastFrame, timed, sumUs, failed, report.dropped);
-            for (const auto& [hashes, t] : totals)
-                fprintf(stderr, "[shadow-benchmark] vs_%016llx ps_%016llx: %llu draws, sum %.1f us, avg %.2f us, max %.1f us\n",
-                    (unsigned long long)hashes.first, (unsigned long long)hashes.second, (unsigned long long)t.draws,
-                    t.sumUs, t.sumUs / double(t.draws), t.maxUs);
-            fprintf(stderr, "[shadow-benchmark] per-draw intervals can overlap; summed time is not exclusive shader-core time\n");
+                fprintf(stderr, "[shadow-benchmark] frame %llu: %llu/%llu shadow passes timed, %.1f us pass intervals, "
+                                "%llu query failures (%llu unavailable, %llu invalid timestamps, %llu API errors), "
+                                "%llu passes over limit\n",
+                    (unsigned long long)report.lastFrame, (unsigned long long)stats.timed, (unsigned long long)stats.passes,
+                    stats.sumUs, (unsigned long long)(stats.unavailable + stats.invalid + stats.apiErrors),
+                    (unsigned long long)stats.unavailable, (unsigned long long)stats.invalid,
+                    (unsigned long long)stats.apiErrors, (unsigned long long)stats.overLimit);
+            fprintf(stderr, "[shadow-benchmark] timestamps bracket complete shadow render passes; summed intervals are not exclusive shader-core time\n");
 
             std::lock_guard lock(s_shadowBenchmarkReportMutex);
             if (s_shadowBenchmarkReports.empty())
@@ -10903,16 +11077,13 @@ void main()
         }
     }
 
-    void QueueShadowBenchmarkReport(uint64_t firstFrame, uint64_t lastFrame, bool continuous,
-        std::vector<ShaderProfileDraw>&& draws, uint32_t dropped)
+    void QueueShadowBenchmarkReport(uint64_t firstFrame, uint64_t lastFrame, bool continuous)
     {
         SubmitRecorded(5);
         ShadowBenchmarkReport report;
-        report.draws = std::move(draws);
         report.firstFrame = firstFrame;
         report.lastFrame = lastFrame;
         report.submission = s_submissionCounter - 1;
-        report.dropped = dropped;
         report.continuous = continuous;
         {
             std::lock_guard lock(s_shadowBenchmarkReportMutex);
@@ -10937,25 +11108,16 @@ void main()
                 : s_shadowBenchmarkSinglePending;
             if (s_shadowBenchmarkSinglePending || stop)
             {
-                s_shaderProfiling = false;
                 if (stop)
                 {
-                    QueueShadowBenchmarkReport(s_shadowBenchmarkFirstFrame, frame, s_shadowBenchmarkContinuous,
-                        std::move(s_shaderProfileDraws), s_shaderProfileDropped);
+                    QueueShadowBenchmarkReport(s_shadowBenchmarkFirstFrame, frame, s_shadowBenchmarkContinuous);
                     s_shadowBenchmarkSinglePending = false;
                     s_shadowBenchmarkActive = false;
                     s_shadowBenchmarkContinuous = false;
                     return;
                 }
-                std::vector<ShaderProfileDraw> frameDraws;
-                auto first = std::lower_bound(s_shaderProfileDraws.begin(), s_shaderProfileDraws.end(), frame,
-                    [](const ShaderProfileDraw& draw, uint64_t value) { return draw.frame < value; });
-                auto last = std::upper_bound(first, s_shaderProfileDraws.end(), frame,
-                    [](uint64_t value, const ShaderProfileDraw& draw) { return value < draw.frame; });
-                frameDraws.assign(first, last);
-                QueueShadowBenchmarkReport(frame, frame, false, std::move(frameDraws), s_shaderProfileDropped);
+                QueueShadowBenchmarkReport(frame, frame, false);
                 s_shadowBenchmarkSinglePending = false;
-                s_shaderProfiling = true;
             }
         }
 
@@ -10968,20 +11130,16 @@ void main()
             s_shadowBenchmarkActive = true;
             s_shadowBenchmarkContinuous = continuous;
             s_shadowBenchmarkSinglePending = singleRequested;
-            s_shadowBenchmarkQueryResetThrough = 0;
-            s_shaderProfileQueriesReset = false;
-            s_shaderProfileQueryNext = 0;
-            s_shaderProfileDropped = 0;
-            s_shaderProfileDraws.clear();
-            if (s_shaderProfileDraws.capacity() < kShadowBenchmarkDrawLimit)
-                s_shaderProfileDraws.reserve(kShadowBenchmarkDrawLimit);
+            {
+                std::lock_guard lock(s_shadowBenchmarkStatsMutex);
+                s_shadowBenchmarkStats = {};
+            }
             fprintf(stderr, "[shadow-benchmark] measuring %s from frame %llu\n", continuous ? "continuously" : "one frame",
                 (unsigned long long)s_shadowBenchmarkFirstFrame);
         }
         else if (singleRequested)
             s_shadowBenchmarkSinglePending = true;
 
-        s_shaderProfiling = true;
     }
 
     void ShaderProfileOnSwap(uint64_t frame)
