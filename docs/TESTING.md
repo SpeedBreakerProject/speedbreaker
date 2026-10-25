@@ -92,3 +92,47 @@ beta `[build] SpeedBreaker v<version> Windows beta <date> (<commit>): built
 ...`, also shown at the bottom of Settings > Advanced), whether this version
 is new since the last run (`[version] updated from v<a> to v<b>`, or `first
 run`), and describe the machine (`[system] ...`).
+
+## Graphics shader diagnostics
+
+To identify a draw's pixel shader, launch with `NFSMW_LOG_DRAWS=<seconds>`:
+the log records one frame's draws, pixel-shader hashes and sampled texture
+addresses. To skip every draw using a particular pixel shader, relaunch with
+`NFSMW_SKIP_PS=<hex-hash>` (the hash after `ps_` in a `[draws]` line). This is
+a diagnostic override; a shader shared by multiple effects will be skipped
+in all of them.
+
+To time the GPU intervals of selected draws in one frame, launch with
+`NFSMW_SHADER_PROFILE=<frame>,<selector>`. Select a guest pixel or vertex
+shader with `ps:<hex-hash>` or `vs:<hex-hash>`, or use `shadow` to select draws
+to the 1600-pitch sun shadow depth target. For example,
+`NFSMW_SHADER_PROFILE=450,shadow` measures the shadow-map draws in frame 450.
+Use `NFSMW_LOG_DRAWS=<seconds>` in a separate run to find a frame number and
+shader hashes.
+
+The `[shader-profile]` report gives per-shader-pair draw counts and the sum,
+average, and maximum of per-draw timestamp intervals. Timestamp instrumentation
+is intrusive (especially on MoltenVK), and intervals may include overlapped
+pipeline work; these are comparative diagnostics, not exclusive shader-core
+execution times. At most 2048 selected draws are timed in the frame.
+
+For interactive shadow timing, set `NFSMW_SHADOW_BENCHMARK=1` before launch.
+Press F9 to time the next frame's draws to the 1600-pitch shadow target; press
+F10 to start continuous capture and press it again to stop. Results are logged
+per shader pair. Continuous capture records asynchronously and does not wait
+for the GPU every frame; at most 1,048,576 draw intervals are stored. F9 and
+F10-stop reports are processed on a background thread after the relevant GPU
+work completes, so neither hotkey waits for the GPU on the swap thread. A new
+capture cannot start until the previous report finishes, preventing query reuse
+while results are being read. Timestamp intervals can overlap and their sum is
+not exclusive shader-core time.
+
+To trace writes to guest physical memory, launch with
+`NFSMW_TRACE_GUEST_WRITES=<hex-address>[,<hex-size>]`. The default size is
+`0x40000`. The runtime watches the range from startup and logs first CPU write
+faults with the guest address and game-code offset, the first overlapping GPU
+write, and file reads overlapping the range with the guest file path, file
+offset, destination, and byte count.
+For example, `NFSMW_TRACE_GUEST_WRITES=1A71E000` watches the 256x256 RGBA
+texture at `1A71E000`. This is a diagnostic option and can add write-fault
+overhead while the watched pages are initialized.

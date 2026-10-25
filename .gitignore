@@ -54,3 +54,6 @@ speedbreaker-bug-report-*.zip
 # Python
 __pycache__/
 *.pyc
+
+# Local agent instructions and skills
+.github/

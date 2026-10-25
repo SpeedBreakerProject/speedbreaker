@@ -6,6 +6,7 @@
 #include <hid/input.h>
 #include <hid/wheel.h>       // the settings chord and the menus from a steering wheel
 #include <hid/wheel_map.h>   // ...which buttons those are
+#include <gpu/renderer.h>
 #include <kernel/xam.h>
 #include <report/report.h>
 #include <user/settings.h>
@@ -756,6 +757,27 @@ namespace ui
             UpdateCursor();
         }
 #endif
+        if (e.type == SDL_EVENT_KEY_DOWN && !e.key.repeat && (e.key.key == SDLK_F9 || e.key.key == SDLK_F10))
+        {
+            const auto action = gpu::renderer::ShadowBenchmarkHotkey(e.key.key == SDLK_F10);
+            switch (action)
+            {
+            case gpu::renderer::ShadowBenchmarkAction::kCapture:
+                Toast("Capturing the next frame; the report will appear in the log after GPU work completes.", 6.0);
+                return;
+            case gpu::renderer::ShadowBenchmarkAction::kStarted:
+                Toast("Shadow frametime measurement started. Press F10 again to stop.", 6.0);
+                return;
+            case gpu::renderer::ShadowBenchmarkAction::kStopped:
+                Toast("Shadow capture stopped; the report will appear in the log when ready.", 6.0);
+                return;
+            case gpu::renderer::ShadowBenchmarkAction::kUnavailable:
+                Toast("Shadow benchmark is unavailable while another report is pending or NFSMW_SHADER_PROFILE is set.", 6.0);
+                return;
+            case gpu::renderer::ShadowBenchmarkAction::kDisabled:
+                break;
+            }
+        }
         if (!s_ready)
             return;
         bool forward = s_capturing.load(std::memory_order_relaxed);

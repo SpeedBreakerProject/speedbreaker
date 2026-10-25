@@ -738,6 +738,92 @@ namespace gpu::renderer
         // print them (targets, area, draws, GPU us). 256 passes max.
         const int s_profileFrame = [] { const char* v = std::getenv("NFSMW_PASS_PROFILE"); return v ? std::atoi(v) : -1; }();
         VkQueryPool s_passQueries = VK_NULL_HANDLE;
+        constexpr uint32_t kShaderProfileDrawLimit = 2048;
+        enum class ShaderProfileKind { kOff, kPixelShader, kVertexShader, kShadowTargets };
+        struct ShaderProfileRequest
+        {
+            uint64_t frame = 0;
+            uint64_t hash = 0;
+            ShaderProfileKind kind = ShaderProfileKind::kOff;
+        };
+        const ShaderProfileRequest s_shaderProfileRequest = [] {
+            const char* v = std::getenv("NFSMW_SHADER_PROFILE");
+            if (!v || !v[0])
+                return ShaderProfileRequest{};
+            char* end = nullptr;
+            errno = 0;
+            uint64_t frame = std::strtoull(v, &end, 10);
+            if (v[0] < '0' || v[0] > '9' || errno || end == v || *end != ',' || frame == UINT64_MAX)
+            {
+                fprintf(stderr, "[renderer] NFSMW_SHADER_PROFILE must be <frame>,shadow or <frame>,ps:<hex-hash> or <frame>,vs:<hex-hash>\n");
+                return ShaderProfileRequest{};
+            }
+            const char* selector = end + 1;
+            if (strcmp(selector, "shadow") == 0)
+            {
+                fprintf(stderr, "[renderer] shader profiling frame %llu: draws to 1600-pitch depth targets (max %u draws)\n",
+                    (unsigned long long)frame, kShaderProfileDrawLimit);
+                return ShaderProfileRequest{ frame, 0, ShaderProfileKind::kShadowTargets };
+            }
+            ShaderProfileKind kind = ShaderProfileKind::kOff;
+            if (strncmp(selector, "ps:", 3) == 0)
+                kind = ShaderProfileKind::kPixelShader;
+            else if (strncmp(selector, "vs:", 3) == 0)
+                kind = ShaderProfileKind::kVertexShader;
+            if (kind == ShaderProfileKind::kOff)
+            {
+                fprintf(stderr, "[renderer] NFSMW_SHADER_PROFILE selector must be shadow, ps:<hex-hash> or vs:<hex-hash>\n");
+                return ShaderProfileRequest{};
+            }
+            errno = 0;
+            const char* hashText = selector + 3;
+            const char* hashDigits = hashText;
+            if (hashDigits[0] == '0' && (hashDigits[1] == 'x' || hashDigits[1] == 'X'))
+                hashDigits += 2;
+            bool validHex = *hashDigits != '\0';
+            for (const char* p = hashDigits; *p; p++)
+                validHex = validHex && ((*p >= '0' && *p <= '9') || (*p >= 'a' && *p <= 'f') || (*p >= 'A' && *p <= 'F'));
+            uint64_t hash = std::strtoull(hashText, &end, 16);
+            if (!validHex || errno || end == hashText || *end)
+            {
+                fprintf(stderr, "[renderer] NFSMW_SHADER_PROFILE shader hash must be hexadecimal\n");
+                return ShaderProfileRequest{};
+            }
+            fprintf(stderr, "[renderer] shader profiling frame %llu: %s_%016llx (max %u draws)\n",
+                (unsigned long long)frame, kind == ShaderProfileKind::kPixelShader ? "ps" : "vs",
+                (unsigned long long)hash, kShaderProfileDrawLimit);
+            return ShaderProfileRequest{ frame, hash, kind };
+        }();
+        const bool s_shadowBenchmarkEnabled = [] {
+            const char* v = std::getenv("NFSMW_SHADOW_BENCHMARK");
+            return v && strcmp(v, "1") == 0;
+        }();
+        constexpr uint32_t kShadowBenchmarkDrawLimit = 1'048'576;
+        VkQueryPool s_shaderProfileQueries = VK_NULL_HANDLE;
+        struct ShaderProfileDraw { uint32_t query; uint64_t vsHash, psHash, frame; };
+        std::vector<ShaderProfileDraw> s_shaderProfileDraws;
+        struct ShadowBenchmarkReport
+        {
+            std::vector<ShaderProfileDraw> draws;
+            uint64_t firstFrame = 0, lastFrame = 0, submission = 0;
+            uint32_t dropped = 0;
+            bool continuous = false;
+        };
+        std::mutex s_shadowBenchmarkReportMutex;
+        std::condition_variable s_shadowBenchmarkReportCv;
+        std::deque<ShadowBenchmarkReport> s_shadowBenchmarkReports;
+        std::atomic<bool> s_shadowBenchmarkReportsPending{ false };
+        std::atomic<bool> s_shadowBenchmarkContinuousRequested{ false };
+        std::atomic<bool> s_shadowBenchmarkSingleRequested{ false };
+        bool s_shadowBenchmarkActive = false;
+        bool s_shadowBenchmarkContinuous = false;
+        bool s_shadowBenchmarkSinglePending = false;
+        uint64_t s_shadowBenchmarkFirstFrame = 0;
+        uint32_t s_shadowBenchmarkQueryResetThrough = 0;
+        uint32_t s_shaderProfileQueryNext = 0;
+        uint32_t s_shaderProfileDropped = 0;
+        bool s_shaderProfiling = false;
+        bool s_shaderProfileQueriesReset = false;
         // Per profiled pass, also what was recorded in the gap before it:
         // resolves, texture uploads, submissions, guest memory synced to the
         // GPU copy (KB).
@@ -752,6 +838,7 @@ namespace gpu::renderer
         Submission s_submissions[kSlots];
         uint32_t s_slot = 0;
         uint64_t s_submissionCounter = 1;       // bumps on every submit
+        uint64_t s_completedSubmission = 0;     // guarded by s_submitMutex
         VkDeviceSize s_lastConstantsOffset = 0;
         uint64_t s_lastConstantsSubmission = 0; // submission holding s_lastConstantsOffset
         const void* s_lastConstLayoutVs = nullptr;  // the layout of that upload (see Draw)
@@ -1246,6 +1333,7 @@ namespace gpu::renderer
                     }
                     sub.events.clear();
                     writewatch::SetCompleted(sub.number);
+                    s_completedSubmission = sub.number;
                     s_inFlight.pop_front();
                     timeline::Mark(timeline::Complete, slot);
                     if (s_inFlight.empty())
@@ -2003,6 +2091,7 @@ namespace gpu::renderer
             bool wholeArea = false;
         };
         std::unordered_map<uint64_t, std::unique_ptr<RenderTarget>> s_targets;
+
         struct ShadowResolveTarget
         {
             RenderTarget* target;
@@ -2014,7 +2103,41 @@ namespace gpu::renderer
         {
             if (!target || !target->depth || target->pitch != 1600)
                 return;
-            std::erase_if(s_shadowTargetsByResolve, [&](const auto& entry) { return entry.second == target; });
+            std::erase_if(s_shadowTargetsByResolve, [&](const auto& entry) { return entry.second.target == target; });
+        }
+
+        uint32_t ShaderProfileBegin(RenderTarget* depth)
+        {
+            if (!s_shaderProfiling || (!s_shadowBenchmarkActive && !s_shaderProfileQueriesReset))
+                return UINT32_MAX;
+            const ShaderProfileRequest& request = s_shaderProfileRequest;
+            const bool selected = s_shadowBenchmarkActive
+                ? depth && depth->depth && depth->pitch == 1600
+                : request.kind == ShaderProfileKind::kShadowTargets
+                ? depth && depth->depth && depth->pitch == 1600
+                : request.kind == ShaderProfileKind::kPixelShader ? s_ps->hash == request.hash
+                : request.kind == ShaderProfileKind::kVertexShader && s_vs->hash == request.hash;
+            if (!selected)
+                return UINT32_MAX;
+            const uint32_t drawLimit = s_shadowBenchmarkActive ? kShadowBenchmarkDrawLimit : kShaderProfileDrawLimit;
+            if (s_shaderProfileQueryNext + 2 > drawLimit * 2 ||
+                (s_shadowBenchmarkActive && s_shaderProfileQueryNext + 2 > s_shadowBenchmarkQueryResetThrough))
+            {
+                s_shaderProfileDropped++;
+                return UINT32_MAX;
+            }
+            const uint32_t query = s_shaderProfileQueryNext;
+            s_shaderProfileQueryNext += 2;
+            vkCmdWriteTimestamp(s_cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, s_shaderProfileQueries, query);
+            return query;
+        }
+
+        void ShaderProfileEnd(uint32_t query, uint64_t frame)
+        {
+            if (query == UINT32_MAX)
+                return;
+            vkCmdWriteTimestamp(s_cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, s_shaderProfileQueries, query + 1);
+            s_shaderProfileDraws.push_back({ query, s_vs->hash, s_ps->hash, frame });
         }
 
         VkFormat ColorFormat(uint32_t format)
@@ -2530,8 +2653,8 @@ namespace gpu::renderer
 
         void BeginPass(RenderTarget* const color[4], RenderTarget* depth, VkRect2D area)
         {
-            for (RenderTarget* target : color)
-                InvalidateShadowResolve(target);
+            for (uint32_t i = 0; i < 4; i++)
+                InvalidateShadowResolve(color[i]);
             InvalidateShadowResolve(depth);
             bool sameTargets = s_passActive && depth == s_passDepth && std::equal(color, color + 4, s_passColor);
             if (sameTargets && Contains(s_passArea, area))
@@ -2673,6 +2796,21 @@ namespace gpu::renderer
                     uint32_t(now.uploads - s_gapLast.uploads), uint32_t(now.submits - s_gapLast.submits), (now.shadowBytes - s_gapLast.shadowBytes) / 1024 });
                 s_gapLast = now;
                 s_passQueryNext += 2;
+            }
+            if (s_shaderProfiling && s_shadowBenchmarkActive &&
+                s_shaderProfileQueryNext >= s_shadowBenchmarkQueryResetThrough &&
+                s_shadowBenchmarkQueryResetThrough < kShadowBenchmarkDrawLimit * 2)
+            {
+                constexpr uint32_t kResetChunk = 32768;
+                const uint32_t count = std::min(kResetChunk,
+                    kShadowBenchmarkDrawLimit * 2 - s_shadowBenchmarkQueryResetThrough);
+                vkCmdResetQueryPool(s_cmd, s_shaderProfileQueries, s_shadowBenchmarkQueryResetThrough, count);
+                s_shadowBenchmarkQueryResetThrough += count;
+            }
+            else if (s_shaderProfiling && !s_shadowBenchmarkActive && !s_shaderProfileQueriesReset)
+            {
+                vkCmdResetQueryPool(s_cmd, s_shaderProfileQueries, 0, kShaderProfileDrawLimit * 2);
+                s_shaderProfileQueriesReset = true;
             }
             s_vk->cmdBeginRendering(s_cmd, &ri);
             s_passActive = true;
@@ -4480,7 +4618,7 @@ void main()
             {
                 if (auto it = s_shadowTargetsByResolve.find(base); it != s_shadowTargetsByResolve.end())
                 {
-                    RenderTarget* target = it->second;
+                    RenderTarget* target = it->second.target;
                     if (target->scale == s_shadowScale && target->sampleView &&
                         f.tiled && pitchTexels == 1600 && f.endianness == xenos::Endian::kNone &&
                         f.swizzle == 0x688 && writewatch::WriteSequence(base, size) == it->second.writeSequence)
@@ -6026,7 +6164,7 @@ void main()
                         source->scale.x.Exact(uint32_t(r.x0)) && source->scale.y.Exact(uint32_t(r.y0));
                     const bool directShadowResolve = depthSource && source->depth && source->pitch == 1600 &&
                         source->scale == s_shadowScale && !source->scale.IsOne() && format == 22 &&
-                        !destInfo.copy_dest_array && destInfo.copy_dest_endian == xenos::Endian::kNone &&
+                        !destInfo.copy_dest_array && uint32_t(destInfo.copy_dest_endian) == uint32_t(xenos::Endian::kNone) &&
                         !destInfo.copy_dest_swap && destInfo.copy_dest_exp_bias == 0 && rc.destPitch == 1600 &&
                         r.x0 == 0 && r.y0 == 0 && r.x1 == 1600 && r.y1 == 1600;
                     if (!wholeBlocks)
@@ -8068,6 +8206,13 @@ void main()
                 qpci.queryCount = 512;
                 Check(vkCreateQueryPool(s_dev, &qpci, nullptr, &s_passQueries), "pass query pool");
             }
+            if (s_shaderProfileRequest.kind != ShaderProfileKind::kOff || s_shadowBenchmarkEnabled)
+            {
+                qpci.queryCount = (s_shadowBenchmarkEnabled ? kShadowBenchmarkDrawLimit : kShaderProfileDrawLimit) * 2;
+                Check(vkCreateQueryPool(s_dev, &qpci, nullptr, &s_shaderProfileQueries), "shader profile query pool");
+                if (s_shadowBenchmarkEnabled)
+                    s_shaderProfileDraws.reserve(kShadowBenchmarkDrawLimit);
+            }
         }
         // NFSMW_OCCLUSION=1: a pool of occlusion queries per slot, so a reset
         // never touches queries a submission in flight uses. Each is reset
@@ -8150,6 +8295,29 @@ void main()
     bool Enabled()
     {
         return s_vk != nullptr;
+    }
+
+    ShadowBenchmarkAction ShadowBenchmarkHotkey(bool toggleContinuous)
+    {
+        if (!s_shadowBenchmarkEnabled)
+            return ShadowBenchmarkAction::kDisabled;
+        if (s_shaderProfileRequest.kind != ShaderProfileKind::kOff)
+            return ShadowBenchmarkAction::kUnavailable;
+        if (!toggleContinuous)
+        {
+            if (s_shadowBenchmarkReportsPending.load(std::memory_order_acquire))
+                return ShadowBenchmarkAction::kUnavailable;
+            s_shadowBenchmarkSingleRequested.store(true, std::memory_order_release);
+            return ShadowBenchmarkAction::kCapture;
+        }
+        bool requested = s_shadowBenchmarkContinuousRequested.load(std::memory_order_relaxed);
+        while (true)
+        {
+            if (!requested && s_shadowBenchmarkReportsPending.load(std::memory_order_acquire))
+                return ShadowBenchmarkAction::kUnavailable;
+            if (s_shadowBenchmarkContinuousRequested.compare_exchange_weak(requested, !requested, std::memory_order_acq_rel))
+                return !requested ? ShadowBenchmarkAction::kStarted : ShadowBenchmarkAction::kStopped;
+        }
     }
 
     void LoadShader(uint32_t type, const uint32_t* words, uint32_t dwords)
@@ -10226,6 +10394,7 @@ void main()
                     scissor.extent.height, scissor.offset.x, scissor.offset.y);
             }
         }
+        uint32_t shaderProfileQuery = s_shaderProfiling ? ShaderProfileBegin(depth) : UINT32_MAX;
         if (useIndices)
         {
             vkCmdBindIndexBuffer(s_cmd, s_ring, indexOffset, indices16 ? VK_INDEX_TYPE_UINT16 : VK_INDEX_TYPE_UINT32);
@@ -10235,6 +10404,8 @@ void main()
         {
             vkCmdDraw(s_cmd, vertexCount, 1, 0, 0);
         }
+        if (shaderProfileQuery != UINT32_MAX)
+            ShaderProfileEnd(shaderProfileQuery, s_frame + 1);
         // Edge bars (above): the same draw again per rectangle, with the
         // stretched posScale and the rectangle as its scissor (inside this
         // draw's own, so inside the pass); through setScissor and
@@ -10272,10 +10443,13 @@ void main()
             {
                 const gpu::bars::Rect& r = barPlan.rects[i];
                 setScissor(VkRect2D{ { r.x0, r.y0 }, { uint32_t(r.x1 - r.x0), uint32_t(r.y1 - r.y0) } });
+                shaderProfileQuery = s_shaderProfiling ? ShaderProfileBegin(depth) : UINT32_MAX;
                 if (useIndices)
                     vkCmdDrawIndexed(s_cmd, vertexCount, 1, 0, 0, 0);
                 else
                     vkCmdDraw(s_cmd, vertexCount, 1, 0, 0);
+                if (shaderProfileQuery != UINT32_MAX)
+                    ShaderProfileEnd(shaderProfileQuery, s_frame + 1);
             }
         }
         if (s_submitAfterDraw)
@@ -10666,6 +10840,204 @@ void main()
         return true;
     }
 
+    void ShadowBenchmarkReportThread()
+    {
+        SetHostThreadName("nfsmw-shadow-report");
+        hostcpu::LeaveReservedCore();
+        while (true)
+        {
+            ShadowBenchmarkReport report;
+            {
+                std::unique_lock lock(s_shadowBenchmarkReportMutex);
+                s_shadowBenchmarkReportCv.wait(lock, [] { return !s_shadowBenchmarkReports.empty(); });
+                report = std::move(s_shadowBenchmarkReports.front());
+                s_shadowBenchmarkReports.pop_front();
+            }
+            {
+                std::unique_lock lock(s_submitMutex);
+                s_submitCv.wait(lock, [&] { return s_completedSubmission >= report.submission; });
+            }
+
+            struct Totals { uint64_t draws = 0; double sumUs = 0, maxUs = 0; };
+            std::map<std::pair<uint64_t, uint64_t>, Totals> totals;
+            uint32_t failed = 0, timed = 0;
+            double sumUs = 0;
+            for (const ShaderProfileDraw& draw : report.draws)
+            {
+                uint64_t timestamps[2] = {};
+                VkResult result = vkGetQueryPoolResults(s_dev, s_shaderProfileQueries, draw.query, 2, sizeof(timestamps), timestamps,
+                    sizeof(uint64_t), VK_QUERY_RESULT_64_BIT);
+                if (result != VK_SUCCESS || timestamps[1] <= timestamps[0])
+                {
+                    failed++;
+                    continue;
+                }
+                const double us = double(timestamps[1] - timestamps[0]) * s_timestampPeriod / 1000.0;
+                Totals& t = totals[{ draw.vsHash, draw.psHash }];
+                t.draws++;
+                t.sumUs += us;
+                t.maxUs = std::max(t.maxUs, us);
+                timed++;
+                sumUs += us;
+            }
+            if (report.continuous)
+            {
+                const uint64_t frames = report.lastFrame >= report.firstFrame ? report.lastFrame - report.firstFrame + 1 : 0;
+                fprintf(stderr, "[shadow-benchmark] frames %llu-%llu: %llu frames, %u draws timed, %.1f us summed intervals "
+                                "(%.2f us/frame), %u query failures, %u draws over limit\n",
+                    (unsigned long long)report.firstFrame, (unsigned long long)report.lastFrame, (unsigned long long)frames,
+                    timed, sumUs, frames ? sumUs / double(frames) : 0.0, failed, report.dropped);
+            }
+            else
+                fprintf(stderr, "[shadow-benchmark] frame %llu: %u draws timed, %.1f us summed intervals, %u query failures, %u draws over limit\n",
+                    (unsigned long long)report.lastFrame, timed, sumUs, failed, report.dropped);
+            for (const auto& [hashes, t] : totals)
+                fprintf(stderr, "[shadow-benchmark] vs_%016llx ps_%016llx: %llu draws, sum %.1f us, avg %.2f us, max %.1f us\n",
+                    (unsigned long long)hashes.first, (unsigned long long)hashes.second, (unsigned long long)t.draws,
+                    t.sumUs, t.sumUs / double(t.draws), t.maxUs);
+            fprintf(stderr, "[shadow-benchmark] per-draw intervals can overlap; summed time is not exclusive shader-core time\n");
+
+            std::lock_guard lock(s_shadowBenchmarkReportMutex);
+            if (s_shadowBenchmarkReports.empty())
+                s_shadowBenchmarkReportsPending.store(false, std::memory_order_release);
+        }
+    }
+
+    void QueueShadowBenchmarkReport(uint64_t firstFrame, uint64_t lastFrame, bool continuous,
+        std::vector<ShaderProfileDraw>&& draws, uint32_t dropped)
+    {
+        SubmitRecorded(5);
+        ShadowBenchmarkReport report;
+        report.draws = std::move(draws);
+        report.firstFrame = firstFrame;
+        report.lastFrame = lastFrame;
+        report.submission = s_submissionCounter - 1;
+        report.dropped = dropped;
+        report.continuous = continuous;
+        {
+            std::lock_guard lock(s_shadowBenchmarkReportMutex);
+            s_shadowBenchmarkReportsPending.store(true, std::memory_order_release);
+            s_shadowBenchmarkReports.push_back(std::move(report));
+        }
+        s_shadowBenchmarkReportCv.notify_one();
+    }
+
+    void ShadowBenchmarkOnSwap(uint64_t frame)
+    {
+        if (!s_shadowBenchmarkEnabled || !s_vk || s_shaderProfileRequest.kind != ShaderProfileKind::kOff)
+            return;
+        static std::once_flag reportThreadOnce;
+        std::call_once(reportThreadOnce, [] { std::thread(ShadowBenchmarkReportThread).detach(); });
+
+        const bool singleRequested = s_shadowBenchmarkSingleRequested.exchange(false, std::memory_order_acq_rel);
+        if (s_shadowBenchmarkActive)
+        {
+            const bool stop = s_shadowBenchmarkContinuous
+                ? !s_shadowBenchmarkContinuousRequested.load(std::memory_order_acquire)
+                : s_shadowBenchmarkSinglePending;
+            if (s_shadowBenchmarkSinglePending || stop)
+            {
+                s_shaderProfiling = false;
+                if (stop)
+                {
+                    QueueShadowBenchmarkReport(s_shadowBenchmarkFirstFrame, frame, s_shadowBenchmarkContinuous,
+                        std::move(s_shaderProfileDraws), s_shaderProfileDropped);
+                    s_shadowBenchmarkSinglePending = false;
+                    s_shadowBenchmarkActive = false;
+                    s_shadowBenchmarkContinuous = false;
+                    return;
+                }
+                std::vector<ShaderProfileDraw> frameDraws;
+                auto first = std::lower_bound(s_shaderProfileDraws.begin(), s_shaderProfileDraws.end(), frame,
+                    [](const ShaderProfileDraw& draw, uint64_t value) { return draw.frame < value; });
+                auto last = std::upper_bound(first, s_shaderProfileDraws.end(), frame,
+                    [](uint64_t value, const ShaderProfileDraw& draw) { return value < draw.frame; });
+                frameDraws.assign(first, last);
+                QueueShadowBenchmarkReport(frame, frame, false, std::move(frameDraws), s_shaderProfileDropped);
+                s_shadowBenchmarkSinglePending = false;
+                s_shaderProfiling = true;
+            }
+        }
+
+        if (!s_shadowBenchmarkActive)
+        {
+            const bool continuous = s_shadowBenchmarkContinuousRequested.load(std::memory_order_acquire);
+            if (!continuous && !singleRequested)
+                return;
+            s_shadowBenchmarkFirstFrame = frame + 1;
+            s_shadowBenchmarkActive = true;
+            s_shadowBenchmarkContinuous = continuous;
+            s_shadowBenchmarkSinglePending = singleRequested;
+            s_shadowBenchmarkQueryResetThrough = 0;
+            s_shaderProfileQueriesReset = false;
+            s_shaderProfileQueryNext = 0;
+            s_shaderProfileDropped = 0;
+            s_shaderProfileDraws.clear();
+            if (s_shaderProfileDraws.capacity() < kShadowBenchmarkDrawLimit)
+                s_shaderProfileDraws.reserve(kShadowBenchmarkDrawLimit);
+            fprintf(stderr, "[shadow-benchmark] measuring %s from frame %llu\n", continuous ? "continuously" : "one frame",
+                (unsigned long long)s_shadowBenchmarkFirstFrame);
+        }
+        else if (singleRequested)
+            s_shadowBenchmarkSinglePending = true;
+
+        s_shaderProfiling = true;
+    }
+
+    void ShaderProfileOnSwap(uint64_t frame)
+    {
+        if (!s_vk || s_shaderProfileRequest.kind == ShaderProfileKind::kOff)
+            return;
+        if (frame == s_shaderProfileRequest.frame)
+        {
+            s_shaderProfiling = true;
+            s_shaderProfileQueriesReset = false;
+            s_shaderProfileQueryNext = 0;
+            s_shaderProfileDropped = 0;
+            s_shaderProfileDraws.clear();
+            s_shaderProfileDraws.reserve(kShaderProfileDrawLimit);
+            fprintf(stderr, "[shader-profile] measuring frame %llu\n", (unsigned long long)frame);
+            return;
+        }
+        if (!s_shaderProfiling || frame != s_shaderProfileRequest.frame + 1)
+            return;
+        s_shaderProfiling = false;
+        Flush();
+
+        struct Totals { uint32_t draws = 0; double sumUs = 0, maxUs = 0; };
+        std::map<std::pair<uint64_t, uint64_t>, Totals> totals;
+        uint32_t failed = 0;
+        for (const ShaderProfileDraw& draw : s_shaderProfileDraws)
+        {
+            uint64_t timestamps[2] = {};
+            VkResult result = vkGetQueryPoolResults(s_dev, s_shaderProfileQueries, draw.query, 2, sizeof(timestamps), timestamps,
+                sizeof(uint64_t), VK_QUERY_RESULT_64_BIT);
+            if (result != VK_SUCCESS || timestamps[1] <= timestamps[0])
+            {
+                failed++;
+                continue;
+            }
+            double us = double(timestamps[1] - timestamps[0]) * s_timestampPeriod / 1000.0;
+            Totals& t = totals[{ draw.vsHash, draw.psHash }];
+            t.draws++;
+            t.sumUs += us;
+            t.maxUs = std::max(t.maxUs, us);
+        }
+        uint32_t timed = 0;
+        double sumUs = 0;
+        for (const auto& [hashes, t] : totals)
+        {
+            timed += t.draws;
+            sumUs += t.sumUs;
+        }
+        fprintf(stderr, "[shader-profile] frame %llu: %u draws timed, %.1f us summed intervals, %u query failures, %u draws over limit\n",
+            (unsigned long long)s_shaderProfileRequest.frame, timed, sumUs, failed, s_shaderProfileDropped);
+        for (const auto& [hashes, t] : totals)
+            fprintf(stderr, "[shader-profile] vs_%016llx ps_%016llx: %u draws, sum %.1f us, avg %.2f us, max %.1f us\n",
+                (unsigned long long)hashes.first, (unsigned long long)hashes.second, t.draws, t.sumUs, t.sumUs / t.draws, t.maxUs);
+        fprintf(stderr, "[shader-profile] intervals use per-draw GPU timestamps; sums may include overlapped pipeline work and are not exclusive shader-core time\n");
+    }
+
     void OnSwap(uint64_t frame)
     {
         HfrDrawMatchSwap(frame);  // DIAG (v0.1.5 HFR scoping)
@@ -10693,6 +11065,8 @@ void main()
             writewatch::SetWriterFrame(frame);
         }
         s_frame = frame;
+        ShadowBenchmarkOnSwap(frame);
+        ShaderProfileOnSwap(frame);
         if (s_zpdOn)
             ZpdOnSwap(frame);
         if (s_logShadowMap)
