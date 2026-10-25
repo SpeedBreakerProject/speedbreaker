@@ -10,9 +10,8 @@
 namespace video::hdr
 {
     // The brightest EDR value the picture may use, in multiples of SDR white:
-    // the display's current headroom, capped at one stop more than SDR (2x)
-    // up to 4x on a display with more headroom. 1: no EDR (a standard-range
-    // display), and Expand then leaves the picture alone.
+    // the display's current headroom, from 1 (no EDR on a standard-range
+    // display, where Expand leaves the picture alone) up to 4x.
     inline float PeakForHeadroom(float headroom)
     {
         return std::clamp(headroom, 1.0f, 4.0f);

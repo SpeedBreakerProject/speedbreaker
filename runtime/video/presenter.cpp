@@ -389,7 +389,7 @@ namespace video
         }
 
         // HDR10's static metadata: Rec.2020 primaries, D65, and the same
-        // 1000-nit peak the picture expands to.
+        // 400-nit peak the picture expands to.
         VkHdrMetadataEXT Hdr10Metadata()
         {
             VkHdrMetadataEXT m{ VK_STRUCTURE_TYPE_HDR_METADATA_EXT };
@@ -1688,7 +1688,7 @@ void main()
 
         // HDR's last pass: the SDR scene (sRGB-encoded, 8-bit) expanded into
         // the display's headroom, then the SDR UI (premultiplied, sRGB) over
-        // it. EDR outputs linear light for the FP16 extended-linear swapchain;
+        // it. EDR outputs linear light for the extended-linear swapchain;
         // HDR10 outputs PQ code values for the 10-bit HDR10 swapchain.
         const char* kHdrCompositeFs = R"(#version 460
 layout(location = 0) in vec2 uv;
@@ -1801,7 +1801,7 @@ void main()
         } s_post;
 
         // HDR Output's offscreen targets: the game's picture (SDR, 8-bit,
-        // sRGB-encoded) and the UI over it, composited into the FP16
+        // sRGB-encoded) and the UI over it, composited into the HDR
         // extended-linear swapchain (video/hdr_output.h).
         struct HdrTargets
         {
@@ -1824,7 +1824,7 @@ void main()
 
         struct HdrPush
         {
-            float peak;         // EDR: headroom (1..4); PQ: 10 (1000 nits / 100 nits)
+            float peak;         // EDR: headroom (1..4); PQ: 4 (400 nits / 100 nits)
             float sdrWhiteNits; // EDR: 1.0; PQ: 100.0
             uint32_t pq;        // 0: linear EDR; 1: PQ encode
             uint32_t pad;
@@ -1919,7 +1919,7 @@ void main()
             return true;
         }
 
-        // The SDR scene and UI decoded, expanded and composited into the FP16
+        // The SDR scene and UI decoded, expanded and composited into the HDR
         // extended-linear swapchain (kHdrCompositeFs). Leaves the swapchain
         // in COLOR_ATTACHMENT_OPTIMAL for the frame's capture/present steps.
         void RecordHdrComposite(VkCommandBuffer cmd, VkImage swapchainImage, VkImageView swapchainView)
@@ -1962,7 +1962,7 @@ void main()
             s_context.cmdEndRendering(cmd);
         }
 
-        // The composite pipeline for the current FP16 swapchain format.
+        // The composite pipeline for the current HDR swapchain format.
         bool EnsureHdrPipeline()
         {
             if (!s_swapHdr)
