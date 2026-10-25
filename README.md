@@ -457,6 +457,7 @@ switcher).
 | Xbox 360 Display Gamma | On / Off | On: the gamma ramp the game sets for a real Xbox 360's TV output, with slightly deeper shadows and slightly brighter mid-tones. Off: the flatter picture of v0.1.3 and earlier. |
 | HDR Output | On / Off | Off. Mac only: sends the picture to an HDR display with brighter highlights (extended dynamic range). This settings overlay stays at standard brightness; the game's own front end and HUD are part of the picture, so their whites follow the highlights. With Auto on a standard-range display it looks the same as Off. |
 | HDR Format | Auto / Extended Linear / HDR10 (PQ) | Auto: Extended Linear on a display that reports HDR capability, otherwise standard range. HDR10 (PQ) sends the PQ signal and metadata; the display's HDR mode still follows macOS. Mac only; used while HDR Output is on. |
+| HDR Strength | 2x / 3x / 4x | 2x (200 nits in HDR10) by default, up to 4x (400 nits). A mostly white frame is dimmed toward SDR automatically, so a boot flash or a full-screen logo doesn't become a 4x flash. Mac only; used while HDR Output is on. |
 
 The game's own Brightness slider, in the pause menu's Options > Video, works too while Xbox 360
 Display Gamma is on (with it off, it does nothing). Its middle is the default look; Y (Defaults),

@@ -103,9 +103,17 @@ int main()
         CHECK(Near(LinearToSrgb(SrgbToLinear(v)), v, 1e-6f), "%.6f -> %.9f", v, LinearToSrgb(SrgbToLinear(v)));
     }
 
-    // PQ: HDR10's absolute scale.
-    CHECK(kSdrWhiteNits == 100.0f && kHdr10PeakNits == 400.0f && kHdr10MaxFallNits == 100.0f, "%.1f %.1f %.1f",
-        kSdrWhiteNits, kHdr10PeakNits, kHdr10MaxFallNits);
+    // PQ: HDR10's absolute scale, and the frame-average limiter.
+    CHECK(kSdrWhiteNits == 100.0f && kHdr10MaxFallNits == 100.0f && kHdrStrengthDefault == 2.0f && kHdrStrengthMax == 4.0f,
+        "%.1f %.1f %.1f %.1f", kSdrWhiteNits, kHdr10MaxFallNits, kHdrStrengthDefault, kHdrStrengthMax);
+    CHECK(Near(FramePeak(4.0f, 0.0f), 4.0f), "%.6f", FramePeak(4.0f, 0.0f));
+    CHECK(Near(FramePeak(4.0f, 0.25f), 4.0f), "%.6f", FramePeak(4.0f, 0.25f));
+    CHECK(Near(FramePeak(4.0f, 0.5f), 2.0f), "%.6f", FramePeak(4.0f, 0.5f));
+    CHECK(Near(FramePeak(2.0f, 0.5f), 2.0f), "%.6f", FramePeak(2.0f, 0.5f));
+    CHECK(Near(FramePeak(4.0f, 1.0f), 1.0f), "%.6f", FramePeak(4.0f, 1.0f));
+    CHECK(Near(FramePeak(1.0f, 0.5f), 1.0f), "%.6f", FramePeak(1.0f, 0.5f));
+    // A near-white frame stays near SDR rather than flashing.
+    CHECK(FramePeak(4.0f, 0.9f) < 1.12f, "%.6f", FramePeak(4.0f, 0.9f));
     CHECK(NitsToPq(0.0f) <= 1e-6f, "%.9f", NitsToPq(0.0f));
     CHECK(Near(NitsToPq(100.0f), 0.508078f, 1e-5f), "%.9f", NitsToPq(100.0f));
     CHECK(Near(NitsToPq(203.0f), 0.580689f, 1e-5f), "%.9f", NitsToPq(203.0f));

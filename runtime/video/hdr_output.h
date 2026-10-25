@@ -39,13 +39,26 @@ namespace video::hdr
         return v <= 0.0031308f ? v * 12.92f : 1.055f * std::pow(v, 1.0f / 2.4f) - 0.055f;
     }
 
-    // HDR10's absolute scale: SDR white, the peak the metadata declares, and
-    // a conservative frame-average light level. 400 nits keeps the game's own
-    // front-end/HUD white from jumping to a display's full EDR range; the
-    // highlight curve still opens above SDR.
+    // HDR10's absolute scale: SDR white, and the frame-average level the
+    // limiter keeps the picture near. The peak itself comes from the HDR
+    // Strength setting (2x/200 nits by default, up to 4x/400).
     constexpr float kSdrWhiteNits = 100.0f;
-    constexpr float kHdr10PeakNits = 400.0f;
     constexpr float kHdr10MaxFallNits = 100.0f;
+    constexpr float kHdrStrengthDefault = 2.0f;
+    constexpr float kHdrStrengthMax = 4.0f;
+
+    // The peak for a frame whose SDR luma averages `average` (0..1): keep
+    // peak * average at SDR white, so a full-white frame (a boot flash, a
+    // logo) cannot become a full-screen 4x flash. Normal, darker frames keep
+    // the requested `base` peak.
+    inline float FramePeak(float base, float average)
+    {
+        base = std::max(base, 1.0f);
+        average = std::clamp(average, 0.0f, 1.0f);
+        if (average <= 0.0f)
+            return base;
+        return std::clamp(std::min(base, 1.0f / average), 1.0f, base);
+    }
 
     // Rec.709 luma, for expanding light rather than each channel (which would
     // shift the hue of bright colours).

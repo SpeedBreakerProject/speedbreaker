@@ -136,6 +136,16 @@ sb_test(display_tone_test ARGS ${RT}/video/presenter.cpp ${RT}/user/settings.cpp
 # HDR Output's highlight curve and transfer functions
 # (video/hdr_output.h, header only).
 sb_test(hdr_output_test)
+# HDR's composite and frame-average GLSL (video/presenter.cpp): the maths
+# that must match hdr_output.h, written out for the glslang check below.
+sb_test(hdr_shader_test ARGS ${RT}/video/presenter.cpp ${CMAKE_CURRENT_BINARY_DIR}/hdr_shaders)
+if(SB_GLSLANG_VALIDATOR)
+    foreach(shader hdr_composite.frag hdr_average.comp)
+        add_test(NAME hdr_shader_check_${shader} COMMAND ${SB_GLSLANG_VALIDATOR} -V --target-env vulkan1.1
+            ${CMAKE_CURRENT_BINARY_DIR}/hdr_shaders/${shader} -o ${CMAKE_CURRENT_BINARY_DIR}/hdr_shaders/${shader}.spv)
+        set_tests_properties(hdr_shader_check_${shader} PROPERTIES DEPENDS hdr_shader_test)
+    endforeach()
+endif()
 # The display's refresh measured from present completions, at 60 Hz and at
 # whole multiples of it (video/refresh_fit.cpp, video/refresh_multiple.h).
 sb_test(refresh_fit_test SOURCES ${RT}/video/refresh_fit.cpp)

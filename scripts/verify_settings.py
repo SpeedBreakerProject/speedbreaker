@@ -103,7 +103,7 @@ RACE = '8-26/2:START,30-130/4:DOWN,31-131/4:A,32.5-132.5/4:START,145:A'
 PAGES = ['Display', 'Graphics', 'Audio', 'Input', 'Controls', 'Advanced']
 ROWS = {
     'Display': ['video.fullscreen', 'video.vsync', 'video.frame_rate', 'video.aspect_ratio', 'video.brightness',
-                'video.xbox_display_gamma'] + (['video.hdr', 'video.hdr_format'] if MAC else []),
+                'video.xbox_display_gamma'] + (['video.hdr', 'video.hdr_format', 'video.hdr_strength'] if MAC else []),
     'Graphics': ['video.anti_aliasing', 'video.scaling', 'video.sharpening', 'video.anisotropic_filtering',
                  'video.mipmaps', 'video.internal_resolution'],
     'Audio': ['audio.master_volume', 'audio.mute', 'audio.mute_in_background'],
@@ -115,7 +115,7 @@ DEFAULTS = {
     'video.fullscreen': 'false', 'video.vsync': 'true', 'video.frame_rate': '"60"', 'video.present_scale': '"100"',
     'video.anti_aliasing': 'true', 'video.scaling': '"bicubic"',
     'video.aspect_ratio': '"auto"', 'video.brightness': '0', 'video.xbox_display_gamma': 'true', 'video.hdr': 'false',
-    'video.hdr_format': '"auto"', 'video.sharpening': '0.3', 'video.anisotropic_filtering': '"auto"',
+    'video.hdr_format': '"auto"', 'video.hdr_strength': '"2x"', 'video.sharpening': '0.3', 'video.anisotropic_filtering': '"auto"',
     'video.mipmaps': 'true', 'video.internal_resolution': '"auto"', 'audio.master_volume': '100', 'audio.mute': 'false',
     'audio.mute_in_background': 'false', 'input.stick_deadzone': '0.08', 'input.trigger_deadzone': '0.02',
     'input.vibration': 'true', 'advanced.async_shaders': 'true', 'advanced.performance_overlay': 'false',
@@ -281,6 +281,8 @@ def phase_video():
         p.close(2.0)
         p.change('video.hdr', -1, 'Off')
         p.close(2.0)
+        p.change('video.hdr_strength', 1, '3x (300 nits)')
+        p.change('video.hdr_strength', -1, '2x (200 nits)')
         p.change('video.hdr_format', -2, 'Auto')
         p.close()
     # Restart options: changed, the picture as before; put back (the running

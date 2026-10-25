@@ -139,6 +139,12 @@ namespace settings
             { 2, "hdr10", "HDR10 (PQ)" },
         };
 
+        constexpr EnumEntry kHdrStrengthEntries[] = {
+            { 2, "2x", "2x (200 nits)" },
+            { 3, "3x", "3x (300 nits)" },
+            { 4, "4x", "4x (400 nits)" },
+        };
+
         constexpr EnumEntry kAspectEntries[] = {
             { int32_t(AspectMode::Auto), "auto", "Fill Screen" },
             { int32_t(AspectMode::Widescreen), "16:9", "16:9" },
@@ -293,6 +299,10 @@ namespace settings
               .table = "video", .key = "hdr_format", .label = "HDR Format",
               .description = "How HDR is sent. Auto: Extended Linear on a display that reports HDR capability, otherwise standard range. HDR10 (PQ) sends the PQ signal and metadata; the display's HDR mode still follows macOS.",
               .env = "NFSMW_HDR_FORMAT", .defaultValue = 0, .entries = kHdrFormatEntries },
+            { .id = Id::HdrStrength, .category = Category::Display, .type = Type::Enum, .apply = Apply::Live, .hidden = kHdrHidden,
+              .table = "video", .key = "hdr_strength", .label = "HDR Strength",
+              .description = "How far white and highlights go above SDR white: 2x by default (200 nits in HDR10), 3x, or 4x. A frame that is mostly white is dimmed toward SDR automatically, so a boot flash or a full-screen logo does not become a 4x flash.",
+              .env = "NFSMW_HDR_STRENGTH", .defaultValue = 2, .entries = kHdrStrengthEntries },
             { .id = Id::Sharpening, .category = Category::Graphics, .type = Type::Float, .apply = Apply::Live,
               .table = "video", .key = "sharpening", .label = "Sharpening",
               .description = kFsr1Offered

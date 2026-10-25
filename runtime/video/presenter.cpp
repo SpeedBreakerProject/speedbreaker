@@ -56,6 +56,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstring>
 #include <format>
 #include <iterator>
 #include <unordered_set>
@@ -97,8 +98,10 @@ namespace video
         bool s_pqUnavailable = false;           // no PQ pair, or no VK_EXT_hdr_metadata
         bool s_hdrMetadataExt = false;          // VK_EXT_hdr_metadata enabled
         PFN_vkSetHdrMetadataEXT s_setHdrMetadata = nullptr;
+        int32_t s_hdrStrength = 2;              // Settings > Display > HDR Strength (2, 3, or 4)
         float s_hdrHeadroom = 1.0f;
-        float s_hdrPeak = 1.0f;                 // EDR: video::hdr::PeakForHeadroom(s_hdrHeadroom); PQ: 4
+        float s_hdrPeakBase = 1.0f;             // strength, or the EDR headroom when smaller
+        float s_hdrPeak = 1.0f;                 // after the frame-average limiter
         std::string s_hdrStatus = "Standard range";  // for the settings help
 
         // The format every picture/UI pass renders into: the swapchain itself
@@ -388,18 +391,18 @@ namespace video
             }
         }
 
-        // HDR10's static metadata: Rec.2020 primaries, D65, and the same
-        // 400-nit peak the picture expands to.
-        VkHdrMetadataEXT Hdr10Metadata()
+        // HDR10's static metadata: Rec.2020 primaries, D65, the HDR Strength
+        // peak, and the frame-average target the limiter holds to.
+        VkHdrMetadataEXT Hdr10Metadata(float peakNits)
         {
             VkHdrMetadataEXT m{ VK_STRUCTURE_TYPE_HDR_METADATA_EXT };
             m.displayPrimaryRed = { 0.708f, 0.292f };
             m.displayPrimaryGreen = { 0.170f, 0.797f };
             m.displayPrimaryBlue = { 0.131f, 0.046f };
             m.whitePoint = { 0.3127f, 0.3290f };
-            m.maxLuminance = hdr::kHdr10PeakNits;
+            m.maxLuminance = peakNits;
             m.minLuminance = 0.005f;
-            m.maxContentLightLevel = hdr::kHdr10PeakNits;
+            m.maxContentLightLevel = peakNits;
             m.maxFrameAverageLightLevel = hdr::kHdr10MaxFallNits;
             return m;
         }
@@ -913,6 +916,7 @@ namespace video
         bool EnsureHdrTargets();
         void DestroyHdrTargets();
         bool EnsureHdrPipeline();
+        bool EnsureHdrAverage();
 
         void DestroySwapchain()
         {
@@ -1041,7 +1045,8 @@ namespace video
             s_swapHdr = wantEdr || wantPq;
             s_swapPq = wantPq;
             s_hdrHeadroom = hdrPossible ? headroom : 1.0f;
-            s_hdrPeak = wantPq ? hdr::kHdr10PeakNits / hdr::kSdrWhiteNits : hdr::PeakForHeadroom(headroom);
+            s_hdrPeakBase = s_swapPq ? float(s_hdrStrength) : std::min(hdr::PeakForHeadroom(headroom), float(s_hdrStrength));
+            s_hdrPeak = s_hdrPeakBase;
             static int lastAuto = -2;
             const int autoChoice = wantEdr ? 0 : wantPq ? 1 : 2;
             if (hdrPossible && s_hdrFormat == 0 && autoChoice != lastAuto)
@@ -1069,8 +1074,8 @@ namespace video
                 s_hdrHeadroom = 1.0f;
                 s_hdrPeak = 1.0f;
             }
-            s_hdrStatus = s_swapPq ? std::format("HDR10 (PQ), {:.0f}-{:.0f} nits", hdr::kSdrWhiteNits, hdr::kHdr10PeakNits)
-                : s_swapHdr ? std::format("Extended Linear (EDR), headroom {:.2f}", s_hdrHeadroom) : "Standard range";
+            s_hdrStatus = s_swapPq ? std::format("HDR10 (PQ), up to {:.0f} nits", float(s_hdrStrength) * hdr::kSdrWhiteNits)
+                : s_swapHdr ? std::format("Extended Linear (EDR), up to {:.2f}x", s_hdrPeakBase) : "Standard range";
             static VkFormat loggedFormat = VK_FORMAT_UNDEFINED;
             static VkColorSpaceKHR loggedColorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
             if (s_swapFormat != loggedFormat || s_swapColorSpace != loggedColorSpace)
@@ -1079,8 +1084,8 @@ namespace video
                 loggedColorSpace = s_swapColorSpace;
                 fprintf(stderr, "[video] swapchain: %s (%s, %s%s)\n", s_swapPq ? "HDR10" : s_swapHdr ? "HDR" : "SDR",
                     FormatName(s_swapFormat), ColorSpaceName(s_swapColorSpace),
-                    s_swapPq ? std::format(", {:.0f}-{:.0f} nits", hdr::kSdrWhiteNits, hdr::kHdr10PeakNits).c_str()
-                    : s_swapHdr ? std::format(", display headroom {:.2f}", s_hdrHeadroom).c_str() : "");
+                    s_swapPq ? std::format(", up to {:.0f} nits", float(s_hdrStrength) * hdr::kSdrWhiteNits).c_str()
+                    : s_swapHdr ? std::format(", up to {:.2f}x", s_hdrPeakBase).c_str() : "");
             }
 
             VkSwapchainCreateInfoKHR info{ VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR };
@@ -1128,7 +1133,7 @@ namespace video
                 return false;
             if (s_swapPq && s_setHdrMetadata)
             {
-                const VkHdrMetadataEXT metadata = Hdr10Metadata();
+                const VkHdrMetadataEXT metadata = Hdr10Metadata(float(s_hdrStrength) * hdr::kSdrWhiteNits);
                 s_setHdrMetadata(s_device, 1, &s_swapchain, &metadata);
             }
             {
@@ -1748,6 +1753,40 @@ void main()
 }
 )";
 
+        // A coarse average of the SDR scene's linear-light luma, for the
+        // frame-average limiter. One invocation per 32x18 cell samples a
+        // 32x32 grid across it; the host averages the cells. Reading this on
+        // the frame after it is written keeps the render from stalling.
+        const char* kHdrAverageCs = R"(#version 460
+layout(local_size_x = 1, local_size_y = 1) in;
+layout(set = 0, binding = 0) uniform sampler2D sceneTex;  // B8G8R8A8_UNORM, sRGB-encoded
+layout(set = 0, binding = 1) buffer Out { float cells[]; } outCells;
+
+vec3 srgbToLinear(vec3 c)
+{
+    vec3 lo = c / 12.92;
+    vec3 hi = pow((c + 0.055) / 1.055, vec3(2.4));
+    return mix(hi, lo, lessThanEqual(c, vec3(0.04045)));
+}
+
+void main()
+{
+    ivec2 size = textureSize(sceneTex, 0);
+    ivec2 cell = ivec2(gl_GlobalInvocationID.xy);
+    vec2 grid = vec2(32.0, 18.0);
+    float sum = 0.0;
+    for (int y = 0; y < 32; ++y)
+        for (int x = 0; x < 32; ++x)
+        {
+            vec2 uv = (vec2(cell) + (vec2(x, y) + 0.5) / 32.0) / grid;
+            ivec2 p = clamp(ivec2(uv * vec2(size)), ivec2(0), size - 1);
+            vec3 linear = srgbToLinear(texelFetch(sceneTex, p, 0).rgb);
+            sum += dot(linear, vec3(0.2126, 0.7152, 0.0722));
+        }
+    outCells.cells[cell.y * 32 + cell.x] = sum / 1024.0;
+}
+)";
+
         // The tone variant of a scale shader's source ("" if it hasn't
         // exactly one main to rename).
         std::string ToneVariant(const char* scaleGlsl)
@@ -1824,15 +1863,59 @@ void main()
 
         struct HdrPush
         {
-            float peak;         // EDR: headroom (1..4); PQ: 4 (400 nits / 100 nits)
+            float peak;         // EDR: headroom or HDR Strength; PQ: HDR Strength (200..400 nits / 100)
             float sdrWhiteNits; // EDR: 1.0; PQ: 100.0
             uint32_t pq;        // 0: linear EDR; 1: PQ encode
             uint32_t pad;
         };
         static_assert(sizeof(HdrPush) == 16);
 
+        constexpr uint32_t kHdrAvgWidth = 32;
+        constexpr uint32_t kHdrAvgHeight = 18;
+        constexpr uint32_t kHdrAvgCells = kHdrAvgWidth * kHdrAvgHeight;
+
+        // The scene's average SDR luma, computed a frame behind (the host
+        // reads the buffer after that frame's fence): a full-white frame
+        // lowers the peak rather than becoming a full-screen flash.
+        struct HdrAverage
+        {
+            VkDescriptorSetLayout set = VK_NULL_HANDLE;
+            VkPipelineLayout layout = VK_NULL_HANDLE;
+            VkShaderModule module = VK_NULL_HANDLE;
+            VkPipeline pipeline = VK_NULL_HANDLE;
+            VkBuffer buffer[FRAMES_IN_FLIGHT]{};
+            VkDeviceMemory memory[FRAMES_IN_FLIGHT]{};
+            void* mapped[FRAMES_IN_FLIGHT]{};
+            bool pending[FRAMES_IN_FLIGHT]{};
+            float smoothed = 0.0f;
+            bool ready = false;
+        } s_hdrAverage;
+
+        void DestroyHdrAverage()
+        {
+            for (uint32_t i = 0; i < FRAMES_IN_FLIGHT; i++)
+            {
+                if (s_hdrAverage.mapped[i])
+                    vkUnmapMemory(s_device, s_hdrAverage.memory[i]);
+                if (s_hdrAverage.buffer[i])
+                    vkDestroyBuffer(s_device, s_hdrAverage.buffer[i], nullptr);
+                if (s_hdrAverage.memory[i])
+                    vkFreeMemory(s_device, s_hdrAverage.memory[i], nullptr);
+            }
+            if (s_hdrAverage.pipeline)
+                vkDestroyPipeline(s_device, s_hdrAverage.pipeline, nullptr);
+            if (s_hdrAverage.module)
+                vkDestroyShaderModule(s_device, s_hdrAverage.module, nullptr);
+            if (s_hdrAverage.layout)
+                vkDestroyPipelineLayout(s_device, s_hdrAverage.layout, nullptr);
+            if (s_hdrAverage.set)
+                vkDestroyDescriptorSetLayout(s_device, s_hdrAverage.set, nullptr);
+            s_hdrAverage = {};
+        }
+
         void DestroyHdrTargets()
         {
+            DestroyHdrAverage();
             if (s_hdrTargets.sceneView)
                 vkDestroyImageView(s_device, s_hdrTargets.sceneView, nullptr);
             if (s_hdrTargets.uiView)
@@ -1968,7 +2051,7 @@ void main()
             if (!s_swapHdr)
                 return true;
             if (s_hdrComposite.pipeline && s_hdrComposite.format == s_swapFormat)
-                return true;
+                return EnsureHdrAverage();
             if (s_hdrComposite.pipeline)
             {
                 vkDestroyPipeline(s_device, s_hdrComposite.pipeline, nullptr);
@@ -2068,7 +2151,145 @@ void main()
                 return false;
             }
             s_hdrComposite.format = s_swapFormat;
+            if (!EnsureHdrAverage())
+                fprintf(stderr, "[video] HDR: the frame-average limiter couldn't be made; highlights stay at HDR Strength\n");
             return true;
+        }
+
+        // The 32x18 average of the scene, and the small host-visible buffer
+        // it lands in. Failure only turns the frame-average limiter off.
+        bool EnsureHdrAverage()
+        {
+            if (!s_swapHdr)
+                return true;
+            if (s_hdrAverage.ready)
+                return true;
+            if (!s_hdrComposite.push)
+                return false;
+            DestroyHdrAverage();
+            VkDescriptorSetLayoutBinding bindings[2] = {
+                { 0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr },
+                { 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr },
+            };
+            VkDescriptorSetLayoutCreateInfo dslci{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
+            dslci.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR;
+            dslci.bindingCount = 2;
+            dslci.pBindings = bindings;
+            if (!Check(vkCreateDescriptorSetLayout(s_device, &dslci, nullptr, &s_hdrAverage.set), "HDR average set layout"))
+            {
+                DestroyHdrAverage();
+                return false;
+            }
+            VkPipelineLayoutCreateInfo plci{ VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
+            plci.setLayoutCount = 1;
+            plci.pSetLayouts = &s_hdrAverage.set;
+            if (!Check(vkCreatePipelineLayout(s_device, &plci, nullptr, &s_hdrAverage.layout), "HDR average pipeline layout"))
+            {
+                DestroyHdrAverage();
+                return false;
+            }
+            s_hdrAverage.module = PostModule(kHdrAverageCs, 2);
+            if (!s_hdrAverage.module)
+            {
+                DestroyHdrAverage();
+                return false;
+            }
+            VkComputePipelineCreateInfo cpci{ VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO };
+            cpci.stage = { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_COMPUTE_BIT,
+                s_hdrAverage.module, "main", nullptr };
+            cpci.layout = s_hdrAverage.layout;
+            if (!Check(vkCreateComputePipelines(s_device, VK_NULL_HANDLE, 1, &cpci, nullptr, &s_hdrAverage.pipeline),
+                    "HDR average pipeline"))
+            {
+                DestroyHdrAverage();
+                return false;
+            }
+            const VkDeviceSize size = VkDeviceSize(kHdrAvgCells) * sizeof(float);
+            for (uint32_t i = 0; i < FRAMES_IN_FLIGHT; i++)
+            {
+                VkBufferCreateInfo bci{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+                bci.size = size;
+                bci.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+                bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+                if (!Check(vkCreateBuffer(s_device, &bci, nullptr, &s_hdrAverage.buffer[i]), "HDR average buffer"))
+                {
+                    DestroyHdrAverage();
+                    return false;
+                }
+                VkMemoryRequirements req;
+                vkGetBufferMemoryRequirements(s_device, s_hdrAverage.buffer[i], &req);
+                VkMemoryAllocateInfo ai{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+                ai.allocationSize = req.size;
+                ai.memoryTypeIndex = FindMemoryType(req.memoryTypeBits,
+                    VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+                if (ai.memoryTypeIndex == UINT32_MAX ||
+                    !Check(vkAllocateMemory(s_device, &ai, nullptr, &s_hdrAverage.memory[i]), "HDR average memory") ||
+                    !Check(vkBindBufferMemory(s_device, s_hdrAverage.buffer[i], s_hdrAverage.memory[i], 0), "HDR average bind") ||
+                    !Check(vkMapMemory(s_device, s_hdrAverage.memory[i], 0, VK_WHOLE_SIZE, 0, &s_hdrAverage.mapped[i]),
+                        "HDR average map"))
+                {
+                    DestroyHdrAverage();
+                    return false;
+                }
+                std::memset(s_hdrAverage.mapped[i], 0, size_t(size));
+            }
+            s_hdrAverage.ready = true;
+            fprintf(stderr, "[video] HDR: frame-average limiter ready\n");
+            return true;
+        }
+
+        // After the composite: the scene is in SHADER_READ_ONLY_OPTIMAL. The
+        // result is read on a later frame, so this never waits for the GPU.
+        void RecordHdrAverage(VkCommandBuffer cmd)
+        {
+            if (!s_swapHdr || !s_hdrAverage.ready)
+                return;
+            VkDescriptorImageInfo scene{ s_hdrComposite.sampler, s_hdrTargets.sceneView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+            VkDescriptorBufferInfo out{ s_hdrAverage.buffer[s_frameIndex], 0, VK_WHOLE_SIZE };
+            VkWriteDescriptorSet writes[2] = {
+                { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, VK_NULL_HANDLE, 0, 0, 1,
+                    VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &scene, nullptr, nullptr },
+                { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, VK_NULL_HANDLE, 1, 0, 1,
+                    VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &out, nullptr },
+            };
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, s_hdrAverage.pipeline);
+            s_hdrComposite.push(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, s_hdrAverage.layout, 0, 2, writes);
+            vkCmdDispatch(cmd, kHdrAvgWidth, kHdrAvgHeight, 1);
+            VkBufferMemoryBarrier barrier{ VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER };
+            barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+            barrier.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+            barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            barrier.buffer = s_hdrAverage.buffer[s_frameIndex];
+            barrier.offset = 0;
+            barrier.size = VK_WHOLE_SIZE;
+            vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 0, nullptr, 1, &barrier, 0,
+                nullptr);
+            s_hdrAverage.pending[s_frameIndex] = true;
+        }
+
+        // The previous use of this frame slot has completed (the caller waited
+        // on its fence), so its average is safe to read. Fast attack, slow
+        // release: a white frame lowers the peak at once, and recovery eases.
+        void ReadHdrAverage()
+        {
+            if (!s_swapHdr || !s_hdrAverage.ready || !s_hdrAverage.pending[s_frameIndex])
+                return;
+            const float* cells = static_cast<const float*>(s_hdrAverage.mapped[s_frameIndex]);
+            float sum = 0.0f;
+            for (uint32_t i = 0; i < kHdrAvgCells; i++)
+                sum += cells[i];
+            s_hdrAverage.pending[s_frameIndex] = false;
+            const float average = std::clamp(sum / float(kHdrAvgCells), 0.0f, 1.0f);
+            if (average > s_hdrAverage.smoothed)
+                s_hdrAverage.smoothed = average;
+            else
+                s_hdrAverage.smoothed += (average - s_hdrAverage.smoothed) * 0.15f;
+            static const bool logAverage = [] { const char* v = std::getenv("NFSMW_HDR_AVG_LOG"); return v && v[0] == '1'; }();
+            static uint64_t logged = 0;
+            if (logAverage && (logged++ % 30) == 0)
+                fprintf(stderr, "[video] HDR average %.3f, peak %.2f of %.2f\n", s_hdrAverage.smoothed, s_hdrPeak,
+                    s_hdrPeakBase);
         }
 
         // A scale pipeline (the plain one or the tone variant) for the
@@ -3057,6 +3278,16 @@ void main()
                 s_hdrFormat = hdrFormat;
                 rebuild = true;
             }
+            const int32_t hdrStrength = std::clamp(settings::GetInt(settings::Id::HdrStrength), 2, 4);
+            if (hdrStrength != s_hdrStrength)
+            {
+                s_hdrStrength = hdrStrength;
+                if (s_swapPq && s_setHdrMetadata && s_swapchain)
+                {
+                    const VkHdrMetadataEXT metadata = Hdr10Metadata(float(s_hdrStrength) * hdr::kSdrWhiteNits);
+                    s_setHdrMetadata(s_device, 1, &s_swapchain, &metadata);
+                }
+            }
 #if defined(__APPLE__) && TARGET_OS_IOS
             // Screen Resolution: CreateSwapchain sets the view's scale first.
             if (float scale = WantedPresentScale(); scale != s_presentScale)
@@ -3331,6 +3562,7 @@ void main()
         s_vsync = settings::GetBool(settings::Id::VSync);
         s_hdrSetting = kHdrOffered && settings::GetBool(settings::Id::Hdr);
         s_hdrFormat = settings::GetInt(settings::Id::HdrFormat);
+        s_hdrStrength = std::clamp(settings::GetInt(settings::Id::HdrStrength), 2, 4);
 #if defined(__APPLE__) && TARGET_OS_IOS
         // Always fullscreen there (FullscreenLocked), which hides the status
         // bar over the picture. SDL then also defers every screen edge's
@@ -4509,22 +4741,6 @@ void main()
             SDL_Delay(16);
             return true;
         }
-#if defined(__APPLE__) && !TARGET_OS_IOS
-        if (s_swapHdr && !s_swapPq)
-        {
-            // The current headroom follows the brightness slider and rises
-            // once EDR content is up; the composite's push constant takes it
-            // every frame.
-            const float headroom = platform::macos::DisplayHeadroom(s_window);
-            if (std::abs(headroom - s_hdrHeadroom) > 0.01f)
-            {
-                s_hdrHeadroom = headroom;
-                s_hdrPeak = hdr::PeakForHeadroom(headroom);
-                s_hdrStatus = std::format("Extended Linear (EDR), headroom {:.2f}", s_hdrHeadroom);
-            }
-        }
-#endif
-
         // Held until the frame that uses the renderer's image is submitted
         // (ReleaseFrontImage waits for it before that image is destroyed).
         std::unique_lock frontLock(s_frontUseMutex);
@@ -4638,6 +4854,27 @@ void main()
 
         Frame& f = s_frames[s_frameIndex];
         vkWaitForFences(s_device, 1, &f.inFlight, VK_TRUE, UINT64_MAX);
+        ReadHdrAverage();
+        if (s_swapHdr)
+        {
+            // The current headroom follows the brightness slider and rises
+            // once EDR content is up; the composite's push constant takes it
+            // every frame, after the frame-average limiter.
+            if (s_swapPq)
+            {
+                s_hdrPeakBase = float(s_hdrStrength);
+                s_hdrStatus = std::format("HDR10 (PQ), up to {:.0f} nits", float(s_hdrStrength) * hdr::kSdrWhiteNits);
+            }
+            else
+            {
+#if defined(__APPLE__) && !TARGET_OS_IOS
+                s_hdrHeadroom = platform::macos::DisplayHeadroom(s_window);
+#endif
+                s_hdrPeakBase = std::min(hdr::PeakForHeadroom(s_hdrHeadroom), float(s_hdrStrength));
+                s_hdrStatus = std::format("Extended Linear (EDR), up to {:.2f}x (headroom {:.2f})", s_hdrPeakBase, s_hdrHeadroom);
+            }
+            s_hdrPeak = hdr::FramePeak(s_hdrPeakBase, s_hdrAverage.smoothed);
+        }
         if (game::covers::Enabled())
             CoverCheckHarvest(s_frameIndex);
         if (f.timed)
@@ -4968,6 +5205,7 @@ void main()
                     ui::Draw(cmd);
                 s_context.cmdEndRendering(cmd);
                 RecordHdrComposite(cmd, s_swapImages[imageIndex], s_swapViews[imageIndex]);
+                RecordHdrAverage(cmd);
                 dst = s_swapImages[imageIndex];
             }
             else
@@ -5106,6 +5344,7 @@ void main()
                     ui::Draw(cmd);
                 s_context.cmdEndRendering(cmd);
                 RecordHdrComposite(cmd, s_swapImages[imageIndex], s_swapViews[imageIndex]);
+                RecordHdrAverage(cmd);
                 dst = s_swapImages[imageIndex];
                 Barrier(cmd, dst, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
                     VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, 0, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
