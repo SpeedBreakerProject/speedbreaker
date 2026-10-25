@@ -10,6 +10,26 @@
 #import <AppKit/AppKit.h>
 #include <cmath>
 #include <SDL3/SDL.h>
+#include <ui/ui.h>
+
+@interface SpeedBreakerMenuHandler : NSObject
+- (void)openSettings:(id)sender;
+@end
+
+@implementation SpeedBreakerMenuHandler
+- (void)openSettings:(id)sender
+{
+    if (ui::SettingsOpen())
+        ui::CloseSettings();
+    else
+        ui::OpenSettings();
+}
+
+- (BOOL)validateMenuItem:(NSMenuItem*)item
+{
+    return YES;
+}
+@end
 
 namespace platform::macos
 {
@@ -18,6 +38,7 @@ namespace platform::macos
         NSWindow* s_window = nil;      // the game's (SDL's, not retained here)
         bool s_inTransition = false;   // between a fullscreen transition's "will" and its "did" (or "did fail")
         NSMutableArray* s_observers = nil;
+        SpeedBreakerMenuHandler* s_menuHandler = nil;
 
         NSWindow* CocoaWindow(SDL_Window* window)
         {
@@ -39,6 +60,29 @@ namespace platform::macos
         {
             id token = [NSNotificationCenter.defaultCenter addObserverForName:name object:window queue:nil usingBlock:block];
             [s_observers addObject:token];
+        }
+
+        void WireSettingsMenu()
+        {
+            if (s_menuHandler)
+                return;
+            s_menuHandler = [[SpeedBreakerMenuHandler alloc] init];
+            NSMenu* mainMenu = NSApp.mainMenu;
+            if (!mainMenu || mainMenu.numberOfItems == 0)
+                return;
+            NSMenuItem* appMenuItem = [mainMenu itemAtIndex:0];
+            NSMenu* appMenu = appMenuItem.submenu;
+            if (!appMenu)
+                return;
+            for (NSMenuItem* item in appMenu.itemArray)
+            {
+                if ([item.keyEquivalent isEqualToString:@","])
+                {
+                    item.target = s_menuHandler;
+                    item.action = @selector(openSettings:);
+                    break;
+                }
+            }
         }
     }
 
@@ -73,6 +117,7 @@ namespace platform::macos
         }
         if (windowed)
             ApplyLook(w);
+        WireSettingsMenu();
     }
 
     bool RestoreAfterFullscreen(SDL_Window* window)
