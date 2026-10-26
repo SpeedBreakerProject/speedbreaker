@@ -1547,6 +1547,7 @@ void main()
             bool filled = false;
             int32_t brightness = 0;
             bool ramp = false;
+            bool coolerColors = false;
             uint64_t rampGeneration = 0;
         } s_tone;
 
@@ -1859,14 +1860,15 @@ void main()
         {
             const int32_t brightness = std::clamp(settings::GetInt(settings::Id::Brightness), tone::kBrightnessMin, tone::kBrightnessMax);
             const bool useRamp = settings::GetBool(settings::Id::DisplayGamma);
-            if (tone::Neutral(brightness, useRamp) || !EnsureTone())
+            const bool coolerColors = settings::GetBool(settings::Id::CoolerColors);
+            if (tone::Neutral(brightness, useRamp, coolerColors) || !EnsureTone())
                 return false;
             const uint64_t rampGeneration = useRamp ? display_gamma::Generation() : 0;
-            if (s_tone.filled && s_tone.brightness == brightness && s_tone.ramp == useRamp && s_tone.rampGeneration == rampGeneration)
+            if (s_tone.filled && s_tone.brightness == brightness && s_tone.ramp == useRamp && s_tone.coolerColors == coolerColors && s_tone.rampGeneration == rampGeneration)
                 return true;
             display_gamma::Table ramp;
             const bool haveRamp = useRamp && display_gamma::Latest(ramp) != 0;
-            const tone::Lut lut = tone::BuildLut(brightness, haveRamp ? &ramp : nullptr);
+            const tone::Lut lut = tone::BuildLut(brightness, haveRamp ? &ramp : nullptr, coolerColors);
             const auto texels = tone::ToHalfTexels(lut);
             // The frames in flight may be reading the table: rare (a setting
             // or the game's own ramp changed), so wait for them.
@@ -1880,12 +1882,14 @@ void main()
             vkCmdCopyBufferToImage(cmd, s_tone.staging, s_tone.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
             Barrier(cmd, s_tone.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                 VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
-            fprintf(stderr, "[video] tone: brightness %+d, Xbox 360 display gamma %s; 64->%.1f 128->%.1f 192->%.1f (8-bit levels, red)\n",
+            fprintf(stderr, "[video] tone: brightness %+d, Xbox 360 display gamma %s, cooler colors %s; 64->%.1f 128->%.1f 192->%.1f (8-bit levels, red)\n",
                 brightness, !useRamp ? "off" : haveRamp ? std::format("on (the game's ramp #{})", rampGeneration).c_str() : "on (no ramp from the game yet)",
+                coolerColors ? "on" : "off",
                 lut.entry[64][0] * 255.0, lut.entry[128][0] * 255.0, lut.entry[192][0] * 255.0);
             s_tone.filled = true;
             s_tone.brightness = brightness;
             s_tone.ramp = useRamp;
+            s_tone.coolerColors = coolerColors;
             s_tone.rampGeneration = rampGeneration;
             return true;
         }
