@@ -126,9 +126,7 @@ fi
 cp "$SCRIPTS/bundle/speedbreaker.sh" "$STAGE/"
 cp "$SCRIPTS/bundle/$README" "$STAGE/README.md"
 chmod 755 "$GAME" "$STAGE/speedbreaker.sh"
-chmod 644 "$STAGE/README.md"
 echo "SpeedBreaker v$VERSION ($COMMIT, built $(date -u -r "$BIN" +%F)), SteamOS $ARCH" > "$STAGE/VERSION"
-chmod 644 "$STAGE/VERSION"
 
 # Sorted by soname; `ldd` lists the whole closure. A library the build found
 # outside the system's folders (CMake's <Package>_DIR, such as the Frame's
@@ -308,7 +306,6 @@ fi
     echo "Needs: $need_glibc and $need_cxx ($runtimes: glibc $have_glibc, $have_cxx)"
     echo "From the system: ${system[*]} (and what SDL loads at run time)"
 } > "$STAGE/bundle-info.txt"
-chmod 644 "$STAGE/bundle-info.txt"
 (cd "$STAGE" && find . -type f ! -name SHA256SUMS | sort | sed 's|^\./||' | xargs sha256sum > SHA256SUMS)
 
 # The host's side, when this runs in a distrobox: what the launcher will find.
