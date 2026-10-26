@@ -3771,7 +3771,7 @@ namespace gpu::renderer
         // (the formats a scaled texture can have).
         bool ScaledFormat(const TextureFormatInfo& fi)
         {
-            return fi.bpbLog2 == 2 && fi.convert == 0 && fi.block == 1;
+            return fi.bpbLog2 == 2 && (fi.convert == 0 || fi.convert == 4) && fi.block == 1;
         }
 
         uint32_t Tiled2D(uint32_t x, uint32_t y, uint32_t pitchAligned, uint32_t bppLog2)
@@ -4723,7 +4723,9 @@ void main()
                         traceReason = 1;
                     else if (!target->sampleView)
                         traceReason = 2;
-                    else if (!f.tiled || pitchTexels != 1600 || f.endianness != xenos::Endian::kNone || f.swizzle != 0x688)
+                    else if (!f.tiled || pitchTexels != 1600 ||
+                        (!(f.endianness == xenos::Endian::kNone && f.swizzle == 0x688) &&
+                            !(f.endianness == xenos::Endian::k8in32 && f.swizzle == 0xB48)))
                         traceReason = 3;
                     else if (sampleSequence != it->second.writeSequence)
                         traceReason = 4;
@@ -4775,7 +4777,7 @@ void main()
             // height; gpu/render_scale.h).
             bool scaledCandidate = !cube && !volume && f.tiled && layers == 1 && !f.stacked &&
                 ScaledFormat(fi) && offX == 0 && offY == 0 && maxLevel == 0 && s_scaled.scale.Exact(width, height) &&
-                s_scaled.scale.HostPixels(width, height) * 4 <= s_scaled.scratchSize;
+                (s_scaled.direct || s_scaled.scale.HostPixels(width, height) * 4 <= s_scaled.scratchSize);
             // Which scaled texture this is (its cache key's surface fields):
             // pages only a scaled texture holds are current for it alone.
             const uint64_t sig = ScaledSignature(format, width, height, pitchAligned, uint32_t(f.endianness));
@@ -4795,6 +4797,7 @@ void main()
                 slotRef = std::make_unique<Texture>();
                 Texture& t = *slotRef;
                 t.format = fi.vk;
+                t.convert = fi.convert;
                 t.width = width;
                 t.height = height;
                 t.guestStart = base;
@@ -5372,9 +5375,9 @@ void main()
             // A scaled resolve's samples also into a cached scaled texture
             // (binding 5), where its untile would have put them (see
             // Resolve): hostX, hostY: the destination's texel 0,0 in it; its
-            // guest size and endianness. Pushed (and in the shader:
-            // SCALED_FUSE) only to the pipelines of scaled sources.
-            uint32_t hostWrite, hostX, hostY, hostWidth, hostHeight, hostEndian;
+            // guest size, endianness, and format conversion. Pushed (and in
+            // the shader: SCALED_FUSE) only to pipelines of scaled sources.
+            uint32_t hostWrite, hostX, hostY, hostWidth, hostHeight, hostEndian, hostConvert;
         };
         // The constants pushed to the resolve shader: without NFSMW_FUSE_PARTIAL
         // and NFSMW_DIRECT_CUBE, those before texX, as before them, and the
@@ -5412,7 +5415,7 @@ layout(push_constant) uniform P
     // Also each host sample into a cached scaled texture (binding 5) where
     // its untile would put it: its texel of the destination's 0,0 (whole
     // tiles), its guest size, its endianness.
-    uint hostWrite, hostX, hostY, hostWidth, hostHeight, hostEndian;
+    uint hostWrite, hostX, hostY, hostWidth, hostHeight, hostEndian, hostConvert;
 #endif
 } p;
 )" GLSL_SCALE_CODE R"(
@@ -5675,7 +5678,12 @@ void main()
                         uint hx = sbReaderHost(tx, subX, i, p.scale.x, kDen.x), hy = sbReaderHost(ty, subY, j, p.scale.y, kDen.y);
 #endif
                         if (hx != ~0u && hy != ~0u)
-                            imageStore(h_image, ivec2(int(hx), int(hy)), uvec4(swapWord(word32, p.hostEndian), 0u, 0u, 0u));
+                        {
+                            uint hostWord = swapWord(word32, p.hostEndian);
+                            if (p.hostConvert == 4u)
+                                hostWord = floatBitsToUint(float(hostWord >> 8) / 16777215.0);
+                            imageStore(h_image, ivec2(int(hx), int(hy)), uvec4(hostWord, 0u, 0u, 0u));
+                        }
                     }
 #endif
                 }
@@ -6324,9 +6332,11 @@ void main()
                     const bool wholeBlocks = (r.x0 + shiftX) >= 0 && (r.y0 + shiftY) >= 0 &&
                         source->scale.x.Exact(uint32_t(r.x0 + shiftX)) && source->scale.y.Exact(uint32_t(r.y0 + shiftY)) &&
                         source->scale.x.Exact(uint32_t(r.x0)) && source->scale.y.Exact(uint32_t(r.y0));
+                    const bool directShadowEndian = uint32_t(destInfo.copy_dest_endian) == uint32_t(xenos::Endian::kNone) ||
+                        uint32_t(destInfo.copy_dest_endian) == uint32_t(xenos::Endian::k8in32);
                     const bool directShadowResolve = depthSource && source->depth && source->pitch == 1600 &&
                         source->scale == s_shadowScale && !source->scale.IsOne() && format == 22 &&
-                        !destInfo.copy_dest_array && uint32_t(destInfo.copy_dest_endian) == uint32_t(xenos::Endian::kNone) &&
+                        !destInfo.copy_dest_array && directShadowEndian &&
                         !destInfo.copy_dest_swap && destInfo.copy_dest_exp_bias == 0 && rc.destPitch == 1600 &&
                         r.x0 == 0 && r.y0 == 0 && r.x1 == 1600 && r.y1 == 1600;
                     if (s_traceShadowScale && source->depth && source->pitch == 1600 && s_shadowResolveTraceCount++ < 16)
@@ -6557,6 +6567,7 @@ void main()
                         rc.hostWidth = hosted->guestWidth;
                         rc.hostHeight = hosted->guestHeight;
                         rc.hostEndian = hosted->endian;
+                        rc.hostConvert = hosted->convert;
                         LogOnce(0x2900, "scaled resolves store into cached scaled textures too (the first: %ux%u host at %08X, texels from %u,%u)",
                             hosted->width, hosted->height, rc.destBase, hostX, hostY);
                     }
@@ -6827,7 +6838,7 @@ layout(set = 0, binding = 2, r32ui) writeonly uniform uimage2D o_image;
 #endif
 // width, height: the texture's host size (whole blocks); scale / den: host
 // pixels per guest pixel (a den above 2: a texel axis).
-layout(push_constant) uniform P { uint base, pitch, width, height, endian, slotWords; uvec2 scale, den; } p;
+layout(push_constant) uniform P { uint base, pitch, width, height, endian, slotWords; uvec2 scale, den; uint convert; } p;
 )" GLSL_SCALE_CODE R"(
 uint tiled2D(uint x, uint y, uint pitch, uint bppLog2)
 {
@@ -6857,10 +6868,13 @@ void main()
     if (slot != 0u)
         v = s_pool[(slot - 1u) * p.slotWords + sbSampleWord((a & 4095u) >> 2, sbBlockSample(h.x, p.scale.x, p.den.x),
             sbBlockSample(h.y, p.scale.y, p.den.y), p.scale.x, p.scale.y, p.den.x, p.den.y)];
+    v = swapWord(v, p.endian);
+    if (p.convert == 4u)
+        v = floatBitsToUint(float(v >> 8) / 16777215.0);
 #ifdef TO_BUFFER
-    o_mem[h.y * w + h.x] = swapWord(v, p.endian);
+    o_mem[h.y * w + h.x] = v;
 #else
-    imageStore(o_image, ivec2(h), uvec4(swapWord(v, p.endian)));
+    imageStore(o_image, ivec2(h), uvec4(v));
 #endif
 }
 )";
@@ -7026,13 +7040,14 @@ void main()
             }
             s_scaled.slotWords = s_scaled.scale.SlotWords();
             s_scaled.slots = uint32_t(std::min<uint64_t>(poolSize / (4ull * s_scaled.slotWords), kGuestPages));
-            // Scaled textures up to 1280x1024 (at scale). The untile stores
+            // Scaled textures up to 1600x1600 (at scale), including shadow
+            // maps. The untile stores
             // into them through an R32_UINT view when the device can for every
             // scaled format (a mutable-format image with extended usage: the
             // format itself needn't be storable); otherwise they load through
             // a scratch buffer that size (the ring's slots are too small) and a
             // copy, one more full write and read of the texture.
-            s_scaled.scratchSize = VkDeviceSize(s_scaled.scale.HostPixels(1280, 1024)) * 4;
+            s_scaled.scratchSize = VkDeviceSize(s_scaled.scale.HostPixels(1600, 1600)) * 4;
             {
                 // (The image's format list is Vulkan 1.2.)
                 const char* v = std::getenv("NFSMW_SCALED_DIRECT");
@@ -7095,11 +7110,11 @@ void main()
             {
                 b[2].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
                 if (!s_scaledStorePipeline)
-                    CreateComputePipeline(kScaledUntileGlsl, b, 3, 10 * sizeof(uint32_t), s_scaledStoreSetLayout, s_scaledStoreLayout,
+                    CreateComputePipeline(kScaledUntileGlsl, b, 3, 11 * sizeof(uint32_t), s_scaledStoreSetLayout, s_scaledStoreLayout,
                         s_scaledStorePipeline);
             }
             else if (!s_scaledUntilePipeline)
-                CreateComputePipeline(kScaledUntileGlsl, b, 3, 10 * sizeof(uint32_t), s_scaledUntileSetLayout, s_scaledUntileLayout,
+                CreateComputePipeline(kScaledUntileGlsl, b, 3, 11 * sizeof(uint32_t), s_scaledUntileSetLayout, s_scaledUntileLayout,
                     s_scaledUntilePipeline, "#define TO_BUFFER\n");
             EndPass();
             Begin();
@@ -7151,8 +7166,8 @@ void main()
                 w[k] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, VK_NULL_HANDLE, k, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
                     nullptr, &bi[k], nullptr };
             const gpu::RenderScale& sc = s_scaled.scale;
-            struct { uint32_t base, pitch, width, height, endian, slotWords, scaleX, scaleY, denX, denY; } pc = { base, pitchBlocks,
-                t.width, t.height, endian, s_scaled.slotWords, sc.x.num, sc.y.num, sc.x.den, sc.y.den };
+            struct { uint32_t base, pitch, width, height, endian, slotWords, scaleX, scaleY, denX, denY, convert; } pc = { base, pitchBlocks,
+                t.width, t.height, endian, s_scaled.slotWords, sc.x.num, sc.y.num, sc.x.den, sc.y.den, t.convert };
             s_stateEpoch++;
             if (t.storeView)
             {

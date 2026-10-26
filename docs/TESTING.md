@@ -139,6 +139,11 @@ default and reports distinct states as the scale changes. For a useful
 comparison, start in a scene with visible shadows, then try 1x and 2x Internal
 Resolution and attach `last-run.log`.
 
+Packed D24 shadow targets can be sampled directly at 1.5x and 2x, avoiding a
+scaled-cache copy. The trace should report `sample scaled target` at 2400x2400
+or 3200x3200 respectively. When Internal Resolution is above 2x, the capped
+2x shadow map should likewise report `sample scaled target` at 3200x3200,
+independent of the general scaled-texture cache's scale.
 To trace writes to guest physical memory, launch with
 `NFSMW_TRACE_GUEST_WRITES=<hex-address>[,<hex-size>]`. The default size is
 `0x40000`. The runtime watches the range from startup and logs first CPU write
