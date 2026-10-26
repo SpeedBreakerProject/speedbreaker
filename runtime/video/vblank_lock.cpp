@@ -230,6 +230,12 @@ namespace video
         }
     }
 
+    uint64_t VblankLock::HoldChanges() const
+    {
+        std::lock_guard lock(m_mutex);
+        return m_extraChanges;
+    }
+
     int VblankLock::HoldMultiple() const
     {
         std::lock_guard lock(m_mutex);

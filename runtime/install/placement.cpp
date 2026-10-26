@@ -21,6 +21,8 @@
 #ifndef _WIN32
 #include <sys/stat.h>
 #include <unistd.h>
+#else
+#include <platform/file_io.h>
 #endif
 #ifdef __APPLE__
 #include <TargetConditionals.h>
@@ -219,6 +221,10 @@ namespace install
                         "to free space, while the game reads them as it plays. Choose a folder outside it.", picked.string()),
                         gameDir);
             }
+            if (context.windows && facts.cloud)
+                return Refusal(Error::DestinationNotWritable, std::format("{} is in OneDrive. The game can't go there: "
+                    "OneDrive would upload its files and can keep them online only to free space, while the game reads them "
+                    "as it plays. Choose a folder outside it.", picked.string()), gameDir);
             if (IsMemoryFileSystem(facts.fileSystem))
                 return Refusal(Error::DestinationNotWritable, std::format("{} is kept in memory ({}), which is emptied when "
                     "{} restarts. Choose a folder on a drive.", picked.string(), facts.fileSystem,
@@ -300,28 +306,28 @@ namespace install
         }
 
         // `path` is on another device than `parent`: the top of a mounted
-        // drive. (Windows: a drive's top is its root, IsRoot.)
+        // drive. (Windows: a drive's top is its root, IsRoot; this finds a
+        // drive mounted in a folder, by its volume's serial number.)
         bool OnAnotherDevice(const fs::path& path, const fs::path& parent)
         {
 #ifndef _WIN32
             struct stat self{}, above{};
             return stat(path.c_str(), &self) == 0 && stat(parent.c_str(), &above) == 0 && self.st_dev != above.st_dev;
 #else
-            (void)path;
-            (void)parent;
-            return false;
+            platform::FileInfo self, above;
+            return platform::InfoOf(path, self) == 0 && platform::InfoOf(parent, above) == 0 && self.device != above.device;
 #endif
         }
 
         // A new file or folder can be made in `folder`. (Windows: access()
-        // ignores ACLs there; CheckDestination is left to tell.)
+        // ignores ACLs there, so a folder is made and removed, as
+        // CheckDestination does.)
         bool CanWrite(const fs::path& folder)
         {
 #ifndef _WIN32
             return access(folder.c_str(), W_OK | X_OK) == 0;
 #else
-            (void)folder;
-            return true;
+            return platform::CheckWritableFolder(folder, platform::NewEntry::Folder) == 0;
 #endif
         }
 
@@ -466,6 +472,21 @@ namespace install
 #endif
         }
 
+        // Windows: is `path` in OneDrive (the folders its environment
+        // variables name: personal and work or school)? Files On-Demand can
+        // keep a file online only, and the game reads its files as it plays.
+        bool InOneDrive(const fs::path& path)
+        {
+#ifdef _WIN32
+            for (const char* name : { "OneDrive", "OneDriveConsumer", "OneDriveCommercial" })
+                if (const char* dir = std::getenv(name); dir && *dir && IsAtOrInside(path, Resolved(dir)))
+                    return true;
+#else
+            (void)path;
+#endif
+            return false;
+        }
+
         bool IsSteamOS()
         {
 #if defined(__linux__)
@@ -568,7 +589,9 @@ namespace install
         default:
             break;
         }
-        if (IsRoot(path))
+        // (Windows: every drive's root is the top of that drive, the game
+        // goes in its SpeedBreaker\game, as the To row's entry for it.)
+        if (IsRoot(path) && !context.windows)
             return refuse(Error::DestinationNotWritable, std::format("{} is the system's root folder. Choose a folder in your "
                 "home folder or on a drive.", path.string()), path);
 
@@ -712,7 +735,7 @@ namespace install
         FolderFacts facts;
         facts.path = Resolved(path);
         facts.state = Classify(facts.path, facts.error, &facts.hidden);
-        facts.cloud = InICloud(facts.path);
+        facts.cloud = InICloud(facts.path) || InOneDrive(facts.path);
         fs::path parent = facts.path.parent_path();
         if (facts.state == FolderState::Missing)
         {
@@ -785,12 +808,18 @@ namespace install
         context.installs.push_back(Resolved(DefaultInstallPath()));
         if (std::optional<fs::path> recorded = RecordedInstallPath())
             context.installs.push_back(Resolved(*recorded));
+        for (const Manifest* m : IsGameManifest(manifest) ? GameManifests() : std::span<const Manifest* const>())
+            for (const ManifestFile& file : m->files)
+                context.largestFile = std::max(context.largestFile, file.size);
         for (const ManifestFile& file : manifest.files)
             context.largestFile = std::max(context.largestFile, file.size);
 #if defined(__APPLE__) && !TARGET_OS_IOS
         context.macOS = true;
 #endif
         context.steamOS = IsSteamOS();
+#ifdef _WIN32
+        context.windows = true;
+#endif
         return context;
     }
 
@@ -915,5 +944,57 @@ namespace install
             break;
         }
         return {};
+    }
+
+    std::filesystem::path RegionFolder(const std::filesystem::path& gameDir, const Manifest& incoming)
+    {
+        fs::path dir = gameDir;
+        if (!dir.has_filename() && dir.has_parent_path())
+            dir = dir.parent_path();  // "game/": "game"
+        std::string suffix(incoming.region);
+        for (char& c : suffix)
+            c = char(std::toupper(static_cast<unsigned char>(c)));
+        if (suffix.empty())
+            suffix = "OTHER";
+        return dir.parent_path() / (dir.filename().string() + " " + suffix);
+    }
+
+    RegionKeep KeepOtherRegion(const std::filesystem::path& gameDir, const Manifest& incoming,
+        const std::function<const Manifest*(const std::filesystem::path&)>& installedAt)
+    {
+        RegionKeep keep{ gameDir };
+        if (!IsGameManifest(incoming))
+            return keep;
+        const Manifest* there = installedAt(gameDir);
+        if (!there || there == &incoming)
+            return keep;
+        keep.kept = there;
+        keep.keptDir = gameDir;
+        const fs::path base = RegionFolder(gameDir, incoming);
+        keep.gameDir = base;
+        // Empty, missing, or this region's own install (replaced as usual);
+        // past a third region's, the next number.
+        for (int n = 2; n <= 9; n++)
+        {
+            const Manifest* other = installedAt(keep.gameDir);
+            if (!other || other == &incoming)
+                break;
+            keep.gameDir = base.parent_path() / std::format("{} {}", base.filename().string(), n);
+        }
+        return keep;
+    }
+
+    RegionKeep KeepOtherRegion(const std::filesystem::path& gameDir, const Manifest& incoming)
+    {
+        return KeepOtherRegion(gameDir, incoming, [](const fs::path& dir) { return InstalledRegion(dir); });
+    }
+
+    std::string RegionKeepNote(const RegionKeep& keep, const Manifest& incoming, const std::string& keptShown,
+        const std::string& newShown)
+    {
+        if (!keep.kept)
+            return {};
+        return std::format("{} holds the {} install. This {} disc goes in its own folder, {}, so that install stays.", keptShown,
+            keep.kept->regionName, incoming.regionName, newShown);
     }
 }

@@ -15,6 +15,7 @@
 #include <csignal>
 #include <cstdio>
 #include <cstring>
+#include <format>
 #include <string>
 #include <vector>
 
@@ -185,9 +186,26 @@ namespace install
             std::unique_ptr<DiscSource> source;
             if (Result r = OpenAndCheck(sourcePath, source); !r.Ok())
                 return Failed(r);
+            const Manifest& manifest = SourceManifest(*source);
+            // The folder holds another region's install, which this disc
+            // would replace (install/placement.h's KeepOtherRegion): without
+            // --dest the game goes beside it ("game PAL-ES" next to "game");
+            // --dest named that folder, so the player is told where instead.
+            if (RegionKeep keep = KeepOtherRegion(folder, manifest); keep.kept)
+            {
+                if (named)
+                    return Failed(Result{ Error::DestinationNotEmpty,
+                        std::format("{} holds the {} install, which this {} disc would replace. Install it beside it with "
+                                    "--dest \"{}\" (or delete that folder first to replace it).",
+                            folder.string(), keep.kept->regionName, manifest.regionName, keep.gameDir.string()),
+                        folder.string() });
+                notes.push_back(RegionKeepNote(keep, manifest, folder.string(), keep.gameDir.string()));
+                folder = keep.gameDir;
+            }
             for (const std::string& note : notes)
                 printf("Note: %s\n", note.c_str());
-            printf("Installing %s to %s\n", FormatSize(GameManifest().totalBytes).c_str(), folder.string().c_str());
+            printf("Installing %s (%s) to %s\n", FormatSize(manifest.totalBytes).c_str(), std::string(manifest.regionName).c_str(),
+                folder.string().c_str());
 
             InterruptGuard guard;
             ProgressPrinter printer;
@@ -215,7 +233,9 @@ namespace install
             printer.Finish();
             if (!r.Ok())
                 return Failed(r);
-            printf("All %zu files match the original disc (%.0f s).\n", GameManifest().files.size(), printer.Seconds());
+            const Manifest& manifest = SourceManifest(*source);
+            printf("All %zu files match the original disc, %s (%.0f s).\n", manifest.files.size(),
+                std::string(manifest.regionName).c_str(), printer.Seconds());
             return 0;
         }
 
@@ -268,7 +288,8 @@ namespace install
             }
             const char* origin = game->origin == InstallOrigin::Environment ? "NFSMW_GAME_DIR"
                 : game->origin == InstallOrigin::Development ? "development checkout" : "installed";
-            printf("%s (%s%s)\n", game->path.string().c_str(), origin, game->marker ? ", verified by the installer" : "");
+            printf("%s (%s%s; %s)\n", game->path.string().c_str(), origin, game->marker ? ", verified by the installer" : "",
+                game->manifest ? std::string(game->manifest->regionName).c_str() : "?");
             PrintDataFolders();
             return 0;
         }
@@ -290,7 +311,7 @@ namespace install
                 if (Result r = OpenDiscSource(from, source); !r.Ok())
                     return r;
                 printf("Copying the game from %s (%s), checking every file:\n", from.string().c_str(),
-                    FormatSize(GameManifest().totalBytes).c_str());
+                    FormatSize(SourceManifest(*source).totalBytes).c_str());
                 ProgressPrinter printer;
                 Result r = Install(*source, to, std::ref(printer), &s_cancel);
                 printer.Finish();

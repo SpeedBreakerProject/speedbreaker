@@ -38,6 +38,15 @@ namespace hfr
     // whether an in-between picture was drawn between them. Decides whether
     // the next frames can afford in-between pictures (game/hfr.cpp).
     void NoteFrameCost(double cpMs, double gpuMs, bool hadBetween);
+    // Presenter (off Apple's systems): a picture of Smooth Motion's was
+    // shown on another refresh than the others (a ghost; one merely ready
+    // late is only counted). The game goes to an even 60 at once, and back
+    // only after a clean while (game/hfr.cpp, RequestSixty).
+    void NoteLatePicture();
+    // Presenter (off Apple's systems): the vblank lock moved new frames to
+    // another refresh (VblankLock::AdaptHold, a refresh later or earlier):
+    // a cut of ours, an even 60 for a moment, never counted as a ghost.
+    void NoteHoldChange();
     // Command processor, at every swap: that picture's own busy time (ms),
     // draws and passes (the work since the last swap), for the [hfr] line
     // that compares in-between pictures' cost with real ones'.

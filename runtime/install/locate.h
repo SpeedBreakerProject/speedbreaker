@@ -33,6 +33,7 @@ namespace install
         std::filesystem::path xex;
         InstallOrigin origin = InstallOrigin::User;
         bool marker = false;            // holds Install's marker for the current manifest
+        const Manifest* manifest = nullptr;  // the region it is (for a compiled-in manifest, the one whose default.xex size it has)
     };
 
     // The first usable game directory of:
@@ -46,8 +47,19 @@ namespace install
     // marker. nullopt: nothing usable, so run the installer.
     // Before looking at the third, finishes a reinstall a crash interrupted
     // (RecoverInterruptedInstall).
+    // A compiled-in manifest (the default) finds any region's install: the
+    // first location with one is used, and `manifest` says which it is.
     // Cheap: a few stat calls and one small read; no hashing.
     std::optional<GameInstall> FindGameInstall(const Manifest& manifest = GameManifest());
+
+    // The region of the installer's own install in `dir`: its marker (any
+    // manifest version, current or not) beside a default.xex of a
+    // compiled-in region's size. nullptr: no install of the installer's
+    // there (nothing, another folder, a hand-extracted one, an unknown
+    // default.xex). Install would replace such a folder whatever region it
+    // is; install/placement.h's KeepOtherRegion uses this so a disc of
+    // another region goes beside it instead. A few stat calls and one small read.
+    const Manifest* InstalledRegion(const std::filesystem::path& dir);
 
     // The same check for one directory.
     bool IsUsableInstall(const std::filesystem::path& dir, bool requireMarker, const Manifest& manifest = GameManifest());

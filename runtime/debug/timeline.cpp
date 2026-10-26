@@ -1,5 +1,6 @@
 // SpeedBreaker runtime. GPL-3.0-or-later (see COPYING). See timeline.h.
 #include <stdafx.h>
+#include <region/region.h>
 #include "timeline.h"
 #include <cpu/guest_time.h>
 #include <kernel/function.h>
@@ -94,18 +95,18 @@ namespace
 }
 
 extern "C" PPC_FUNC(__imp__sub_82597498);
-PPC_FUNC(sub_82597498)
+SB_HOOK(sub_82597498)
 {
     timeline::Mark(timeline::GameWaitBegin, ctx.r4.u32);
     timeline::t_waitTargetMarked = false;
     int64_t start = NowNs();
-    __imp__sub_82597498(ctx, base);
+    SB_ORIGINAL(sub_82597498)(ctx, base);
     timeline::g_gameWaitNs.fetch_add(uint64_t(NowNs() - start), std::memory_order_relaxed);
     timeline::Mark(timeline::GameWaitEnd);
 }
 
 extern "C" PPC_FUNC(__imp__sub_82593A58);
-PPC_FUNC(sub_82593A58)
+SB_HOOK(sub_82593A58)
 {
     timeline::Mark(timeline::GamePresentBegin);
     static std::atomic<int64_t> lastPresent{ 0 };
@@ -115,7 +116,7 @@ PPC_FUNC(sub_82593A58)
         uint64_t frame = uint64_t(start - previous), longest = timeline::g_gameLongestFrameNs.load(std::memory_order_relaxed);
         while (frame > longest && !timeline::g_gameLongestFrameNs.compare_exchange_weak(longest, frame)) {}
     }
-    __imp__sub_82593A58(ctx, base);
+    SB_ORIGINAL(sub_82593A58)(ctx, base);
     timeline::g_gamePresentNs.fetch_add(uint64_t(NowNs() - start), std::memory_order_relaxed);
     timeline::Mark(timeline::GamePresentEnd);
 }

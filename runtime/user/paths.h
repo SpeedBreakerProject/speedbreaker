@@ -1,5 +1,6 @@
 // SpeedBreaker runtime. GPL-3.0-or-later (see COPYING).
 #pragma once
+#include <region/region.h>
 #include <cstdlib>
 #include <filesystem>
 #include <string>
@@ -158,7 +159,10 @@ inline std::filesystem::path GetCachePath()
 // log once that is open.
 std::string MigrateUserFolders();
 
+// The saves: the USA release's in save/, the European (PAL, Spanish) one's
+// in save-pal-es/ (region/region.h): its saves carry another game ID, and
+// the two are kept apart rather than one release reading the other's.
 inline std::filesystem::path GetSavePath(bool)
 {
-    return GetUserPath() / "save";
+    return GetUserPath() / (region::IsPalEs() ? "save-pal-es" : "save");
 }

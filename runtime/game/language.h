@@ -20,6 +20,15 @@
 //     isn't in the installed files (the USA disc has only English's), the
 //     record lookup is pointed at English's, as the movies fall back, instead
 //     of the game loading nothing at all.
+// The European (PAL, Spanish) disc's executable (region/region.h) is the
+// same code built for Spain: its boot passes 4 (Spanish), its movie names
+// "_pal", and its disc has Spanish movies and Spanish speech only. There
+// Spanish is the row's default (main.cpp), BootLanguageFor sets any chosen
+// language (English included), and a language whose movies or speech the
+// disc lacks, with no English ones to fall back to, gets the disc's own
+// (Spanish): its movie name's language and its speech record are redirected
+// (Files::movieRedirect, speechRedirect). None of this applies to the USA
+// disc, which always has English's.
 // Files says what the installed files have for a language (the text pack
 // and the speech bank in NFS/ZDIR.BIN, its movies in Movies/), and Note /
 // LogLine say it in words. Measured with the USA disc's files in Spanish and
@@ -67,6 +76,7 @@ namespace game::language
         { 13, "finnish", "Finnish", "FINNISH", "en" },
     };
     constexpr int32_t kEnglish = 0;
+    constexpr int32_t kSpanish = 4;  // the European (PAL, Spanish) disc's own: its boot passes 4
 
     constexpr const Language* Find(int32_t id)
     {
@@ -97,6 +107,20 @@ namespace game::language
     constexpr int32_t BootLanguage(uint32_t lr, int32_t r3, int32_t chosen)
     {
         return lr == kBootCall && chosen != kEnglish ? chosen : r3;
+    }
+
+    // The same for the running release: the PAL (Spanish) executable boots in
+    // Spanish, so there the chosen language applies whichever it is.
+    constexpr int32_t BootLanguageFor(uint32_t lr, int32_t r3, int32_t chosen, bool palBuild)
+    {
+        return palBuild ? (lr == kBootCall ? chosen : r3) : BootLanguage(lr, r3, chosen);
+    }
+
+    // The speech record with a redirect to another language's bank (its
+    // record, the language's id: 1-4), or none (-1).
+    constexpr uint32_t SpeechIndexTo(uint32_t lr, uint32_t r4, uint32_t r5, int32_t record)
+    {
+        return record >= 0 && lr >= kSpeechPickBegin && lr < kSpeechPickEnd && r4 == kSpeechCollection ? uint32_t(record) : r5;
     }
 
     // The movie name's TV-system argument (r9 of the name's sprintf).
@@ -162,26 +186,42 @@ namespace game::language
         bool speech = false;         // the bank the game asks for, in the archive index
         bool englishSpeech = false;  // English's
         bool speechToEnglish = false;  // the fallback: its own bank is missing, English's is there
+        // The PAL build's disc only (Scan's palBuild): neither its own nor
+        // English's movies / speech, so the disc's own language's instead.
+        const Language* movieRedirect = nullptr;
+        const Language* speechRedirect = nullptr;
     };
 
-    inline Files Scan(const Language& l, const std::vector<std::string>& movies, const std::vector<uint8_t>& zdir)
+    // `palBuild`: the PAL (Spanish) executable runs, which asks for "_pal"
+    // movies itself.
+    inline Files Scan(const Language& l, const std::vector<std::string>& movies, const std::vector<uint8_t>& zdir,
+        bool palBuild = false)
     {
         Files f;
         f.text = InArchive(zdir, std::string("LANGUAGES\\") + l.disc + ".BIN");
-        f.pal = HasMovies(movies, l, "pal") && !HasMovies(movies, l, "ntsc");
+        f.pal = palBuild || (HasMovies(movies, l, "pal") && !HasMovies(movies, l, "ntsc"));
         const char* tv = f.pal ? "pal" : "ntsc";
         f.ownMovies = HasMovies(movies, l, tv);
         f.englishMovies = HasMovies(movies, kLanguages[0], tv);
         f.speech = InArchive(zdir, std::string("SOUND\\SPEECH\\COPSPEECH_") + l.speech + ".BIG");
         f.englishSpeech = InArchive(zdir, "SOUND\\SPEECH\\COPSPEECH_EN.BIG");
         f.speechToEnglish = std::string_view(l.speech) != "en" && !f.speech && f.englishSpeech;
+        if (palBuild)
+            for (const Language& other : kLanguages)
+            {
+                if (!f.ownMovies && !f.englishMovies && !f.movieRedirect && HasMovies(movies, other, tv))
+                    f.movieRedirect = &other;
+                if (!f.speech && !f.englishSpeech && !f.speechRedirect && std::string_view(other.speech) != "en"
+                    && other.id <= 4 && InArchive(zdir, std::string("SOUND\\SPEECH\\COPSPEECH_") + other.speech + ".BIG"))
+                    f.speechRedirect = &other;
+            }
         return f;
     }
 
     // Which language the movies play in ("" for none).
     inline std::string MoviesIn(const Language& l, const Files& f)
     {
-        return f.ownMovies ? l.name : f.englishMovies ? kLanguages[0].name : "";
+        return f.ownMovies ? l.name : f.englishMovies ? kLanguages[0].name : f.movieRedirect ? f.movieRedirect->name : "";
     }
 
     // Which language the speech (police radio, the in-game scenes' voices)
@@ -191,7 +231,7 @@ namespace game::language
     {
         if (f.speech)
             return std::string_view(l.speech) == "en" ? kLanguages[0].name : l.name;
-        return f.speechToEnglish ? kLanguages[0].name : "";
+        return f.speechToEnglish ? kLanguages[0].name : f.speechRedirect ? f.speechRedirect->name : "";
     }
 
     // The menu's line under the row, for the language chosen there.
@@ -213,6 +253,11 @@ namespace game::language
     // once; game/language.cpp). "" for an id not in the table.
     std::string MenuNote(int32_t id);
 
+    // This run's language instead of the setting's (main.cpp: the first run
+    // of a PAL (Spanish) install made by the installer, whose settings were
+    // loaded before the disc was known). Before the game boots.
+    void SetLaunchLanguage(int32_t id);
+
     // The log's line, once at boot.
     inline std::string LogLine(const Language& l, const Files& f)
     {
@@ -220,6 +265,7 @@ namespace game::language
         return std::string("[language] ") + l.name + " (" + l.token + "): text " + (f.text ? "yes" : "none") + "; movies " +
             (movies.empty() ? std::string("none") : movies) + " (_" + (f.pal ? "pal" : "ntsc") + "); speech " +
             (speech.empty() ? std::string("none") : speech) + " (copspeech_" + l.speech +
-            (f.speech ? " present" : f.speechToEnglish ? " absent: English's instead" : " absent") + ")";
+            (f.speech ? " present" : f.speechToEnglish ? " absent: English's instead"
+                : f.speechRedirect ? std::string(" absent: ") + f.speechRedirect->name + "'s instead" : std::string(" absent")) + ")";
     }
 }

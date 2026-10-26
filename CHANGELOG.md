@@ -4,6 +4,37 @@ What changed in each SpeedBreaker release, newest first. Each release's notes on
 its entry here, and the game shows the entry once, the first time a new version starts (offline:
 it's built into the game).
 
+## v0.2.0
+
+### What's new
+
+- **The European (PAL) Spanish disc is supported.** One app plays either disc: the PAL one starts
+  in Spanish, with its Spanish movies and police radio (Settings > Game > Language still switches
+  the menus and race text). Installing it beside a USA install keeps both, each with its own saves.
+  The USA disc plays exactly as before.
+- **Smooth Motion on SteamOS and Linux PCs** (Settings > Display): up to 120 fps on a 120 Hz
+  screen, and 90 on a 90 Hz one. It drops to an even 60 whenever pictures can't be shown on time.
+  Not on the Steam Deck, which stays at a steady 60.
+- **Cheaper shadows on Macs and iPhones**: the sun's shadows cost the graphics chip less each frame,
+  and look the same.
+- **Lower CPU use on Macs**: the game waits instead of spinning while it has nothing to do. Thanks
+  to Simonxdd (pull request #48).
+- **Settings... in the Mac menu bar** (Cmd+,). Thanks to SOHAM4884 (pull request #47).
+- **Internal Resolution names the real size**: each entry shows what it renders on your screen
+  (a Steam Deck with Fill Screen shows 1x (1280x800)), and Auto shows what it picked.
+- **A new app icon.**
+
+### More about it
+
+- The installer tells the two discs apart, says which one it found, and checks every file against
+  that disc's list. Other regions (German and the other PAL discs) can't install yet.
+- The game is about twice the size it was: each disc's code is built in.
+- Split screen renders at most what Auto would for your screen (3440x1440 at Internal Resolution
+  3x: 3440x1440), so it holds 60 fps where it dipped now and then; single player keeps your setting.
+- Updating keeps your saves, settings and the installed game, and needs no disc image: on a Mac,
+  drag the new app into Applications and choose Replace, then Open Anyway once more; on SteamOS,
+  unpack the new download over the old folder.
+
 ## v0.1.9
 
 ### What's new

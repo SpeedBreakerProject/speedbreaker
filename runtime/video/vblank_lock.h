@@ -119,6 +119,9 @@ namespace video
         // Refreshes a vblank is while locked at a multiple of 60 Hz with new
         // frames held for their refresh (PresentAt); 1 otherwise.
         int HoldMultiple() const;
+        // How many times AdaptHold has moved new frames to a later or an
+        // earlier refresh (Status::extraChanges, without the rest).
+        uint64_t HoldChanges() const;
         double PeriodNs() const;  // the vblank period now (locked at a multiple: that many refreshes)
         // Main thread, before presenting a new game frame released by the
         // vblank that fired at `vblank`: not before the time returned (ns,

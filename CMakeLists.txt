@@ -69,7 +69,7 @@ endif()
 # apps' versions, the SteamOS bundles' VERSION file and the release tag
 # (v<version>). CHANGELOG.md has an entry for each version (the in-game
 # "What's new" note is built from it).
-project(SpeedBreaker VERSION 0.1.9 LANGUAGES C CXX)
+project(SpeedBreaker VERSION 0.2.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)

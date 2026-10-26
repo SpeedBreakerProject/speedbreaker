@@ -2,6 +2,8 @@
 // Tiled addressing follows Xenia's gpu/texture_address.h (BSD license).
 #include <stdafx.h>
 #include "presenter.h"
+#include <bit>
+#include <cmath>
 
 #include <kernel/vmem.h>
 #include <kernel/dispatcher.h>
@@ -172,7 +174,30 @@ namespace video
         float s_betweenT = 0.0f;
         int64_t s_betweenTarget = 0;
         bool s_betweenNew = false;
+        // Off Apple's systems: the order the two were handed over in (each
+        // SubmitFrontImage numbers its picture; under s_pendingMutex), and
+        // the time the last real picture was held to (VblankLock::PresentAt;
+        // main thread). There the presenter waits for each picture's refresh,
+        // so with both pending it shows the older first: an in-between
+        // picture handed over after a real one is the next step's. Taken
+        // first, it was held to its refresh, two at 120 Hz, while the real
+        // one behind it was replaced by the next: the Steam Machine (nested
+        // gamescope at 120 Hz, 2026-10-24) showed only in-between pictures,
+        // 60 a second, every real one dropped. And an in-between picture is
+        // shown its fraction of the vblank's refreshes after the last real
+        // picture's refresh (one at 120 Hz), not after the target of the
+        // vblank it was handed over in: with the real picture of its step
+        // handed over in the same vblank, that would be after it.
+        uint64_t s_submitSeq = 0, s_pendingSeq = 0, s_betweenSeq = 0;
+#if !defined(__APPLE__)
+        int64_t s_lastRealAt = 0;
+#endif
         std::atomic<uint64_t> s_betweenDropped{ 0 }, s_betweenShown{ 0 }, s_betweenPresented{ 0 };
+        // Off Apple's systems: Smooth Motion pictures ready too late for their
+        // refresh (main thread), and shown on another refresh than the others
+        // (the waiter: against the median of the last 64 pictures' distance
+        // from their refresh, as the present wait returns a fixed time after it).
+        std::atomic<uint64_t> s_lateReady{ 0 }, s_offRefresh{ 0 };
         std::atomic<uint64_t> s_dropped{ 0 };  // frames replaced here before they were shown
         std::atomic<uint64_t> s_repeated{ 0 }, s_shown{ 0 };  // see PresentStats
         std::atomic<int64_t> s_guestVblank{ 0 };
@@ -348,6 +373,7 @@ namespace video
             int64_t ready;      // ready to present (= presented, but for a frame held for its refresh: VblankLock::PresentAt)
             float between = 0;  // an in-between picture's fraction of the step (game/hfr.h; its vblank is 0)
             int64_t desired = 0;  // macOS: the time it was asked to be shown at (0: when ready)
+            int64_t target = 0;   // off Apple's systems: the refresh a Smooth Motion picture is for (0: none)
         };
         // Never destroyed: the waiter is detached and blocks on them, and
         // glibc's pthread_cond_destroy waits for blocked waiters, so an exit
@@ -370,6 +396,9 @@ namespace video
         // main thread sets it), and whether the waiter's grid fit takes the
         // present completions at it, since when (ns, steady clock; 0: not).
         std::atomic<double> s_gridHz{ 0.0 };
+        // The window's display mode's rate, for HfrOffered off Apple's
+        // systems (any thread; the main thread sets it: UpdateRefreshMultiple).
+        std::atomic<double> s_hfrModeHz{ 0.0 };
         std::atomic<int64_t> s_gridFixedSince{ 0 };
         // The grid check's fit, for HFR (HfrGrid): valid, period, a refresh.
         std::atomic<bool> s_hfrGridValid{ false };
@@ -546,6 +575,39 @@ namespace video
                 }
                 if (timed)
                 {
+                    // The grid lost (2026-10-25: the Deck OLED left paused for minutes,
+                    // its screen dimmed and its completions at 60 Hz; back at 90 the
+                    // fit, its 20 s window still holding the old ones, gave in-between
+                    // pictures their refreshes from a grid off the display's for a
+                    // minute: the car ghosted badly): a gap of more than 3 s
+                    // between completions (the screen off, the game stopped) or 4 of
+                    // the last 32 more than 1.5 ms off the fitted grid start the fit
+                    // over, and HFR draws for the grid again only once it has been
+                    // measured anew (RefreshFit's 10 s).
+                    static int64_t lastOn = 0;
+                    static uint32_t misses = 0, seen = 0;  // bit history of the last 32
+                    bool lost = lastOn && onScreen - lastOn > 3'000'000'000;  // not a load's hitch (up to 1.4 s)
+                    lastOn = onScreen;
+                    if (const RefreshEstimate& e = grid.Estimate(); e.valid && e.periodNs > 0)
+                    {
+                        double ph = std::fmod(double(onScreen - e.gridNs), e.periodNs);
+                        if (ph < 0)
+                            ph += e.periodNs;
+                        const bool miss = std::min(ph, e.periodNs - ph) > 1'500'000.0;
+                        misses = (misses << 1) | uint32_t(miss);
+                        seen = std::min<uint32_t>(seen + 1, 32);
+                        if (seen >= 32 && std::popcount(misses) >= 4)
+                            lost = true;
+                    }
+                    if (lost && (grid.Estimate().valid || s_hfrGridValid.load(std::memory_order_relaxed)))
+                    {
+                        grid.SetGridHz(0);
+                        grid.SetGridHz(gridHz);
+                        fprintf(stderr, "[vblank] the %.2f Hz refresh grid lost (%s): measured again before pictures are drawn for it\n", gridHz,
+                            std::popcount(misses) >= 4 ? "completions off it" : "a gap in completions");
+                    }
+                    if (lost)
+                        misses = seen = 0;
                     grid.Add(onScreen);
                     const bool fixed = grid.Estimate().valid;
                     if (fixed)
@@ -570,6 +632,46 @@ namespace video
 #endif
             if (t.between != 0)
                 s_betweenShown++;
+#if !defined(__APPLE__)
+            if (t.target && timed)
+            {
+                static int64_t offs[64];
+                static uint32_t n = 0;
+                // The vblank lock moving new frames to another refresh
+                // (AdaptHold) puts the next ones a refresh off the last
+                // ones on purpose: a cut (hfr::NoteHoldChange), and they are
+                // judged afresh. On the Steam Machine at 120 Hz (v0.2.0
+                // stage, rerun after it) 4 of 5 "ghosts" were these, the
+                // hold going later when the in-between pictures came back
+                // and earlier after 10 s at 60.
+                static uint64_t holdChanges = GuestVblank().HoldChanges();
+                if (const uint64_t hc = GuestVblank().HoldChanges(); hc != holdChanges)
+                {
+                    holdChanges = hc;
+                    n = 0;
+                    hfr::NoteHoldChange();
+                }
+                const int64_t off = onScreen - t.target;
+                offs[n++ % 64] = off;
+                if (n >= 16)
+                {
+                    int64_t sorted[64];
+                    const uint32_t k = std::min<uint32_t>(n, 64);
+                    std::copy(offs, offs + k, sorted);
+                    std::nth_element(sorted, sorted + k / 2, sorted + k);
+                    double refresh = 0;
+                    int64_t g = 0;
+                    if (!HfrGrid(refresh, g))
+                        refresh = GuestVblank().PeriodNs() / double(std::max(1, GuestVblank().HoldMultiple()));
+                    if (refresh > 0 && std::llabs(off - sorted[k / 2]) > int64_t(0.5 * refresh))
+                    {
+                        s_offRefresh++;
+                        hfr::NoteLatePicture();
+                        n = 0;  // judged afresh when they come back (a new grid can sit at another distance)
+                    }
+                }
+            }
+#endif
             if (!t.vblank)
                 return;
             s_shown++;
@@ -734,6 +836,7 @@ namespace video
                 s_modeSince = std::chrono::steady_clock::now();
             }
             s_gridHz.store(!kApple && hz >= RefreshFit::kMinHz && RefreshFit::MultipleOf(hz) == 0 ? hz : 0.0, std::memory_order_relaxed);
+            s_hfrModeHz.store(hz, std::memory_order_relaxed);
             static double loggedHz = -1.0;
             if (hz == loggedHz)
                 return;
@@ -3279,6 +3382,7 @@ void main()
         std::lock_guard lock(s_pendingMutex);
         if (s_pendingNew)
             s_dropped++;
+        s_pendingSeq = ++s_submitSeq;
         s_pending = std::move(pixels);
         s_pendingWidth = width;
         s_pendingHeight = height;
@@ -3899,7 +4003,12 @@ void main()
         int64_t frameDesired = 0;   // macOS: when it is to be shown (0: when ready)
         {
             std::lock_guard lock(s_pendingMutex);
-            if (s_betweenNew)
+#if defined(__APPLE__)
+            const bool realFirst = false;  // the Mac shows each at its time (desiredPresentTime): in-between first, as M2/M3
+#else
+            const bool realFirst = s_pendingNew && s_pendingSeq < s_betweenSeq;
+#endif
+            if (s_betweenNew && !realFirst)
             {
                 gpuImage = s_betweenImage;
                 s_betweenImage = VK_NULL_HANDLE;
@@ -4310,8 +4419,15 @@ void main()
             static int presents = 0, taken = 0, shots = 0;
             presents++;
             double sinceLaunch = std::chrono::duration<double>(std::chrono::steady_clock::now() - launch).count();
-            bool check = checkTimes.size() == 1 ? taken < 3 && presents % 30 == 0 && sinceLaunch >= checkTimes[0]
-                                                : size_t(taken) < checkTimes.size() && sinceLaunch >= checkTimes[taken];
+            // NFSMW_CHECK_PRESENT_KIND=between|real (DIAGNOSTIC, Smooth Motion):
+            // only an in-between picture, or only a game frame's own.
+            static const int checkKind = [] {
+                const char* v = std::getenv("NFSMW_CHECK_PRESENT_KIND");
+                return !v ? 0 : std::strcmp(v, "between") == 0 ? 1 : std::strcmp(v, "real") == 0 ? 2 : 0;
+            }();
+            const bool kindOk = checkKind == 0 || (checkKind == 1 ? frameBetween != 0.0f : frameBetween == 0.0f && s_lastFreshImage);
+            bool check = kindOk && (checkTimes.size() == 1 ? taken < 3 && presents % 30 == 0 && sinceLaunch >= checkTimes[0]
+                                                           : size_t(taken) < checkTimes.size() && sinceLaunch >= checkTimes[taken]);
             // NFSMW_UI_KEYS "Shot": this frame, named apart from the timed ones
             // (taken even when it can't be saved: the keys after it wait for it).
             bool shot = !check && ui::TakeShot();
@@ -4524,6 +4640,67 @@ void main()
             if (HfrGrid(period, grid))
                 at = frameTarget - int64_t(std::llround(period)) + VblankLock::kHoldAfterRefreshNs;
         }
+#if !defined(__APPLE__)
+        // Locked at a multiple (no grid target): an in-between picture its
+        // fraction of the vblank's refreshes after the last real picture's
+        // refresh (s_lastRealAt's note).
+        else if (frameVblank && at)
+        {
+            if (frameBetween == 0.0f)
+                s_lastRealAt = at;
+            else if (const int multiple = GuestVblank().HoldMultiple(); multiple >= 2 && s_lastRealAt)
+            {
+                const double refresh = GuestVblank().PeriodNs() / double(multiple);
+                const int64_t after = s_lastRealAt + int64_t(std::llround(std::round(double(frameBetween) * multiple) * refresh));
+                // Within two vblanks of what the lock says (handed over in the vblank of
+                // its step's real picture, it says one vblank later); else the last
+                // real picture was long ago (a load, a pause): the lock's.
+                if (std::llabs(after - at) < int64_t(2.0 * GuestVblank().PeriodNs()))
+                    at = after;
+            }
+        }
+#endif
+        int64_t frameRefresh = 0;  // off Apple's systems: the refresh a Smooth Motion picture is for
+#if !defined(__APPLE__)
+        // A picture of Smooth Motion's (an in-between one, or a game frame
+        // while they are drawn) ready only once its refresh has begun is
+        // counted here (s_lateReady); one shown on another refresh than the
+        // others (OnScreen, s_offRefresh) is what puts the game at an even 60
+        // (hfr::NoteLatePicture; 2026-10-25: the Deck OLED ghosted with every
+        // other picture late, its frames 17-25 ms, under the load check's 19 ms test).
+        {
+            static int64_t lastBetween = 0, smoothSince = 0;
+            if (frameBetween != 0.0f)
+            {
+                if (!lastBetween || ready - lastBetween >= 100'000'000)
+                    smoothSince = ready;  // they start (again): the grid's schedule settles first
+                lastBetween = ready;
+            }
+            const bool smooth = frameBetween != 0.0f || (lastBetween && ready - lastBetween < 100'000'000);
+            // The first 300 ms of them aren't judged: the first pictures after
+            // a start take the schedule from the vblank (hfr.cpp StepFractions)
+            // and one could land behind its refresh with nothing shown wrong.
+            if (smooth && at && hfr::Enabled() && ready - smoothSince >= 300'000'000)
+            {
+                double refresh = 0;
+                int64_t g = 0;
+                if (!HfrGrid(refresh, g))
+                    refresh = GuestVblank().PeriodNs() / double(std::max(1, GuestVblank().HoldMultiple()));
+                if (refresh > 0)
+                {
+                    // The refresh it is for: the one after its hold time (VblankLock::kHoldAfterRefreshNs past the one before).
+                    frameRefresh = at - VblankLock::kHoldAfterRefreshNs + int64_t(std::llround(refresh));
+                    // Ready no sooner than the start of its refresh: it can't be shown on it.
+                    // Counted only: on a 90 Hz grid the pictures can all be a refresh
+                    // behind their schedule, evenly (no ghost, a refresh more delay);
+                    // what shows wrong is a picture on another refresh than the others
+                    // (OnScreen, s_offRefresh), which puts the game at 60.
+                    if (ready >= frameRefresh)
+                        s_lateReady++;
+                }
+            }
+        }
+#endif
         if (at > ready && at - ready < 100'000'000)
         {
             queueLock.unlock();
@@ -4540,7 +4717,8 @@ void main()
         if (s_presentTiming && (present == VK_SUCCESS || present == VK_SUBOPTIMAL_KHR))
         {
             std::lock_guard lock(s_timingMutex);
-            s_timings.push_back({ id, s_swapchainGeneration, presented, frameBetween != 0.0f ? 0 : frameVblank, ready, frameBetween, frameDesired });
+            s_timings.push_back({ id, s_swapchainGeneration, presented, frameBetween != 0.0f ? 0 : frameVblank, ready, frameBetween, frameDesired,
+                frameRefresh });
             s_timingCv.notify_one();
         }
         s_lastPresent = std::chrono::steady_clock::now();
@@ -4549,8 +4727,9 @@ void main()
             // A line every 20 s of in-between pictures at 60 a second.
             if (++s_betweenPresented % 1200 == 0)
                 fprintf(stderr, "[hfr] presenter: %llu in-between pictures presented, %llu seen on screen, %llu replaced before they were "
-                                "shown\n", (unsigned long long)s_betweenPresented.load(), (unsigned long long)s_betweenShown.load(),
-                    (unsigned long long)s_betweenDropped.load());
+                                "shown; %llu pictures ready too late for their refresh, %llu shown on another refresh than the others\n",
+                    (unsigned long long)s_betweenPresented.load(), (unsigned long long)s_betweenShown.load(),
+                    (unsigned long long)s_betweenDropped.load(), (unsigned long long)s_lateReady.load(), (unsigned long long)s_offRefresh.load());
         }
         if (!captures.empty())
         {
@@ -4581,7 +4760,9 @@ void main()
                         rgb[i * 3 + k] = px[i * 4 + (bgr ? 2 - k : k)];
                 fwrite(rgb.data(), 1, rgb.size(), out);
                 fclose(out);
-                fprintf(stderr, "[video] presented frame saved to %s\n", path.c_str());
+                fprintf(stderr, "[video] presented frame saved to %s%s\n", path.c_str(),
+                    frameBetween != 0.0f ? std::format(" (an in-between picture at {:.3f})", frameBetween).c_str()
+                                         : std::format(" (a game frame{})", frameShift != 0.0f ? std::format(", shift {:.3f}", frameShift) : std::string()).c_str());
                 gpu::renderer::LogOcclusionCounts(path.c_str());  // NFSMW_OCCLUSION=1: the counts behind it
             }
             else
@@ -4610,6 +4791,7 @@ void main()
             std::lock_guard lock(s_pendingMutex);
             if (s_betweenNew)
                 s_betweenDropped++;
+            s_betweenSeq = ++s_submitSeq;
             s_betweenImage = image;
             s_betweenWidth = width;
             s_betweenHeight = height;
@@ -4626,6 +4808,7 @@ void main()
         std::lock_guard lock(s_pendingMutex);
         if (s_pendingNew)
             s_dropped++;
+        s_pendingSeq = ++s_submitSeq;
         s_pending.clear();
         s_pendingImage = image;
         s_pendingWidth = width;
@@ -4695,6 +4878,10 @@ void main()
             gridNs = 0;
             return true;
         }
+#if !defined(__APPLE__)
+        if (!HfrOffered())
+            return false;  // a grid Smooth Motion isn't offered on (144, 165 Hz): the game at 60
+#endif
         if (!s_hfrGridValid.load(std::memory_order_relaxed) || s_gridHz.load(std::memory_order_relaxed) <= 0)
             return false;
         periodNs = double(s_hfrGridPeriodNs.load(std::memory_order_relaxed));
@@ -4711,6 +4898,46 @@ void main()
         // shows the game at 60).
         const float hz = s_offeredHz.load(std::memory_order_relaxed);
         return s_displayTiming && hz >= PresentSchedule::kMinFastHz && hz <= PresentSchedule::kMaxFastHz;
+#elif defined(__linux__) && !defined(__ANDROID__)
+        // SteamOS and Linux: a mode the presenter shows in-between pictures
+        // on evenly (refresh_multiple.h's SmoothMotionRate: 120 Hz, the guest
+        // vblank locked to every 2nd refresh, HfrPicturesPerStep; 90 Hz, the
+        // refresh grid, HfrGrid), with the present
+        // waits that measure both (VK_KHR_present_wait). Both are measured
+        // before a picture is drawn for them: with variable refresh (no lock,
+        // no grid) Smooth Motion shows none and the game runs at 60.
+        // Not on a Steam Deck (LCD "Jupiter", OLED "Galileo"; DMI product
+        // name, vendor Valve): measured on the OLED at 90 Hz (2026-10-25) its
+        // command processor took 17-23 ms a frame in busy scenes, lite in-between
+        // pictures were needed most of the time, and late pictures ghosted; the
+        // operator chose a steady 60 there (v020/smooth-steamos/INDEX.txt says how
+        // to try it again, e.g. on a later Deck). NFSMW_HFR_DECK=1 offers it anyway.
+        static const bool deck = [] {
+            auto read = [](const char* path) {
+                std::string v;
+                if (FILE* f = fopen(path, "r"))
+                {
+                    char buf[64] = {};
+                    if (fgets(buf, sizeof buf, f))
+                        v = buf;
+                    fclose(f);
+                }
+                while (!v.empty() && (v.back() == '\n' || v.back() == ' '))
+                    v.pop_back();
+                return v;
+            };
+            const std::string vendor = read("/sys/class/dmi/id/sys_vendor"), product = read("/sys/class/dmi/id/product_name");
+            const bool isDeck = vendor == "Valve" && (product == "Jupiter" || product == "Galileo");
+            const char* v = std::getenv("NFSMW_HFR_DECK");
+            if (isDeck)
+                fprintf(stderr, "[hfr] a Steam Deck (%s): Smooth Motion %s\n", product.c_str(),
+                    v && v[0] == '1' ? "offered anyway (NFSMW_HFR_DECK=1)" : "not offered (a steady 60; NFSMW_HFR_DECK=1 offers it)");
+            return isDeck && !(v && v[0] == '1');
+        }();
+        if (deck)
+            return false;
+        return s_presentTiming && RefreshMultiple::SmoothMotionRate(s_hfrModeHz.load(std::memory_order_relaxed),
+                                                                    s_refreshMultiple.load(std::memory_order_relaxed));
 #else
         return false;
 #endif
@@ -4721,7 +4948,13 @@ void main()
         if (GuestVblankDivider() != 1 || s_hfrGridForcedHz > 0)
             return 1;  // Frame Rate 30; a made-up grid (HfrGrid)
         if (const int multiple = GuestVblank().HoldMultiple(); multiple >= 2)
+        {
+#if !defined(__APPLE__)
+            if (!HfrOffered())
+                return 1;  // 180 or 240 Hz: Smooth Motion isn't offered there (refresh_multiple.h SmoothMotionRate)
+#endif
             return std::min(multiple, 4);
+        }
 #if defined(__APPLE__) && !TARGET_OS_IOS
         if (s_displayTiming && s_showAfterVblankNs > 0)
         {

@@ -19,6 +19,7 @@
 #include "depth_only.h"
 #include "render_scale.h"
 #include "shared_memory_glsl.h"
+#include "shadow_lend.h"
 #include "split_views.h"
 #include "xenos/registers.h"
 
@@ -399,6 +400,32 @@ namespace gpu::renderer
             ImageBlock* block = nullptr;  // bound at `offset` in this block, if any
             VkDeviceSize offset = 0;
         };
+
+        // A depth image that a texture can sample in place (deferred shadow
+        // resolves, see ShadowLend): an EDRAM depth target's, shared by the
+        // target (while it still renders into it), the texture (while it
+        // samples it) and the deferred resolve (while it may still have to
+        // write guest memory from it). Whoever lets go last returns it to the
+        // pool (never destroyed: two or three 1600x1600 images in a race).
+        struct PooledDepth
+        {
+            Image image;
+            VkImageView sampleView = VK_NULL_HANDLE;          // depth aspect (resolves)
+            std::unordered_map<uint32_t, VkImageView> views;  // depth aspect, by a texture's swizzle
+            VkFormat format = VK_FORMAT_UNDEFINED;
+            uint32_t width = 0, height = 0;
+        };
+        // (Never destroyed: a shared pointer may let go during exit.)
+        std::vector<PooledDepth*>& DepthPool()
+        {
+            static auto* pool = new std::vector<PooledDepth*>;
+            return *pool;
+        }
+        uint32_t s_lendImages = 0;  // pooled depth images made
+        std::shared_ptr<PooledDepth> ShareDepth(PooledDepth* d)
+        {
+            return std::shared_ptr<PooledDepth>(d, [](PooledDepth* back) { DepthPool().push_back(back); });
+        }
 
         const bool s_imagePool = [] { const char* v = std::getenv("NFSMW_IMAGE_POOL"); return !v || v[0] != '0'; }();
         const VkDeviceSize s_blockSize = [] {
@@ -925,6 +952,19 @@ namespace gpu::renderer
         }
 
         void EndPass();
+        // Deferred shadow resolves (see ShadowLend): before a pass writes a
+        // depth target (whole: it clears all of it first), before guest
+        // memory is read (a texture load), before a texture's own image is
+        // written (whole: all of it).
+        struct RenderTarget;
+        void LendTargetWrite(RenderTarget* rt, bool whole);
+        void LendGuestRead(uint32_t base, uint32_t size);
+        // NFSMW_SHADOW_EXP bitmask (measurement only, v020 shadows-mobile): 1
+        // the sun shadow map's resolves store only into its cached texture,
+        // not guest memory; 2 they're skipped (an upper bound: stale maps); 4
+        // its depth passes load and store no stencil. NFSMW_SHADOW_EXP_ALT=1:
+        // only in odd 120-frame windows.
+        bool ShadowExpOn(uint32_t bit);
         // Bumped when the command buffer's graphics state is unknown (a new
         // command buffer; compute work, which shares the push constants).
         uint64_t s_stateEpoch = 1;
@@ -2162,6 +2202,9 @@ namespace gpu::renderer
             bool blendable;
             Image image;
             VkImageView sampleView = VK_NULL_HANDLE;  // depth aspect only, for resolves
+            // Its image when it can be lent to a texture (a deferred shadow
+            // resolve's source; image and sampleView are its): see ShadowLend.
+            std::shared_ptr<PooledDepth> shared;
             // NFSMW_UNTILED_AREA: in the last frame untiled draws drew it (until
             // the next one's first), whether one was cut short of the
             // attachments' common size, what those cut draws drew (their host
@@ -2593,6 +2636,14 @@ namespace gpu::renderer
 
         void DestroyTarget(RenderTarget& rt)
         {
+            if (rt.shared)
+            {
+                // The pool's (a texture or a deferred resolve may still use it).
+                rt.shared.reset();
+                rt.image = {};
+                rt.sampleView = VK_NULL_HANDLE;
+                return;
+            }
             if (rt.sampleView && rt.sampleView != rt.image.view)
                 vkDestroyImageView(s_dev, rt.sampleView, nullptr);
             rt.sampleView = VK_NULL_HANDLE;
@@ -2861,6 +2912,17 @@ namespace gpu::renderer
                 }
                 it = s_pendingClears.erase(it);
             }
+            // A depth target whose image a texture samples in place (or a
+            // deferred resolve still reads) gets an image of its own first:
+            // a fresh one when this pass clears all of it, else the deferred
+            // resolves run now, as they would have at their resolve.
+            if (depth && depth->shared)
+            {
+                const bool whole = ds.loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR && s_passArea.offset.x == 0 && s_passArea.offset.y == 0 &&
+                    s_passArea.extent.width == depth->width && s_passArea.extent.height == depth->height;
+                LendTargetWrite(depth, whole);
+                ds.imageView = depth->image.view;
+            }
             VkRenderingInfoKHR ri{ VK_STRUCTURE_TYPE_RENDERING_INFO_KHR };
             ri.renderArea = s_passArea;
             ri.layerCount = 1;
@@ -2868,6 +2930,13 @@ namespace gpu::renderer
             ri.pColorAttachments = colors;
             ri.pDepthAttachment = depth ? &ds : nullptr;
             ri.pStencilAttachment = depth ? &ds : nullptr;
+            VkRenderingAttachmentInfoKHR st = ds;
+            if (depth && depth->pitch == 1600 && ShadowExpOn(4))
+            {
+                st.loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+                st.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+                ri.pStencilAttachment = &st;
+            }
             if (s_profiling && s_passQueryNext + 2 <= 512)
             {
                 char desc[256];
@@ -3253,6 +3322,9 @@ namespace gpu::renderer
         const int64_t s_pipelineWaitUs = [] { const char* v = std::getenv("NFSMW_PIPELINE_WAIT_US"); return v ? int64_t(std::atoll(v)) : 3000; }();
         const bool s_logPipelines = std::getenv("NFSMW_PIPELINE_LOG") != nullptr;
         uint64_t s_drawsAtSwap = 0, s_waitPipelinesUntil = 120;  // boot: wait in full
+        const uint32_t s_shadowExp = [] { const char* v = std::getenv("NFSMW_SHADOW_EXP"); return v ? uint32_t(std::atoi(v)) : 0u; }();
+        const bool s_shadowExpAlt = [] { const char* v = std::getenv("NFSMW_SHADOW_EXP_ALT"); return v && v[0] == '1'; }();
+        bool ShadowExpOn(uint32_t bit) { return (s_shadowExp & bit) && (!s_shadowExpAlt || s_frame / 120 % 2 == 1); }
         uint32_t s_pipelineSkips = 0;         // draws skipped this frame, their pipeline not ready
         int64_t s_pipelineWaitLeftUs = 0;     // this frame's wait budget left
 
@@ -4195,6 +4267,9 @@ void main()
             // direct cube (NFSMW_DIRECT_CUBE) has one per face.
             VkImageView storeViews[6] = {};
             std::unordered_map<uint32_t, VkImageView> views;  // by swizzle
+            // Sampled from this depth image instead of its own (a deferred
+            // shadow resolve's source; see ShadowLend), while set.
+            std::shared_ptr<PooledDepth> lend;
             // How the untile reads a direct 1x texture (a resolve can store
             // into it the same way, see Resolve); sliceStride: a cube's guest
             // bytes from one face to the next.
@@ -4207,6 +4282,10 @@ void main()
             uint64_t verifyFrame = 0;
         };
         void LoadScaledTexture(Texture& t, uint32_t base, uint32_t pitchBlocks, uint32_t endian);
+        // Deferred shadow resolves (see ShadowLend): before `t`'s own image is
+        // written (whole: all of it), and when it goes.
+        void LendTextureWrite(Texture& t, bool whole);
+        void LendTextureGone(Texture& t);
         bool ScaledTextureValid(uint32_t base, uint32_t size, uint64_t sig);
         // A scaled texture's surface: its guest format, size, pitch and
         // endianness (with its first byte and guest size, its cache key's
@@ -4555,8 +4634,11 @@ void main()
             return slot;
         }
 
+        VkImageView LendView(PooledDepth& d, uint32_t swizzle);
         VkImageView TextureView(Texture& t, uint32_t swizzle)
         {
+            if (t.lend)
+                return LendView(*t.lend, swizzle);
             auto& view = t.views[swizzle];
             if (view)
                 return view;
@@ -4943,6 +5025,12 @@ void main()
                 if (!t.uploaded || (scan && (writewatch::WrittenSince(base, size, t.loadedSequence) ||
                         (mipSize && writewatch::WrittenSince(mipBase, mipSize, t.loadedSequence)))))
                 {
+                    // Guest memory a deferred shadow resolve still owes, first;
+                    // and the load rewrites the texture's own image whole.
+                    LendGuestRead(base, size);
+                    if (mipSize)
+                        LendGuestRead(mipBase, mipSize);
+                    LendTextureWrite(t, true);
                     if (s_uploadLog && s_uploadLog->now)
                         LogUpload(t, format, f.tiled != 0);
                     // Snapshot before recording: a store after this faults and
@@ -5245,6 +5333,13 @@ void main()
                 if (!c.verify)
                 {
                     sampler = e.sampler;
+                    if (e.texture->lend)
+                    {
+                        // (Lent a new image each frame: the view isn't kept.)
+                        xenos::xe_gpu_texture_fetch_t f;
+                        memcpy(&f, fetch, sizeof(f));
+                        return TextureView(*e.texture, f.swizzle);
+                    }
                     return e.view;
                 }
                 // The full lookup as if this hit hadn't happened: a reload
@@ -5774,7 +5869,8 @@ void main()
     else w = unorm(px(gx, gy).r, 255.0) | (unorm(px(gx + 1u, gy).r, 255.0) << 8) |
         (unorm(px(gx + 2u, gy).r, 255.0) << 16) | (unorm(px(gx + 3u, gy).r, 255.0) << 24);
     uint m = swapWord(w, p.endian);
-    memStore(word, m);
+    if ((p.flags & 4u) == 0u)  // (4: into the cached texture alone)
+        memStore(word, m);
     // A cached direct 1x texture of this surface: its texel as the untile
     // would read the word (its endianness, D24 -> float). Or (TEX_OFFSET) one
     // holding it whole tiles in: 32-bit texels make a 4 KB tile, and
@@ -6170,6 +6266,392 @@ void main()
                 p.srcBase, p.rect, p.frame, p.seconds }).detach();
         }
 
+        void CreateComputePipeline(const char* glsl, const VkDescriptorSetLayoutBinding* bindings, uint32_t bindingCount,
+            uint32_t pushSize, VkDescriptorSetLayout& setLayout, VkPipelineLayout& layout, VkPipeline& pipeline,
+            const char* preamble);
+
+        // ---------------------------------------------------------------
+        // Deferred shadow resolves (gpu/shadow_lend.h). NFSMW_SHADOW_DEFER=1
+        // (default on Apple and Android, the tile GPUs; 0 off, alt: in odd
+        // 120-frame [perf] windows only, for A/B in one run) where the device
+        // samples its depth format with linear filtering.
+        // NFSMW_SHADOW_VERIFY=1: each deferred resolve also runs (so the
+        // texture's own image holds the resolve's texels) and a compute pass
+        // compares every texel with the lent depth image; the [shadow] line
+        // counts texels and those whose stored value isn't exactly the
+        // resolve's packing of the lent depth.
+#if defined(__APPLE__) || defined(__ANDROID__)
+        constexpr int kShadowDeferDefault = 1;
+#else
+        constexpr int kShadowDeferDefault = 0;
+#endif
+        const int s_shadowDefer = [] {
+            const char* v = std::getenv("NFSMW_SHADOW_DEFER");
+            return !v ? kShadowDeferDefault : std::strcmp(v, "alt") == 0 ? 2 : v[0] == '1' ? 1 : 0;
+        }();
+        const bool s_shadowVerify = [] { const char* v = std::getenv("NFSMW_SHADOW_VERIFY"); return v && v[0] == '1'; }();
+        int s_depthSampleable = -1;  // the device samples D32_SFLOAT_S8_UINT's depth with linear filtering (-1: not asked yet)
+
+        bool ShadowDeferOn()
+        {
+            if (!s_shadowDefer || s_logShadowMap || s_textureVerify || s_exp != 0 || (s_shadowDefer == 2 && s_frame / 120 % 2 == 0))
+                return false;
+            if (s_depthSampleable < 0)
+            {
+                VkFormatProperties fp{};
+                vkGetPhysicalDeviceFormatProperties(s_vk->physical, VK_FORMAT_D32_SFLOAT_S8_UINT, &fp);
+                constexpr VkFormatFeatureFlags need = VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT |
+                    VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT;
+                s_depthSampleable = (fp.optimalTilingFeatures & need) == need;
+                fprintf(stderr, "[renderer] deferred shadow resolves%s: D32_SFLOAT_S8_UINT features 0x%x (%s)\n",
+                    s_shadowDefer == 2 ? " (NFSMW_SHADOW_DEFER=alt: odd windows)" : "", unsigned(fp.optimalTilingFeatures),
+                    s_depthSampleable ? "its depth sampled in place" : "no linear filtering of depth: resolved as before");
+            }
+            return s_depthSampleable == 1;
+        }
+
+        struct ShadowLend
+        {
+            std::shared_ptr<PooledDepth> src;  // the target's image as the resolve read it (never written since)
+            ResolveConstants rc{};             // the resolve as it would have run (guest memory and the texture)
+            gpu::shadow_lend::WriteSet writes;
+            uint32_t rangeBase = 0, rangeBytes = 0;
+            uint64_t written = 0;              // MarkWritten's sequence for the range
+            Texture* texture = nullptr;        // samples src (null: has its own texels)
+            bool guestOwed = true;             // guest memory not written yet
+        };
+        std::vector<ShadowLend> s_lends;
+        // The [shadow] line: deferred resolves, fresh target images, deferred
+        // resolves run (their texture part, their guest part, for a vertex
+        // fetch), guest parts superseded by the same resolve again or dropped
+        // for a CPU store; NFSMW_SHADOW_VERIFY's counts.
+        struct LendCounts { uint64_t deferred, fresh, copies, textureRuns, guestRuns, vertexRuns, superseded, cpuDropped; } s_lendCounts{};
+        const bool s_shadowCopy = [] { const char* v = std::getenv("NFSMW_SHADOW_COPY"); return v && v[0] == '1'; }();
+
+        VkImageView LendView(PooledDepth& d, uint32_t swizzle)
+        {
+            auto& view = d.views[swizzle];
+            if (view)
+                return view;
+            auto mapped = gpu::shadow_lend::DepthSwizzle(swizzle);
+            auto comp = [](gpu::shadow_lend::Component c) {
+                return c == gpu::shadow_lend::Component::kR ? VK_COMPONENT_SWIZZLE_R
+                    : c == gpu::shadow_lend::Component::kOne ? VK_COMPONENT_SWIZZLE_ONE : VK_COMPONENT_SWIZZLE_ZERO;
+            };
+            VkImageViewCreateInfo vci{ VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
+            vci.image = d.image.image;
+            vci.viewType = VK_IMAGE_VIEW_TYPE_2D;
+            vci.format = d.format;
+            vci.components = { comp(mapped[0]), comp(mapped[1]), comp(mapped[2]), comp(mapped[3]) };
+            vci.subresourceRange = { VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1 };
+            Check(vkCreateImageView(s_dev, &vci, nullptr, &view), "vkCreateImageView(lent depth)");
+            LogOnce(0x2A00 + (swizzle & 0xFFF), "deferred shadow resolve: a texture samples a depth image in place (swizzle %03X -> %d%d%d%d)",
+                swizzle & 0xFFF, int(mapped[0]), int(mapped[1]), int(mapped[2]), int(mapped[3]));
+            return view;
+        }
+
+        // Runs `L`'s texture part (if its texture still samples src) and its
+        // guest part (if owed), as the resolve would have recorded them.
+        void RunLend(ShadowLend& L, bool texture, bool guest)
+        {
+            texture = texture && L.texture;
+            guest = guest && L.guestOwed;
+            if (guest && writewatch::WrittenSince(L.rangeBase, L.rangeBytes, L.written))
+            {
+                // A CPU store since the resolve: it came later, so it wins
+                // (writing the resolve's bytes now would undo it).
+                LogOnce((0x2Bull << 56) | L.rangeBase, "deferred shadow resolve to %08X: the CPU wrote its memory since: its guest part dropped",
+                    L.rc.destBase);
+                s_lendCounts.cpuDropped++;
+                L.guestOwed = false;
+                guest = false;
+            }
+            if (texture || guest)
+            {
+                EndPass();
+                Begin();
+                ResolveConstants rc = L.rc;
+                rc.texWrite = texture ? 1u : 0u;
+                if (!guest)
+                    rc.flags |= 4u;  // the texture alone
+                VkDescriptorImageInfo ii{ VK_NULL_HANDLE, L.src->sampleView, VK_IMAGE_LAYOUT_GENERAL };
+                VkDescriptorImageInfo ti{ VK_NULL_HANDLE, texture ? L.texture->storeViews[0] : s_dummyStorage.view, VK_IMAGE_LAYOUT_GENERAL };
+                VkDescriptorImageInfo hi{ VK_NULL_HANDLE, s_dummyStorage.view, VK_IMAGE_LAYOUT_GENERAL };
+                VkDescriptorBufferInfo pool = DummyStorage(s_scaled.pool);
+                VkDescriptorBufferInfo table = DummyStorage(s_scaled.table);
+                VkWriteDescriptorSet w[9]{};
+                w[0] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, VK_NULL_HANDLE, 0, 0, 1,
+                    VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &s_sharedInfo[0], nullptr };
+                w[1] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, VK_NULL_HANDLE, 1, 0, 1,
+                    VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, &ii, nullptr, nullptr };
+                w[2] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, VK_NULL_HANDLE, 2, 0, 1,
+                    VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &pool, nullptr };
+                w[3] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, VK_NULL_HANDLE, 3, 0, 1,
+                    VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &table, nullptr };
+                w[4] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, VK_NULL_HANDLE, 4, 0, 1,
+                    VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &ti, nullptr, nullptr };
+                w[5] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, VK_NULL_HANDLE, 5, 0, 1,
+                    VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &hi, nullptr, nullptr };
+                s_stateEpoch++;
+                vkCmdBindPipeline(s_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, ResolvePipeline(false, gpu::RenderScale{}));
+                s_pushDescriptorSet(s_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, s_resolveLayout, 0, AddSharedParts(w, 6), w);
+                vkCmdPushConstants(s_cmd, s_resolveLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, s_resolvePush, &rc);
+                vkCmdDispatch(s_cmd, (rc.width + 7) / 8, (rc.height + 7) / 8, 1);
+                ResolveBarrier(guest ? L.rangeBase : 0, guest ? L.rangeBytes : 0, texture ? L.texture->guestStart : 0);
+                if (guest)
+                {
+                    GuardGpu(L.rangeBase, L.rangeBytes, true, "resolve");
+                    writewatch::MarkGpuOwned(L.rangeBase, L.rangeBytes);
+                    s_lendCounts.guestRuns++;
+                }
+                if (texture)
+                    s_lendCounts.textureRuns++;
+                // (No SubmitIfStarving: callers go on recording into this
+                // command buffer, BeginPass among them.)
+            }
+            if (texture)
+            {
+                L.texture->lend.reset();
+                L.texture = nullptr;
+            }
+            if (guest)
+                L.guestOwed = false;
+        }
+
+        void LendCollect()
+        {
+            std::erase_if(s_lends, [](const ShadowLend& L) { return !L.texture && !L.guestOwed; });
+        }
+
+        void LendGuestRead(uint32_t base, uint32_t size)
+        {
+            if (s_lends.empty() || size == 0)
+                return;
+            base &= 0x1FFFFFFF;
+            bool ran = false;
+            for (ShadowLend& L : s_lends)
+                if (L.guestOwed && uint64_t(base) < uint64_t(L.rangeBase) + L.rangeBytes && uint64_t(L.rangeBase) < uint64_t(base) + size)
+                {
+                    RunLend(L, false, true);
+                    ran = true;
+                }
+            if (ran)
+                LendCollect();
+        }
+
+        void LendTextureWrite(Texture& t, bool whole)
+        {
+            if (!t.lend)
+                return;
+            for (ShadowLend& L : s_lends)
+                if (L.texture == &t)
+                {
+                    if (!whole)
+                        RunLend(L, true, false);
+                    L.texture = nullptr;
+                }
+            t.lend.reset();
+            LendCollect();
+        }
+
+        void LendTextureGone(Texture& t)
+        {
+            for (ShadowLend& L : s_lends)
+                if (L.texture == &t)
+                    L.texture = nullptr;
+            t.lend.reset();
+            LendCollect();
+        }
+
+        // A fresh image for `rt` (the pool's, or a new one): this pass clears
+        // all of it.
+        void FreshTargetImage(RenderTarget& rt)
+        {
+            PooledDepth* d = nullptr;
+            auto& pool = DepthPool();
+            for (auto it = pool.begin(); it != pool.end(); ++it)
+                if ((*it)->format == rt.vkFormat && (*it)->width == rt.width && (*it)->height == rt.height)
+                {
+                    d = *it;
+                    pool.erase(it);
+                    break;
+                }
+            if (!d)
+            {
+                d = new PooledDepth;
+                d->format = rt.vkFormat;
+                d->width = rt.width;
+                d->height = rt.height;
+                VkImageAspectFlags aspect = VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT;
+                d->image = CreateImage(VK_IMAGE_TYPE_2D, rt.vkFormat, { rt.width, rt.height, 1 }, 1,
+                    VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+                        VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, VK_IMAGE_VIEW_TYPE_2D, aspect);
+                VkImageViewCreateInfo vci{ VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
+                vci.image = d->image.image;
+                vci.viewType = VK_IMAGE_VIEW_TYPE_2D;
+                vci.format = rt.vkFormat;
+                vci.subresourceRange = { VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1 };
+                Check(vkCreateImageView(s_dev, &vci, nullptr, &d->sampleView), "vkCreateImageView(pooled depth)");
+                ToGeneral(d->image.image, aspect, 1);
+                fprintf(stderr, "[renderer] deferred shadow resolves: depth image %u made (%ux%u)\n", ++s_lendImages, rt.width, rt.height);
+            }
+            rt.shared = ShareDepth(d);
+            rt.image = d->image;
+            rt.sampleView = d->sampleView;
+            s_lendCounts.fresh++;
+        }
+
+        void LendTargetWrite(RenderTarget* rt, bool whole)
+        {
+            const bool lent = rt->shared && rt->shared.use_count() > 1;
+            switch (gpu::shadow_lend::BeforeTargetWrite(lent, whole))
+            {
+            case gpu::shadow_lend::TargetWrite::kInPlace:
+                return;
+            case gpu::shadow_lend::TargetWrite::kFreshImage:
+                FreshTargetImage(*rt);
+                return;
+            case gpu::shadow_lend::TargetWrite::kRunDeferred:
+                if (s_shadowCopy)
+                {
+                    // NFSMW_SHADOW_COPY=1: the target goes on in a copy of
+                    // its image instead; the resolves stay deferred.
+                    std::shared_ptr<PooledDepth> old = rt->shared;
+                    FreshTargetImage(*rt);
+                    FullBarrier();
+                    VkImageCopy region{};
+                    region.srcSubresource = { VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT, 0, 0, 1 };
+                    region.dstSubresource = region.srcSubresource;
+                    region.extent = { rt->width, rt->height, 1 };
+                    vkCmdCopyImage(s_cmd, old->image.image, VK_IMAGE_LAYOUT_GENERAL, rt->image.image, VK_IMAGE_LAYOUT_GENERAL, 1, &region);
+                    FullBarrier();
+                    s_lendCounts.copies++;
+                    return;
+                }
+                for (ShadowLend& L : s_lends)
+                    if (L.src == rt->shared)
+                        RunLend(L, true, true);
+                LendCollect();
+                // Whatever still holds it now (nothing should) gets the old
+                // image's contents only through a fresh copy: not done; log.
+                if (rt->shared.use_count() > 1)
+                    LogOnce(0x2C00, "deferred shadow resolve: target b%u still lent after its resolves ran", rt->base);
+                return;
+            }
+        }
+
+        // Before a draw whose vertex shader fetches vertices or indices from
+        // memory a deferred resolve still owes (never seen: they're shadow
+        // maps): its guest part, then a full barrier.
+        void LendVertexCheck(uint32_t indexBase, uint32_t indexBytes)
+        {
+            if (s_lends.empty())
+                return;
+            bool owed = false;
+            auto overlaps = [&](uint32_t base, uint32_t size) {
+                base &= 0x1FFFFFFF;
+                for (const ShadowLend& L : s_lends)
+                    if (L.guestOwed && size && uint64_t(base) < uint64_t(L.rangeBase) + L.rangeBytes && uint64_t(L.rangeBase) < uint64_t(base) + size)
+                        return true;
+                return false;
+            };
+            for (uint32_t word = 0; word < 3 && !owed; word++)
+                for (uint32_t bits = s_vs->info.vertexFetchConstants[word]; bits && !owed; bits &= bits - 1)
+                {
+                    const uint32_t* vf = &s_regs[XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0 + (word * 32 + uint32_t(__builtin_ctz(bits))) * 2];
+                    owed = overlaps(vf[0] & 0x1FFFFFFC, ((vf[1] >> 2) & 0xFFFFFF) * 4);
+                }
+            owed = owed || overlaps(indexBase, indexBytes);
+            if (!owed)
+                return;
+            LogOnce(0x2D00, "deferred shadow resolve: a draw fetches vertices or indices from its memory: its guest part runs first");
+            for (ShadowLend& L : s_lends)
+                if (L.guestOwed)
+                    RunLend(L, false, true);
+            LendCollect();
+            s_lendCounts.vertexRuns++;
+            EndPass();
+            Begin();
+            FullBarrier();
+        }
+
+        // NFSMW_SHADOW_VERIFY: compares a texture's own texels (the resolve's)
+        // with the lent depth image's, texel by texel.
+        const char* kShadowVerifyGlsl = R"(#version 460
+#extension GL_EXT_samplerless_texture_functions : require
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(set = 0, binding = 0) uniform texture2D depthImage;
+layout(set = 0, binding = 1, r32ui) readonly uniform uimage2D texels;
+layout(std430, set = 0, binding = 2) buffer Counts { uint compared, differ, maxDiffBits; } c;
+layout(push_constant) uniform P { uint width, height; } p;
+)" GLSL_DEPTH24_PACK R"(
+void main()
+{
+    uvec2 id = gl_GlobalInvocationID.xy;
+    if (id.x >= p.width || id.y >= p.height) return;
+    float d = texelFetch(depthImage, ivec2(id), 0).r;
+    // What the resolve stores for d (its D24 word, then the untile's float).
+    uint expect = floatBitsToUint(float(packDepth24(d)) / 16777215.0);
+    uint stored = imageLoad(texels, ivec2(id)).r;
+    atomicAdd(c.compared, 1u);
+    if (stored != expect) atomicAdd(c.differ, 1u);
+    // |d - stored| (non-negative floats order as their bits).
+    atomicMax(c.maxDiffBits, floatBitsToUint(abs(d - uintBitsToFloat(stored))));
+}
+)";
+        VkPipeline s_shadowVerifyPipeline = VK_NULL_HANDLE;
+        VkPipelineLayout s_shadowVerifyLayout = VK_NULL_HANDLE;
+        VkDescriptorSetLayout s_shadowVerifySetLayout = VK_NULL_HANDLE;
+        VkBuffer s_shadowVerifyBuffer = VK_NULL_HANDLE;
+        VkDeviceMemory s_shadowVerifyMemory = VK_NULL_HANDLE;
+        volatile uint32_t* s_shadowVerifyCounts = nullptr;  // (GPU) texels compared, differ, max |d - stored| (float bits)
+        uint64_t s_shadowVerifyRuns = 0;                     // resolves compared
+
+        void ShadowVerify(PooledDepth& src, Texture& t)
+        {
+            if (!s_shadowVerifyPipeline)
+            {
+                VkDescriptorSetLayoutBinding b[3] = {
+                    { 0, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr },
+                    { 1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr },
+                    { 2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr },
+                };
+                CreateComputePipeline(kShadowVerifyGlsl, b, 3, 8, s_shadowVerifySetLayout, s_shadowVerifyLayout, s_shadowVerifyPipeline, "");
+                VkBufferCreateInfo bci{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+                bci.size = 256;
+                bci.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+                Check(vkCreateBuffer(s_dev, &bci, nullptr, &s_shadowVerifyBuffer), "vkCreateBuffer(shadow verify)");
+                VkMemoryRequirements req;
+                vkGetBufferMemoryRequirements(s_dev, s_shadowVerifyBuffer, &req);
+                VkMemoryAllocateInfo mai{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+                mai.allocationSize = req.size;
+                mai.memoryTypeIndex = FindMemoryType(req.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+                Check(vkAllocateMemory(s_dev, &mai, nullptr, &s_shadowVerifyMemory), "vkAllocateMemory(shadow verify)");
+                vkBindBufferMemory(s_dev, s_shadowVerifyBuffer, s_shadowVerifyMemory, 0);
+                void* map = nullptr;
+                Check(vkMapMemory(s_dev, s_shadowVerifyMemory, 0, VK_WHOLE_SIZE, 0, &map), "vkMapMemory(shadow verify)");
+                memset(map, 0, 256);
+                s_shadowVerifyCounts = static_cast<volatile uint32_t*>(map);
+            }
+            EndPass();
+            Begin();
+            VkDescriptorImageInfo di{ VK_NULL_HANDLE, src.sampleView, VK_IMAGE_LAYOUT_GENERAL };
+            VkDescriptorImageInfo ti{ VK_NULL_HANDLE, t.storeViews[0], VK_IMAGE_LAYOUT_GENERAL };
+            VkDescriptorBufferInfo bi{ s_shadowVerifyBuffer, 0, 16 };
+            VkWriteDescriptorSet w[3]{};
+            w[0] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, VK_NULL_HANDLE, 0, 0, 1, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, &di, nullptr, nullptr };
+            w[1] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, VK_NULL_HANDLE, 1, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &ti, nullptr, nullptr };
+            w[2] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, VK_NULL_HANDLE, 2, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &bi, nullptr };
+            s_stateEpoch++;
+            vkCmdBindPipeline(s_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, s_shadowVerifyPipeline);
+            s_pushDescriptorSet(s_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, s_shadowVerifyLayout, 0, 3, w);
+            uint32_t size[2] = { t.width, t.height };
+            vkCmdPushConstants(s_cmd, s_shadowVerifyLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, 8, size);
+            vkCmdDispatch(s_cmd, (t.width + 7) / 8, (t.height + 7) / 8, 1);
+            FullBarrier();
+            s_shadowVerifyRuns++;
+        }
+
         void Resolve()
         {
             s_stats.resolves++;
@@ -6283,6 +6765,22 @@ void main()
             {
                 auto [extentStart, extentEnd] = ResolveExtent(r, (destPitch.copy_dest_pitch + 31) & ~31u, ResolveBppLog2(format));
                 uint32_t rangeBase = (destBase & 0x1FFFFFFF) + extentStart, rangeBytes = extentEnd - extentStart;
+                // A deferred resolve's guest bytes this one writes: the same
+                // resolve again rewrites them all (nothing to run); any other
+                // overlap runs it first, in order.
+                const gpu::shadow_lend::WriteSet writes{ destBase & 0x1FFFFFFF, (destPitch.copy_dest_pitch + 31) & ~31u, format, r.x0, r.y0, r.x1, r.y1 };
+                if (!s_lends.empty() && ResolveFormatSupported(format))
+                {
+                    for (ShadowLend& L : s_lends)
+                        if (L.guestOwed)
+                            switch (gpu::shadow_lend::ResolveOverlap(L.writes, L.rangeBase, L.rangeBytes, writes, rangeBase, rangeBytes))
+                            {
+                            case gpu::shadow_lend::Overlap::kNone: break;
+                            case gpu::shadow_lend::Overlap::kSuperseded: L.guestOwed = false; s_lendCounts.superseded++; break;
+                            case gpu::shadow_lend::Overlap::kRunFirst: RunLend(L, false, true); break;
+                            }
+                    LendCollect();
+                }
                 // Shadow mode: pages the resolve covers only in part keep
                 // the CPU's latest data around it.
                 EnsureShadow(rangeBase, rangeBytes);
@@ -6666,6 +7164,79 @@ void main()
                                 fused->width, fused->height, fused->cube ? " cube" : "", rc.destBase, texX, texY);
                     }
 
+                    const bool shadowExpMap = depthSource && pitch == 1600 && bl == 2;
+                    if (shadowExpMap && fused && !partial && ShadowExpOn(1))
+                        rc.flags |= 4u;
+                    // Deferred (gpu/shadow_lend.h): the texture samples the
+                    // target's depth image in place, and this runs only if
+                    // something needs what it writes.
+                    bool defer = false;
+                    if (fused && ShadowDeferOn())
+                    {
+                        gpu::shadow_lend::Candidate c;
+                        c.depthSource = depthSource && source->depth;
+                        c.format = format;
+                        c.bppLog2 = bl;
+                        c.scaledSource = !source->scale.IsOne();
+                        c.scaledWrite = scaledWrite;
+                        c.fusedExact = !partial;
+                        c.texConvert = fused->convert;
+                        c.texCube = fused->cube;
+                        c.texLevels = fused->levels;
+                        c.texLayers = fused->layers;
+                        c.texWidth = fused->width;
+                        c.texHeight = fused->height;
+                        c.srcWidth = source->width;
+                        c.srcHeight = source->height;
+                        c.rectX0 = r.x0;
+                        c.rectY0 = r.y0;
+                        c.rectWidth = rc.width;
+                        c.rectHeight = rc.height;
+                        c.srcOriginX = rc.srcOriginX;
+                        c.srcOriginY = rc.srcOriginY;
+                        const char* why = gpu::shadow_lend::Ineligible(c);
+                        defer = !why;
+                        if (why && depthSource && bl == 2)
+                            LogOnce((0x2Eull << 56) | (uint64_t(rc.destBase) << 8) | uint64_t(why[0]), "depth resolve to %08X (%ux%u) not deferred: %s",
+                                rc.destBase, rc.width, rc.height, why);
+                    }
+                    // A texture sampling a deferred resolve's image: this
+                    // stores into its own image now (or lends it a new one).
+                    if (fused && fused->lend)
+                        LendTextureWrite(*fused, defer || (!partial && r.x0 == 0 && r.y0 == 0 && rc.width >= fused->width && rc.height >= fused->height));
+                    if (defer)
+                    {
+                        if (!source->shared)
+                        {
+                            // The target's own image becomes shareable.
+                            auto* d = new PooledDepth;
+                            d->image = source->image;
+                            d->sampleView = source->sampleView;
+                            d->format = source->vkFormat;
+                            d->width = source->width;
+                            d->height = source->height;
+                            source->shared = ShareDepth(d);
+                        }
+                        ShadowLend L;
+                        L.src = source->shared;
+                        L.rc = rc;
+                        L.writes = writes;
+                        L.rangeBase = rangeBase;
+                        L.rangeBytes = rangeBytes;
+                        L.texture = fused;
+                        fused->lend = source->shared;
+                        s_lends.push_back(L);
+                        s_lendCounts.deferred++;
+                        LogOnce(0x2F00, "deferred shadow resolves: the first %ux%u to %08X (its texture samples the target's depth in place)",
+                            rc.width, rc.height, rc.destBase);
+                        // Vertex stages that sample it wait for the target's
+                        // writes (level 2: on demand; else at once, as after
+                        // the resolve's dispatch).
+                        if (s_passBarrier < 2)
+                            FullBarrier();
+                        else if (std::find(s_vertexPendingTextures.begin(), s_vertexPendingTextures.end(), fused->guestStart) == s_vertexPendingTextures.end())
+                            s_vertexPendingTextures.push_back(fused->guestStart);
+                    }
                     VkDescriptorImageInfo ii{ VK_NULL_HANDLE, source->sampleView, VK_IMAGE_LAYOUT_GENERAL };
                     VkDescriptorImageInfo ti{ VK_NULL_HANDLE, fused ? fused->storeViews[layer] : s_dummyStorage.view, VK_IMAGE_LAYOUT_GENERAL };
                     VkDescriptorImageInfo hi{ VK_NULL_HANDLE, hosted ? hosted->storeView : s_dummyStorage.view, VK_IMAGE_LAYOUT_GENERAL };
@@ -6692,13 +7263,27 @@ void main()
                     vkCmdPushConstants(s_cmd, s_resolveLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0,
                         source->scale.IsOne() ? s_resolvePush : uint32_t(sizeof(ResolveConstants)), &rc);
                     uint32_t perWord = bl >= 2 ? 1 : (4 >> bl);
-                    if (!(s_exp & 2))
-                        vkCmdDispatch(s_cmd, coalesced ? (rc.width + 31) / 32 : (rc.width / perWord + 7) / 8,
-                            coalesced ? (rc.height + 1) / 2 : (rc.height + 7) / 8, 1);
-                    if (scaledWrite)
-                        FullBarrier();  // (above 1x: as before)
+                    if (defer && !s_shadowVerify)
+                    {
+                        // (Nothing recorded.)
+                    }
                     else
-                        ResolveBarrier(rangeBase, rangeBytes, fused ? fused->guestStart : 0);
+                    {
+                        if (!(s_exp & 2) && !(shadowExpMap && ShadowExpOn(2)))
+                            vkCmdDispatch(s_cmd, coalesced ? (rc.width + 31) / 32 : (rc.width / perWord + 7) / 8,
+                                coalesced ? (rc.height + 1) / 2 : (rc.height + 7) / 8, 1);
+                        if (scaledWrite)
+                            FullBarrier();  // (above 1x: as before)
+                        else
+                            ResolveBarrier(rangeBase, rangeBytes, fused ? fused->guestStart : 0);
+                        if (defer)
+                        {
+                            // NFSMW_SHADOW_VERIFY: the resolve ran (guest memory and
+                            // the texture's own image); compare.
+                            s_lends.back().guestOwed = false;
+                            ShadowVerify(*source->shared, *fused);
+                        }
+                    }
                     if (s_logShadowMap && depthSource && pitch == 1600 && bl == 2)
                         ShadowMapProbeRecord(rangeBase, rangeBytes, rc, r, source->base);
                     SubmitIfStarving();
@@ -6715,6 +7300,8 @@ void main()
                                     siblings.push_back(q);
                     }
                     uint64_t written = writewatch::MarkWritten(rangeBase, rangeBytes, writewatch::Writer::kResolve, rc.destBase);
+                    if (defer)
+                        s_lends.back().written = written;
                     if (directShadowResolve && !(s_exp & 2))
                     {
                         uint64_t writeSequence = writewatch::WriteSequence(rangeBase, rangeBytes);
@@ -6791,8 +7378,12 @@ void main()
                         for (uint32_t q : siblings)
                             s_scaled.pageSeq[q] = writewatch::WriteSequence(q << 12, 4096);
                     }
-                    GuardGpu(rangeBase, rangeBytes, true, "resolve");
-                    writewatch::MarkGpuOwned(rangeBase, rangeBytes);
+                    // (Deferred: when its guest part runs, see RunLend.)
+                    if (!defer || s_shadowVerify)
+                    {
+                        GuardGpu(rangeBase, rangeBytes, true, "resolve");
+                        writewatch::MarkGpuOwned(rangeBase, rangeBytes);
+                    }
                 }
             }
 
@@ -7262,6 +7853,8 @@ void main()
 
         void FillFreshSlots(const std::vector<std::pair<uint32_t, uint32_t>>& fresh)
         {
+            for (const auto& ps : fresh)  // (before the ring allocation: this may record and submit)
+                LendGuestRead(ps.first << 12, 4096);
             for (size_t first = 0; first < fresh.size(); first += 4096)
             {
                 uint32_t count = uint32_t(std::min<size_t>(4096, fresh.size() - first));
@@ -8134,6 +8727,7 @@ void main()
 
         void DestroyTexture(Texture& t)
         {
+            LendTextureGone(t);
             if (auto it = s_directByBase.find(t.guestStart); it != s_directByBase.end() && it->second == &t)
                 s_directByBase.erase(it);
             if (auto it = s_directByStart.find(t.guestStart); it != s_directByStart.end() && it->second == &t)
@@ -8244,6 +8838,15 @@ void main()
                 mips ? "on" : "off", textures, std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count());
         }
 
+        // Split screen (video::SplitScreenScale): at most Auto's scale while
+        // the game is in it. The Steam Machine at 3440x1440 and 3x (4.031x3)
+        // drew a split race's heavier scenes in 16.5-18 ms of GPU a frame and
+        // fell below 60 fps in 1-8 windows a run, v0.1.9 as v0.2.0 (the
+        // v0.2.0 fixes' A/B: which scenes a split race draws varies from run
+        // to run); single player unchanged. NFSMW_SPLIT_SCALE=0: the
+        // setting's scale in split screen too.
+        const bool s_splitScale = [] { const char* v = std::getenv("NFSMW_SPLIT_SCALE"); return !(v && v[0] == '0'); }();
+
         void ApplyLiveSettings()
         {
             uint64_t generation = settings::Generation();
@@ -8258,14 +8861,18 @@ void main()
                 return;
             int32_t setting = settings::GetInt(settings::Id::InternalResolution);
             uint32_t regionW = 0, regionH = 0;
+            const bool split = s_splitScale && SplitFrame();
             // Auto, and a setting's native rows or columns, follow the picture.
-            if (setting <= 0 || s_nativeShape)
+            if (setting <= 0 || s_nativeShape || split)
             {
                 video::FrameRegion(regionW, regionH);
                 if (regionW == 0 || regionH == 0)
                     return;  // no picture to size it for: keep the scale
             }
-            const gpu::RenderScale want = WantedRenderScale(setting, regionW, regionH);
+            gpu::RenderScale want = WantedRenderScale(setting, regionW, regionH);
+            const bool splitCapped = split && !(video::SplitScreenScale(want, regionW, regionH, s_scaleBudget) == want);
+            if (splitCapped)
+                want = video::SplitScreenScale(want, regionW, regionH, s_scaleBudget);
             if (want == s_renderScale)
             {
                 s_resolutionSetting = setting;
@@ -8286,7 +8893,7 @@ void main()
             }
             s_resolutionSetting = setting;
             s_autoSeen = 0;
-            ApplyRenderScale(want, ScaleReason(setting, regionW, regionH));
+            ApplyRenderScale(want, ScaleReason(setting, regionW, regionH) + (splitCapped ? ", split screen: at most Auto's" : ""));
         }
 
         // ---------------------------------------------------------------
@@ -9735,6 +10342,7 @@ void main()
             }
         }
         if (s_passBarrier >= 2)
+            LendVertexCheck(pc.indexAddress, pc.indexAddress ? count << (src.is32 ? 2 : 1) : 0);
             VertexBarrierIfNeeded(layout.vsMasks, pc.indexAddress, pc.indexAddress ? count << (src.is32 ? 2 : 1) : 0);
         BeginPass(color, depth, scissor);
         if (s_profiling && !s_passInfos.empty())
@@ -11357,6 +11965,29 @@ void main()
         }
         // NFSMW_LOG_UNTILED_AREA=1: with each [perf] line, whether the toggle
         // was on in its window (=alt: every other one) and what it did.
+        // The [shadow] line (deferred shadow resolves), when any were.
+        if (frame % 120 == 0 && (s_lendCounts.deferred || s_shadowDefer == 2))
+        {
+            static LendCounts last;
+            const LendCounts& n = s_lendCounts;
+            std::string verify;
+            if (s_shadowVerifyCounts)
+            {
+                uint32_t v[3] = { s_shadowVerifyCounts[0], s_shadowVerifyCounts[1], s_shadowVerifyCounts[2] };
+                float maxDiff;
+                memcpy(&maxDiff, &v[2], 4);
+                verify = std::format(" | verify: {} resolves recorded, {} texels compared (mod 2^32), {} differ, max |depth - texel| {:.3g} (all so far)",
+                    s_shadowVerifyRuns, v[0], v[1], maxDiff);
+            }
+            fprintf(stderr, "[shadow] %s per frame: %.2f deferred, %.2f fresh images (%.2f copies), runs %.2f texture %.2f guest %.2f vertex, "
+                "%.2f superseded, %.2f dropped (CPU) | %zu pending, %u images%s\n",
+                s_shadowDefer == 2 ? (frame / 120 % 2 == 0 ? "alt: this window on," : "alt: this window off,") : "on,",
+                double(n.deferred - last.deferred) / 120, double(n.fresh - last.fresh) / 120, double(n.copies - last.copies) / 120, double(n.textureRuns - last.textureRuns) / 120,
+                double(n.guestRuns - last.guestRuns) / 120, double(n.vertexRuns - last.vertexRuns) / 120,
+                double(n.superseded - last.superseded) / 120, double(n.cpuDropped - last.cpuDropped) / 120, s_lends.size(), s_lendImages,
+                verify.c_str());
+            last = n;
+        }
         if (s_logUntiledArea && frame % 120 == 0)
         {
             static UntiledAreaCounts last;
@@ -11480,6 +12111,15 @@ void main()
         std::call_once(initialized, [] { glslang_initialize_process(); });
         glslang_stage_t stages[3] = { GLSLANG_STAGE_VERTEX, GLSLANG_STAGE_FRAGMENT, GLSLANG_STAGE_COMPUTE };
         return CompileGlsl(glsl, stages[std::clamp(stage, 0, 2)], log);
+    }
+
+    gpu::RenderScale InternalResolutionScale(int32_t setting, uint32_t regionW, uint32_t regionH)
+    {
+        // (s_scaleFixed and s_renderScale are set once, before the menu
+        // can be opened, while NFSMW_RENDER_SCALE holds.)
+        if (s_scaleFixed)
+            return s_renderScale;
+        return WantedRenderScale(setting, regionW, regionH);
     }
 
     void Shutdown()

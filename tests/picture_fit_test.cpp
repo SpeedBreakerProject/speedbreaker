@@ -118,6 +118,34 @@ int main()
     Scale(1280, 960, 4, 1, 2);    // a 4:3 picture letterboxed on 1280x1024
     Scale(2560, 1600, 6, 2, 2);   // 16:10 on a discrete GPU: as its 16:9 box, not 2x3
 
+    printf("Split screen (video::SplitScreenScale):\n");
+    {
+        using gpu::RenderScale;
+        auto pixels = [](const RenderScale& s) { return double(s.x.num) * s.y.num / (double(s.x.den) * s.y.den); };
+        // The Steam Machine's 3440x1440 at 3x (native columns: 4.031x3,
+        // 5160x2160): Auto's 2.6875x2 (3440x1440) while split.
+        const RenderScale three = video::NativeShape(gpu::AxisFromHalves(6), 3440, 1440);
+        const RenderScale split = video::SplitScreenScale(three, 3440, 1440, 6);
+        const RenderScale autoScale = video::AutoNativeScale(3440, 1440, 6);
+        CHECK(split == autoScale && split.x.Size(1280) == 3440 && split.y.Size(720) == 1440, "3x at 3440x1440: %ux%u", split.x.Size(1280), split.y.Size(720));
+        // At or under Auto's: kept (Auto itself, 1x, 1.5x at 3440x1440).
+        CHECK(video::SplitScreenScale(autoScale, 3440, 1440, 6) == autoScale, "Auto kept");
+        for (uint32_t halves : { 2u, 3u })
+        {
+            const RenderScale s = video::NativeShape(gpu::AxisFromHalves(halves), 3440, 1440);
+            CHECK(video::SplitScreenScale(s, 3440, 1440, 6) == s, "%u halves kept", halves);
+        }
+        // 1440p 16:9 at 3x on a discrete GPU: Auto's 2x2.
+        const RenderScale s1440 = video::SplitScreenScale(RenderScale::Whole(3, 3), 2560, 1440, 6);
+        CHECK(s1440 == RenderScale::Whole(2, 2), "1440p 3x -> 2x2");
+        // A Steam Deck's 1280x800 at 2x on its integrated GPU: Auto's 1x10/9.
+        const RenderScale deck = video::SplitScreenScale(video::NativeShape(gpu::AxisFromHalves(4), 1280, 800), 1280, 800, 4);
+        CHECK(deck.x.Size(1280) == 1280 && deck.y.Size(720) == 800, "Deck 2x -> %ux%u", deck.x.Size(1280), deck.y.Size(720));
+        // Never more pixels than asked, and no picture: as asked.
+        CHECK(pixels(split) < pixels(three), "fewer pixels");
+        CHECK(video::SplitScreenScale(three, 0, 0, 6) == three, "no region: kept");
+    }
+
     if (g_failures)
     {
         printf("%d FAILED\n", g_failures);

@@ -26,12 +26,14 @@
 #include <install/placement.h>
 #include <install/sha256.h>
 #include <platform/quit_signals.h>
+#include <region/region.h>
 #include <report/report.h>
 #include <ui/installer_screen.h>
 #include <ui/ui.h>
 #include <user/paths.h>
 #include <user/settings.h>
 #include <user/version_check.h>
+#include <game/language.h>
 
 #include <SDL3/SDL.h>
 #if defined(__APPLE__) && TARGET_OS_IOS
@@ -281,6 +283,26 @@ namespace
 #endif
 }
 
+// The installed disc's release, before settings load: the PAL (Spanish)
+// disc's own language, Spanish, is the Language row's default there (a
+// settings.toml a save wrote keeps the language it holds). Cheap: the
+// installs' default.xex sizes (install/locate.h).
+static void SetReleaseDefaults(int argc, char** argv)
+{
+    const install::Manifest* manifest = nullptr;
+    if (argc > 1)
+    {
+        std::error_code ec;
+        uint64_t size = std::filesystem::file_size(argv[1], ec);
+        manifest = ec ? nullptr : install::ManifestForXexSize(size);
+    }
+    else if (std::optional<install::GameInstall> game = install::FindGameInstall())
+        manifest = game->manifest;
+    if (manifest && manifest->region == "pal-es")
+        settings::SetDeviceDefault(settings::Id::GameLanguage, game::language::kSpanish,
+            "the European (PAL, Spanish) disc's language");
+}
+
 int main(int argc, char** argv)
 {
     // Windows: no drive-error dialogs, UTF-8 in the console
@@ -423,6 +445,7 @@ int main(int argc, char** argv)
         settings::SetDeviceDefault(settings::Id::FrameRate, older ? 30 : settings::kFrameRateAuto, "an iPhone, " + gpu);
     }
 #endif
+    SetReleaseDefaults(argc, argv);
     bool settingsLoaded = settings::Load();
     hfr::Init();  // Smooth Motion, for this run
     // Which version ran last: a line in the log (so a bug report shows when a
@@ -576,10 +599,38 @@ int main(int argc, char** argv)
     // Which game files this is, then the whole system summary for the log.
     {
         std::string sha = install::ToHex(install::Sha256Of(file.data(), file.size()));
-        const install::Manifest& manifest = install::GameManifest();
+        const install::Manifest* known = install::ManifestForXexHash(sha);
+        const install::Manifest& manifest = known ? *known : install::GameManifest();
         report::SetSystemItem("Game", std::format("{} ({}); default.xex {} bytes, SHA-256 {} ({}); manifest {}",
-            GetGamePath().string(), gameOrigin, file.size(), sha, sha == manifest.Xex().sha256 ? "the supported version" : "NOT the supported version",
+            GetGamePath().string(), gameOrigin, file.size(), sha,
+            known ? std::format("a supported version: {}", manifest.regionName) : std::string("NOT a supported version"),
             manifest.version));
+        // That release's own recompiled code and addresses (region/region.h).
+        region::Release release = region::Release::Usa;
+        if (known && region::FromId(known->region, release) && release != region::Release::Usa)
+        {
+            if (!region::Available(release))
+            {
+                fprintf(stderr, "[runtime] %s is the %.*s release's default.xex, and this build has no recompiled code "
+                    "for it (built without ppc-pal-es/)\n", xexPath.string().c_str(), int(known->regionName.size()),
+                    known->regionName.data());
+                return 1;
+            }
+            region::Select(release);
+            report::RefreshGuestSymbols();
+            // A first run that installed the PAL disc just now loaded the
+            // settings before the disc was known: its language, Spanish,
+            // becomes the default and this run's (SetReleaseDefaults does it
+            // before loading on later runs).
+            if (release == region::Release::PalEs && settings::IsDefault(settings::Id::GameLanguage)
+                && !settings::EnvOverride(settings::Id::GameLanguage) && settings::GetInt(settings::Id::GameLanguage) != game::language::kSpanish)
+            {
+                settings::SetDeviceDefault(settings::Id::GameLanguage, game::language::kSpanish,
+                    "the European (PAL, Spanish) disc's language, installed this run");
+                settings::Reset(settings::Id::GameLanguage);
+                game::language::SetLaunchLanguage(game::language::kSpanish);
+            }
+        }
     }
     report::LogSystemSummary();
 

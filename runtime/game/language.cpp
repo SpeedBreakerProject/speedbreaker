@@ -42,6 +42,7 @@
 // NFSMW_LANGUAGE=spanish for one run); read at boot, so a change applies at
 // the next launch. English, the default, opens the same files as before.
 #include <stdafx.h>
+#include <region/region.h>
 #include "language.h"
 
 #include <kernel/function.h>
@@ -49,6 +50,8 @@
 #include <user/settings.h>
 
 #include <array>
+#include <atomic>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
@@ -62,9 +65,12 @@ namespace
 {
     using namespace game::language;
 
+    std::atomic<int32_t> s_launch{ -1 };
+
     int32_t Chosen()
     {
-        return settings::GetInt(settings::Id::GameLanguage);
+        const int32_t launch = s_launch.load(std::memory_order_relaxed);
+        return launch >= 0 ? launch : settings::GetInt(settings::Id::GameLanguage);
     }
 
     // `name` in `dir`, in any case (the disc's folders are "Movies" and
@@ -106,7 +112,7 @@ namespace
                     zdir.assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
                 }
             for (size_t i = 0; i < std::size(kLanguages); i++)
-                out.files[i] = Scan(kLanguages[i], movies, zdir);
+                out.files[i] = Scan(kLanguages[i], movies, zdir, region::IsPalEs());
             return out;
         }();
         return installed;
@@ -123,6 +129,12 @@ namespace
 
 namespace game::language
 {
+    void SetLaunchLanguage(int32_t id)
+    {
+        if (Find(id))
+            s_launch.store(id, std::memory_order_relaxed);
+    }
+
     std::string MenuNote(int32_t id)
     {
         const Language* l = Find(id);
@@ -131,40 +143,66 @@ namespace game::language
     }
 }
 
-PPC_FUNC(sub_822BCBC8)
+SB_HOOK(sub_822BCBC8)
 {
-    if (static_cast<uint32_t>(ctx.lr) == kBootCall)
+    if (static_cast<uint32_t>(ctx.lr) == region::Addr(kBootCall))
     {
         const int32_t chosen = Chosen();
         if (const Language* l = Find(chosen))
             fprintf(stderr, "%s\n", LogLine(*l, *FilesOf(chosen)).c_str());
-        if (const int32_t r3 = BootLanguage(kBootCall, ctx.r3.s32, chosen); r3 != ctx.r3.s32)
+        if (const int32_t r3 = BootLanguageFor(kBootCall, ctx.r3.s32, chosen, region::IsPalEs()); r3 != ctx.r3.s32)
             ctx.r3.s64 = r3;
     }
-    __imp__sub_822BCBC8(ctx, base);
+    SB_ORIGINAL(sub_822BCBC8)(ctx, base);
 }
 
-PPC_FUNC(sub_82282A58)
+SB_HOOK(sub_82282A58)
 {
-    if (static_cast<uint32_t>(ctx.lr) == kMovieNameCall)
+    if (static_cast<uint32_t>(ctx.lr) == region::Addr(kMovieNameCall))
     {
         const Files* f = FilesOf(Chosen());
         if (const uint32_t r9 = MovieSuffix(kMovieNameCall, ctx.r9.u32, f && f->pal); r9 != ctx.r9.u32)
             ctx.r9.u64 = r9;
+        // r8: "_<LANGUAGE>" (a buffer on the caller's stack). A language
+        // the disc has no movies for, nor English's (the PAL disc), gets the
+        // disc's own (Files::movieRedirect).
+        if (region::IsPalEs() && ctx.r8.u32)
+        {
+            char* name = reinterpret_cast<char*>(base + ctx.r8.u32);
+            const size_t n = strnlen(name, 32);
+            for (size_t i = 0; i < std::size(kLanguages); i++)
+            {
+                const Language& l = kLanguages[i];
+                if (n == strlen(l.disc) + 1 && name[0] == '_' && EndsWithNoCase(std::string_view(name, n), l.disc))
+                {
+                    if (const Language* to = InstalledFiles().files[i].movieRedirect)
+                    {
+                        static std::atomic<int> said{ 0 };
+                        if (said.fetch_add(1) < 4)
+                            fprintf(stderr, "[language] movie %s: none in %s on this disc, %s's instead\n",
+                                ctx.r7.u32 ? reinterpret_cast<const char*>(base + ctx.r7.u32) : "?", l.name, to->name);
+                        snprintf(name, 32, "_%s", to->disc);
+                    }
+                    break;
+                }
+            }
+        }
     }
-    __imp__sub_82282A58(ctx, base);
+    SB_ORIGINAL(sub_82282A58)(ctx, base);
 }
 
 // The attribute lookup (852 callers): only sub_821B82E8's speech-record
 // lookups change, and only when the chosen language's bank is missing.
-PPC_FUNC(sub_82148818)
+SB_HOOK(sub_82148818)
 {
-    const uint32_t lr = static_cast<uint32_t>(ctx.lr);
-    if (lr >= kSpeechPickBegin && lr < kSpeechPickEnd)
+    const uint32_t lr = static_cast<uint32_t>(ctx.lr), begin = region::Addr(kSpeechPickBegin);
+    if (lr >= begin && lr < region::Addr(kSpeechPickEnd))
     {
         const Files* f = FilesOf(Chosen());
-        if (const uint32_t r5 = SpeechIndex(lr, ctx.r4.u32, ctx.r5.u32, f && f->speechToEnglish); r5 != ctx.r5.u32)
+        // The decision takes the USA return address (the same code).
+        const int32_t record = !f ? -1 : f->speechToEnglish ? int32_t(kEnglishSpeech) : f->speechRedirect ? f->speechRedirect->id : -1;
+        if (const uint32_t r5 = SpeechIndexTo(lr - begin + kSpeechPickBegin, ctx.r4.u32, ctx.r5.u32, record); r5 != ctx.r5.u32)
             ctx.r5.u64 = r5;
     }
-    __imp__sub_82148818(ctx, base);
+    SB_ORIGINAL(sub_82148818)(ctx, base);
 }

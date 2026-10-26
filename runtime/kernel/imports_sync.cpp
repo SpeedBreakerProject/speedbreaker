@@ -7,6 +7,7 @@
 #include "function.h"
 #include <cpu/guest_thread.h>
 #include <cpu/guest_time.h>
+#include <cpu/backoff.h>
 #include <cpu/host_cpu.h>
 
 using namespace dispatcher;
@@ -269,24 +270,9 @@ uint32_t KeDelayExecutionThread(uint32_t waitMode, uint32_t alertable, be<int64_
         // in them, 60% of it in sched_yield, and kept one of the Steam
         // Machine's two fast cores (see hostcpu::ReserveFastCore). After 1 ms
         // of back-to-back zero delays each one sleeps 100 us instead (a new
-        // poll starts exact). Linux only: macOS coalesces default-QoS timers
-        // to ~10 ms. NFSMW_SLEEP0_BACKOFF=0 always yields.
-#ifdef __linux__
-        static const bool backOff = [] { const char* v = std::getenv("NFSMW_SLEEP0_BACKOFF"); return !v || v[0] != '0'; }();
-        thread_local Clock::time_point firstZero{}, lastZero{};
-        auto now = Clock::now();
-        if (now - lastZero > std::chrono::microseconds(300))
-            firstZero = now;
-        lastZero = now;
-        if (backOff && now - firstZero > std::chrono::milliseconds(1))
-        {
-            hostcpu::TightenTimerSlack();
-            std::this_thread::sleep_for(std::chrono::microseconds(100));
-            lastZero = Clock::now();
-            return STATUS_SUCCESS;
-        }
-#endif
-        std::this_thread::yield();
+        // poll starts exact). Linux and Apple (see backoff.h).
+        // NFSMW_SLEEP0_BACKOFF=0 always yields.
+        backoff::ZeroDelay(backoff::kSleep0);
     }
     else
         guesttime::SleepUntil(*deadline);  // longer by any suspension
@@ -296,6 +282,9 @@ uint32_t KeDelayExecutionThread(uint32_t waitMode, uint32_t alertable, be<int64_
 uint32_t NtYieldExecution()
 {
     guesttime::WaitWhileSuspended();  // as KeDelayExecutionThread's polls
+    // Only counted (NFSMW_BACKOFF_LOG): the career start's menus and race
+    // made no such call (2026-10-25, M1 Pro), so it still just yields.
+    backoff::CountYield();
     std::this_thread::yield();
     return STATUS_SUCCESS;
 }

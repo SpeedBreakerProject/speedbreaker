@@ -51,7 +51,9 @@ namespace install
     // reads its title ID: WrongGame (another title, or an original Xbox disc),
     // UnsupportedVersion (Most Wanted, another default.xex; foundHash says
     // which), NotADiscImage (no default.xex), ReadError. `identity`, if given,
-    // receives what was found.
+    // receives what was found. A compiled-in manifest accepts every region's
+    // (manifest.h); so do CheckSource, Install and Verify, which then check
+    // and copy the files of the region the source is.
     Result CheckGameVersion(const DiscSource& source, const Manifest& manifest = GameManifest(),
         XexIdentity* identity = nullptr);
 
@@ -60,6 +62,11 @@ namespace install
     // the first bad file and count the rest), and not cut off (TruncatedImage).
     // Files the manifest doesn't list ($SystemUpdate/, ...) are ignored.
     Result CheckSource(const DiscSource& source, const Manifest& manifest = GameManifest());
+
+    // The manifest `source` is checked against: `manifest`, or for a
+    // compiled-in one the region whose default.xex the source has (hashes
+    // it; `manifest` itself if it is none of them, so the errors name it).
+    const Manifest& SourceManifest(const DiscSource& source, const Manifest& manifest = GameManifest());
 
     // Copies the manifest's files from `source` into `destination`, which must
     // not exist, be empty (hidden files such as .DS_Store aside), or hold a

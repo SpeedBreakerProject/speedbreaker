@@ -50,8 +50,10 @@ namespace install
 #endif
 
         // default.xex in `dir` with the manifest's size (and, if asked, the
-        // current marker beside it), as spelled on disk.
-        std::optional<fs::path> UsableXex(const fs::path& dir, bool requireMarker, const Manifest& manifest)
+        // current marker beside it), as spelled on disk. For a compiled-in
+        // manifest, any region's: `used` (if given) says which.
+        std::optional<fs::path> UsableXex(const fs::path& dir, bool requireMarker, const Manifest& requested,
+            const Manifest** used = nullptr)
         {
             std::error_code ec;
             fs::path xex = dir / "default.xex";
@@ -74,10 +76,15 @@ namespace install
                     return std::nullopt;
             }
             uint64_t size = fs::file_size(xex, ec);
-            if (ec || size != manifest.Xex().size)
+            if (ec)
+                return std::nullopt;
+            const Manifest& manifest = Pick(requested, ManifestForXexSize(size));
+            if (size != manifest.Xex().size)
                 return std::nullopt;
             if (requireMarker && ReadInstallMarker(dir) != std::optional<std::string>(manifest.version))
                 return std::nullopt;
+            if (used)
+                *used = &manifest;
             return xex;
         }
 
@@ -90,6 +97,7 @@ namespace install
             install.xex = install.path / xex.filename();
             install.origin = origin;
             install.marker = ReadInstallMarker(dir) == std::optional<std::string>(manifest.version);
+            install.manifest = &manifest;
             return install;
         }
 
@@ -132,29 +140,42 @@ namespace install
         }
     }
 
+    const Manifest* InstalledRegion(const std::filesystem::path& dir)
+    {
+        if (!ReadInstallMarker(dir))
+            return nullptr;
+        const Manifest* used = nullptr;
+        if (!UsableXex(dir, false, GameManifest(), &used))
+            return nullptr;
+        return used && IsGameManifest(*used) ? used : nullptr;
+    }
+
     bool IsUsableInstall(const std::filesystem::path& dir, bool requireMarker, const Manifest& manifest)
     {
         return UsableXex(dir, requireMarker, manifest).has_value();
     }
 
-    std::optional<GameInstall> FindGameInstall(const Manifest& manifest)
+    std::optional<GameInstall> FindGameInstall(const Manifest& requested)
     {
+        const Manifest* manifest = &requested;
         if (const char* env = std::getenv("NFSMW_GAME_DIR"); env && *env)
         {
-            if (std::optional<fs::path> xex = UsableXex(env, false, manifest))
-                return Found(env, *xex, InstallOrigin::Environment, manifest);
-            fprintf(stderr, "[install] NFSMW_GAME_DIR=%s has no default.xex of %llu bytes; ignoring it\n", env,
-                (unsigned long long)manifest.Xex().size);
+            if (std::optional<fs::path> xex = UsableXex(env, false, requested, &manifest))
+                return Found(env, *xex, InstallOrigin::Environment, *manifest);
+            std::string sizes;
+            for (const Manifest* m : IsGameManifest(requested) ? GameManifests() : std::span<const Manifest* const>(&manifest, 1))
+                sizes += std::format("{}{}", sizes.empty() ? "" : " or ", m->Xex().size);
+            fprintf(stderr, "[install] NFSMW_GAME_DIR=%s has no default.xex of %s bytes; ignoring it\n", env, sizes.c_str());
         }
-        if (std::optional<fs::path> xex = UsableXex("game/files", false, manifest))
-            return Found("game/files", *xex, InstallOrigin::Development, manifest);
+        if (std::optional<fs::path> xex = UsableXex("game/files", false, requested, &manifest))
+            return Found("game/files", *xex, InstallOrigin::Development, *manifest);
 
         // An install the player put on another drive.
         if (std::optional<fs::path> recorded = RecordedInstallPath())
         {
-            RecoverInterruptedInstall(*recorded, manifest);
-            if (std::optional<fs::path> xex = UsableXex(*recorded, true, manifest))
-                return Found(*recorded, *xex, InstallOrigin::User, manifest);
+            RecoverInterruptedInstall(*recorded, requested);
+            if (std::optional<fs::path> xex = UsableXex(*recorded, true, requested, &manifest))
+                return Found(*recorded, *xex, InstallOrigin::User, *manifest);
             // Why, for the log (the installer screen says it to the player:
             // DescribeRecordedInstall).
             std::error_code ec;
@@ -168,15 +189,18 @@ namespace install
         fs::path user = DefaultInstallPath();
         // A crash in the middle of a reinstall can leave the old install at
         // .previous, with nothing (or the new install) in its place.
-        RecoverInterruptedInstall(user, manifest);
-        if (std::optional<fs::path> xex = UsableXex(user, true, manifest))
-            return Found(user, *xex, InstallOrigin::User, manifest);
+        RecoverInterruptedInstall(user, requested);
+        if (std::optional<fs::path> xex = UsableXex(user, true, requested, &manifest))
+            return Found(user, *xex, InstallOrigin::User, *manifest);
         std::error_code ec;
         if (fs::exists(user / "default.xex", ec))
         {
             std::optional<std::string> marker = ReadInstallMarker(user);
-            fprintf(stderr, "[install] %s is not a current install (marker %s, manifest %.*s): reinstall\n",
-                user.string().c_str(), marker ? marker->c_str() : "missing", int(manifest.version.size()), manifest.version.data());
+            std::string versions;
+            for (const Manifest* m : IsGameManifest(requested) ? GameManifests() : std::span<const Manifest* const>(&manifest, 1))
+                versions += std::format("{}{} ({})", versions.empty() ? "" : " or ", m->version, m->region.empty() ? "test" : m->region);
+            fprintf(stderr, "[install] %s is not a current install (marker %s, manifest %s): reinstall\n",
+                user.string().c_str(), marker ? marker->c_str() : "missing", versions.c_str());
         }
         return std::nullopt;
     }

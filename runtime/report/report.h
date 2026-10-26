@@ -108,6 +108,9 @@ namespace report
     // Main thread, before the crash handler is installed: opens the report
     // file and prepares everything the handler can't do safely itself.
     void PrepareCrashReports();
+    // The recompiled functions' names again, for the release region::Select
+    // switched to (PrepareCrashReports took the USA's).
+    void RefreshGuestSymbols();
     // The crash handler (a signal handler; async-signal-safe): logs the
     // crash and writes the report. The caller exits afterwards.
 #ifdef _WIN32

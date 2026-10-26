@@ -7,9 +7,10 @@
 // waits off to short sleeps, to park them while the game is suspended, and
 // to report, with NFSMW_LOG_D3D_WAIT=1, which counter they poll and how often.
 #include <stdafx.h>
+#include <region/region.h>
 #include <kernel/function.h>
 #include <cpu/guest_time.h>
-#include <cpu/host_cpu.h>
+#include <cpu/backoff.h>
 #include "timeline.h"
 
 extern "C" PPC_FUNC(__imp__sub_825A5B20);
@@ -21,14 +22,13 @@ namespace
     // processor, and on the Steam Machine's CPU (two fast cores, four slow
     // ones: see hostcpu::ReserveFastCore) the scheduler kept the spinning
     // thread on a fast core. A wait still spins for its first 20 us, so short
-    // waits end on time; after that each poll sleeps 50 us. Linux only:
-    // macOS coalesces default-QoS timers to ~10 ms (see the command
-    // processor's Worker). NFSMW_GPU_WAIT_BACKOFF=0 spins throughout.
+    // waits end on time; after that each poll sleeps 50 us (see backoff.h,
+    // which also covers macOS's stretched timers). NFSMW_GPU_WAIT_BACKOFF=0
+    // spins throughout.
     void BackOff()
     {
-#ifdef __linux__
-        static const bool backOff = [] { const char* v = std::getenv("NFSMW_GPU_WAIT_BACKOFF"); return !v || v[0] != '0'; }();
-        if (!backOff)
+        backoff::CountGpuWaitPoll();
+        if (!backoff::Enabled(backoff::kGpuWait))
             return;
         using Clock = std::chrono::steady_clock;
         thread_local Clock::time_point lastPoll{}, waitStart{};
@@ -38,18 +38,16 @@ namespace
         lastPoll = now;
         if (now - waitStart < std::chrono::microseconds(20))
             return;
-        hostcpu::TightenTimerSlack();
-        std::this_thread::sleep_for(std::chrono::microseconds(50));
+        backoff::Sleep(backoff::kGpuWait, std::chrono::microseconds(50));
         lastPoll = Clock::now();
-#endif
     }
 }
 
-PPC_FUNC(sub_825A5B20)
+SB_HOOK(sub_825A5B20)
 {
     // While the game is suspended the GPU work these loops wait for is held
     // back (Metal refuses it), and no guest time passes for the hang check:
-    // sleep through it instead of spinning a core (Apple has no back-off).
+    // sleep through it instead of spinning a core.
     guesttime::WaitWhileSuspended();
     if (timeline::g_enabled && !timeline::t_waitTargetMarked)
     {
@@ -77,5 +75,5 @@ PPC_FUNC(sub_825A5B20)
         }
     }
     BackOff();
-    __imp__sub_825A5B20(ctx, base);
+    SB_ORIGINAL(sub_825A5B20)(ctx, base);
 }

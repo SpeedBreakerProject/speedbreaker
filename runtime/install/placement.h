@@ -59,18 +59,19 @@
 // looks at the disk, and CheckPickedFolder / CheckExactFolder put the two
 // together with CheckDestination.
 //
-// Windows: the disk reads are std::filesystem's where it has one, so this
-// builds there; what it lacks (drive tops of mounted folders, writability,
-// the file system's name) is POSIX-only and assumed fine. The screen hides
-// "Choose a folder..." there until a port does those properly (the windows
-// branch's platform/ layer: CheckWritableFolder, OneDrive as a cloud folder,
-// drive roots other than the system's, SpeedBreaker.exe in the hints).
+// Windows: the disk reads are std::filesystem's where it has one; the platform
+// layer tells writability (a folder made and removed: CheckWritableFolder)
+// and drives mounted in a folder (the volume's serial number). Every drive's
+// root (C:\ too) is a drive's top: the game goes in its SpeedBreaker\game. A
+// folder in OneDrive is refused, as iCloud Drive is on macOS. The file
+// system's name isn't read (no FAT32 check: no game file is 4 GB).
 #pragma once
 #include "installer.h"
 #include "result.h"
 
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <optional>
 #include <string>
 #include <vector>
@@ -117,7 +118,7 @@ namespace install
         bool parentWritable = true;     // the folder above it can be written (Install's .partial goes there)
         std::string fileSystem;         // "apfs", "ext4", "exfat", "vfat", "msdos", "ntfs", "fuseblk", "tmpfs"...; "" unknown.
                                         // A missing folder: the nearest folder above it that is there.
-        bool cloud = false;             // macOS: in iCloud Drive (the system says so; ~/Library paths are the rules')
+        bool cloud = false;             // macOS: in iCloud Drive (the system says so; ~/Library paths are the rules'); Windows: in OneDrive
         SubfolderFacts subfolder;       // path / SubfolderName(driveTop)
     };
 
@@ -131,6 +132,7 @@ namespace install
         uint64_t largestFile = 0;                       // the manifest's biggest file
         bool macOS = false;
         bool steamOS = false;
+        bool windows = false;                           // a drive's root is its top; OneDrive is a cloud folder
     };
 
     // Why the game goes in a new folder inside the picked one.
@@ -249,4 +251,43 @@ namespace install
     // with the path as the player reads it (`shown`, ~ for home): what
     // happened and what to do. "" for None and Usable.
     std::string DescribeRecordedInstall(const RecordedInstall& recorded, const std::string& shown, bool macOS);
+
+    // A disc of one region (manifest.h) into a folder holding the installer's
+    // install of another (locate.h's InstalledRegion) would replace it: the
+    // installer offers the existing install folder by default, so installing
+    // the PAL disc there would delete a USA install, and the other way round.
+    // So the game goes beside it instead, in RegionFolder: "game PAL-ES" next
+    // to "game", "game USA" next to a PAL "game". The record then points the
+    // game at the new install; the other stays where it is, whole. A
+    // same-region install is replaced as before.
+    struct RegionKeep
+    {
+        std::filesystem::path gameDir;      // where the game goes: the folder asked for, or RegionFolder's
+        const Manifest* kept = nullptr;     // the other region's install left in place (nullptr: none, gameDir as asked)
+        std::filesystem::path keptDir;      // where that is: the folder asked for
+    };
+
+    // Pure: the folder beside `gameDir` for `incoming`'s region: its name
+    // and the region's id in capitals ("game" -> "game PAL-ES"). A trailing
+    // separator doesn't count.
+    std::filesystem::path RegionFolder(const std::filesystem::path& gameDir, const Manifest& incoming);
+
+    // Pure: given the region installed at `gameDir` (InstalledRegion; nullptr:
+    // none) and at each of RegionFolder's candidates, where `incoming` goes.
+    // Only compiled-in regions (a test's own manifest: as asked). A candidate
+    // holding a third region's install is passed over for "<name> 2", ...
+    // (`installedAt` says what each holds).
+    RegionKeep KeepOtherRegion(const std::filesystem::path& gameDir, const Manifest& incoming,
+        const std::function<const Manifest*(const std::filesystem::path&)>& installedAt);
+
+    // The same, looking at the disk (InstalledRegion).
+    RegionKeep KeepOtherRegion(const std::filesystem::path& gameDir, const Manifest& incoming);
+
+    // Pure: the line the installer screen and the command line show when the
+    // game goes beside another region's install, with the folders as the
+    // player reads them: "<kept> holds the USA install. This Europe (PAL,
+    // Spanish) disc goes in its own folder, <new>, so that install stays."
+    // "" when nothing is kept.
+    std::string RegionKeepNote(const RegionKeep& keep, const Manifest& incoming, const std::string& keptShown,
+        const std::string& newShown);
 }

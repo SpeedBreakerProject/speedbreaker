@@ -80,6 +80,26 @@ namespace video
             return m >= 2 ? m : 1;
         }
 
+        // Smooth Motion (game/hfr.h) on SteamOS and Linux: whether a display
+        // mode of `hz`, its guest vblank expected every `m` refreshes (For's),
+        // shows in-between pictures evenly (video::HfrOffered, with present
+        // timing): 120 Hz, which the guest vblank locks to every 2nd refresh
+        // of (video::HfrPicturesPerStep: 2 pictures a step), and 90 Hz (the
+        // Steam Deck OLED's), whose fixed refresh grid the pictures are drawn
+        // for (video::HfrGrid, game/hfr_grid.h: 1 or 2 a step). Measured on
+        // the Steam Machine in nested gamescope (v020/smooth-steamos,
+        // 2026-10-24): 120 and 90 Hz showed a picture every refresh in a race;
+        // 144, 165, 180 and 240 Hz drew one for every refresh, but 12-47% of
+        // them reached the screen 2-4 refreshes apart (128, 120, 148 and 127
+        // a second): not offered there, nor at 60 Hz or below, the rates in
+        // between (75, 100 Hz), or with the lock off (NFSMW_REFRESH_MULTIPLE=0).
+        static bool SmoothMotionRate(double hz, int m)
+        {
+            if (m >= 2)
+                return m == 2 && RefreshFit::MultipleOf(hz) == 2;
+            return RefreshFit::MultipleOf(hz) == 0 && std::fabs(hz - 90.0) <= 1.5;
+        }
+
         // The [vblank] line for a display mode of `hz` given multiple `m`
         // (For's), or "" where there is nothing to say: 60 Hz, an unknown
         // rate, Off, and Auto on Apple's systems (as v0.1.6 there).

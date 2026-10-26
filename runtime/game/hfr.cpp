@@ -39,7 +39,9 @@
 // Everything is put back before the real picture's render starts. A frame
 // that runs no world step (or several: a hitch) draws no in-between picture.
 #include <stdafx.h>
+#include <region/region.h>
 #include "hfr.h"
+#include "hfr_late_hold.h"
 #include "hfr_blend.h"
 #include "hfr_grid.h"
 #include "frame_time.h"
@@ -47,6 +49,8 @@
 #include <kernel/function.h>
 #include <kernel/write_watch.h>
 #include <user/settings.h>
+#include <ui/ui.h>
+#include <cpu/guest_time.h>
 #include <video/presenter.h>
 #include <video/vblank_lock.h>
 
@@ -222,6 +226,19 @@ namespace
     };
     std::vector<Saved> s_ownSaved;
     std::vector<OwnCamera> s_ownCameras;
+    // A particle's position in a step's own picture drawn between: the step's
+    // and the blended one written for the picture. The render moves some
+    // particles itself (the safe house's birds, 2026-10-25: put back to the
+    // step's position after every own picture, they hung in the air at 90 Hz,
+    // where nearly every step's own picture is drawn between): what it moved
+    // keeps its move, from the step's position.
+    struct OwnParticle
+    {
+        uint32_t address;
+        float now[3], blended[3];
+    };
+    std::vector<OwnParticle> s_ownParticles;
+    uint64_t s_ownParticlesMoved = 0, s_ownParticlesKept = 0;  // for the [hfr] line
 
     // A car's render copy: before and after this frame's update.
     struct Car
@@ -355,7 +372,7 @@ namespace
     // Stats for the [hfr] line (since the last).
     struct Stats
     {
-        uint64_t frames = 0, skippedNoStep = 0, skippedSteps = 0, skippedStart = 0, skippedLoad = 0, particles = 0, particlesBlended = 0;
+        uint64_t frames = 0, skippedNoStep = 0, skippedSteps = 0, skippedStart = 0, skippedLoad = 0, particles = 0, particlesBlended = 0, settles = 0;
         uint64_t ownPictures = 0;  // steps whose own picture was drawn between
         uint64_t pictures = 0, threaded = 0, cars = 0, carCuts = 0, cameras = 0, cameraCuts = 0, waitTimeouts = 0;
         double waitMs = 0.0, waitMaxMs = 0.0, waitBeforeMs = 0.0;
@@ -517,6 +534,7 @@ namespace
         WaitPlayed(base, true);
         s_ownSaved.clear();
         s_ownCameras.clear();
+        s_ownParticles.clear();
         auto save = [&](uint32_t address, uint32_t size) {
             s_ownSaved.push_back({ address, std::vector<uint8_t>(base + address, base + address + size) });
         };
@@ -563,7 +581,10 @@ namespace
                 float blended[3];
                 for (int i = 0; i < 3; i++)
                     blended[i] = n.before[i] + t * (n.now[i] - n.before[i]);
-                save(n.address + kParticlePosition, 12);
+                OwnParticle o{ n.address, {}, {} };
+                memcpy(o.now, n.now, sizeof(o.now));
+                memcpy(o.blended, blended, sizeof(o.blended));
+                s_ownParticles.push_back(o);
                 StoreVec(base, n.address + kParticlePosition, blended);
             }
         s_stats.ownPictures++;
@@ -576,6 +597,17 @@ namespace
         for (auto it = s_ownSaved.rbegin(); it != s_ownSaved.rend(); ++it)
             memcpy(base + it->address, it->bytes.data(), it->bytes.size());
         s_ownSaved.clear();
+        for (const OwnParticle& o : s_ownParticles)
+        {
+            float cur[3], put[3];
+            LoadVec(base, o.address + kParticlePosition, cur);
+            const bool moved = memcmp(cur, o.blended, sizeof(cur)) != 0;
+            for (int i = 0; i < 3; i++)
+                put[i] = moved ? o.now[i] + (cur[i] - o.blended[i]) : o.now[i];
+            StoreVec(base, o.address + kParticlePosition, put);
+            (moved ? s_ownParticlesMoved : s_ownParticlesKept)++;
+        }
+        s_ownParticles.clear();
         for (const OwnCamera& c : s_ownCameras)
         {
             memcpy(base + c.camera, c.state, sizeof(c.state));
@@ -642,6 +674,32 @@ namespace
     std::atomic<float> s_betweenShare{ 1.0f };
     const bool s_loadCheck = [] { const char* v = std::getenv("NFSMW_HFR_LOAD"); return !(v && v[0] == '0'); }();
     std::atomic<bool> s_overloaded{ false };
+    // Off Apple's systems: an even 60 asked for (any thread) for at least
+    // this long (ns; the largest pending), and why: 1 a picture shown on
+    // another refresh than the others (NoteLatePicture), 2 a cut (our settings open or just closed, a
+    // resume from suspension, the refresh grid measured anew). The command
+    // processor thread takes it at the next frame (NoteFrameCost) and comes
+    // back from it as from an overload: after the hold, and only once 120
+    // frames' costs say two pictures a step fit (kResumeMs).
+    std::atomic<int64_t> s_forceHoldNs{ 0 };
+    std::atomic<int> s_forceWhy{ 0 };
+    void RequestSixty(int64_t holdNs, int why)
+    {
+        int64_t cur = s_forceHoldNs.load(std::memory_order_relaxed);
+        while (cur < holdNs && !s_forceHoldNs.compare_exchange_weak(cur, holdNs, std::memory_order_relaxed))
+        {
+        }
+        int w = s_forceWhy.load(std::memory_order_relaxed);
+        if (why == 1 || w == 0)
+            s_forceWhy.store(why, std::memory_order_relaxed);
+    }
+    // A late picture's hold (game/hfr_late_hold.h): 8 s, twice the last one
+    // when pictures are late again within 10 s of coming back, at most 32 s;
+    // a lone one after a clean stretch or near a load starts over at 8 s.
+    constexpr int64_t kFirstLateHoldNs = hfr::late::kFirstNs, kCutHoldNs = 2'000'000'000;
+    // The last load's or long hitch's time (StepFractions' settle; main loop
+    // thread writes, the command processor thread reads).
+    std::atomic<int64_t> s_hitchNs{ 0 };
     struct LoadState  // command processor thread only
     {
         bool late[kRecent] = {};
@@ -654,7 +712,27 @@ namespace
         int64_t liteSince = 0, liteHold = 0, fullTriedAt = 0;
         float liteCosts[kResumeWindow] = {};  // lite: each step's estimated cost with full in-between pictures
         uint32_t liteCount = 0, liteNext = 0;
+        // Off Apple's systems: the frames' cost with in-between pictures,
+        // averaged (an EMA over about 30 frames), and how many fed it since
+        // the last step change.
+        double ema = 0;
+        uint32_t emaFrames = 0;
+        hfr::late::Hold ghost;  // the last late picture's hold, and when
     } s_load;
+    // Off Apple's systems, a step's frames that take the command processor or
+    // the GPU more than kSustainMs on average (s_load.ema) are an overload
+    // too: on a 90 Hz screen a step's 1.5 pictures that take 17-19 ms each
+    // step, under kBudgetMs's single-frame test, came out late every other
+    // frame and on the wrong refreshes for a minute and a half (the Deck OLED
+    // after a long pause, 2026-10-25: the car "ghosted badly"; the CP 13 ms a
+    // real picture there, 6 an in-between one).
+#if defined(__APPLE__)
+    constexpr bool kSustainCheck = false;  // the Mac as M3 measured it
+#else
+    constexpr bool kSustainCheck = true;
+#endif
+    constexpr double kSustainMs = 17.0;
+    constexpr uint32_t kSustainFrames = 60;
     // M3's ladder: full in-between pictures go lite at an overload, back
     // to full after kFirstLiteHold of lite ones without one (twice that, at
     // most kMaxLiteHold, when the full ones overload again within
@@ -671,6 +749,9 @@ namespace
     // (video::HfrPicturesPerStep: n pictures, i/n), NFSMW_HFR_PICTURES's or
     // NFSMW_HFR_FRACTIONS's; one, the real one, while overloaded; 1/2, 1 for
     // NFSMW_HFR_RENDER2.
+    constexpr int64_t kSettleGapNs = 100'000'000;
+    constexpr int kSettleSteps = 60;
+    int s_settle = 0;  // steps left without pictures between (main loop thread)
     int StepFractions(float f[4], uint32_t steps)
     {
         if (!s_enabled)
@@ -678,6 +759,55 @@ namespace
             f[0] = 0.5f;
             f[1] = 1.0f;
             return 2;
+        }
+        // After a load or a long hitch (a render entry more than kSettleGapNs
+        // after the last): kSettleSteps steps with no picture between. Free
+        // roam's start on the Deck OLED at 90 Hz (2026-10-25: "the car ghosted
+        // a bit, then it resolved itself"): the cars and the camera just
+        // placed, the first frames' shaders and the command processor over
+        // budget (20-22 ms a frame) until the load check went lite 0.3 s in.
+        {
+            static int64_t last = 0;
+            const int64_t now = SteadyNs();
+#if defined(__APPLE__)
+            constexpr bool kSettle = false;  // the Mac as M3 measured it
+#else
+            constexpr bool kSettle = true;
+#endif
+            if (kSettle && last && now - last > kSettleGapNs)
+            {
+                if (s_settle == 0)
+                    s_stats.settles++;
+                s_settle = kSettleSteps;
+                s_hitchNs.store(now, std::memory_order_relaxed);
+            }
+            last = now;
+        }
+#if !defined(__APPLE__)
+        {
+            // Cuts: our settings open (the game runs under them) or closed
+            // since the last frame, a resume from suspension, the refresh grid
+            // measured anew: an even 60 until the timing has held again.
+            static bool settingsWere = false;
+            static int64_t resumeSeen = 0;
+            static bool gridWas = false;
+            const bool settings = ui::SettingsOpen();
+            const int64_t resumed = guesttime::LastResumeNs();
+            double gp = 0;
+            int64_t gg = 0;
+            const bool grid = video::HfrGrid(gp, gg);
+            if (settings || settings != settingsWere || resumed != resumeSeen || (grid && !gridWas))
+                RequestSixty(kCutHoldNs, 2);
+            settingsWere = settings;
+            resumeSeen = resumed;
+            gridWas = grid;
+        }
+#endif
+        if (s_settle > 0)
+        {
+            s_settle--;
+            f[0] = 1.0f;
+            return 1;
         }
         if (s_overloaded.load(std::memory_order_relaxed))
         {
@@ -768,17 +898,33 @@ namespace
     const uint32_t s_forcedSkip = [] { const char* v = std::getenv("NFSMW_HFR_SKIP"); return v ? ParseSkip(v) : uint32_t(kSkipLum); }();
     const uint32_t s_liteSkip = [] {
         const char* v = std::getenv("NFSMW_HFR_LITE");
-        return v ? ParseSkip(v) : uint32_t(kSkipShadow | kSkipEnv | kSkipView4);
+        // Off Apple's systems the shadow maps are kept since 2026-10-25: half
+        // a step old in a lite in-between picture, the car's own shadow
+        // flickered as it moved (the Deck OLED at 90 Hz, lite most of free
+        // roam); the Steam Machine's in-between picture took 5.8 ms of command
+        // processor with them, 4.2 without (real 7.0). NFSMW_HFR_LITE=shadow,
+        // env,mirror: M3's set.
+#if defined(__APPLE__)
+        return v ? ParseSkip(v) : uint32_t(kSkipShadow | kSkipEnv | kSkipView4);  // the Mac as M3 measured it
+#else
+        return v ? ParseSkip(v) : uint32_t(kSkipEnv | kSkipView4);
+#endif
     }();
     // The load check's step (command processor thread writes, main loop
     // thread reads): 0 full in-between pictures, 1 lite ones (s_overloaded:
     // none). And what this in-between picture leaves out (main loop thread,
     // latched at each frame's render entry so a step change can't split one).
     std::atomic<int> s_level{ 0 };
+    // A second lite step (s_level 2, the shadow maps left out too) was
+    // tried on the Deck OLED (108c505, 2026-10-25) and taken out: the cars'
+    // shadows on the road ghosted under it. The ladder is full -> lite -> 60.
+    const uint32_t s_lite2Skip = s_liteSkip;
+    int TopLevel() { return (s_lite2Skip & ~s_liteSkip & ~s_forcedSkip) ? 2 : (s_liteSkip & ~s_forcedSkip) ? 1 : 0; }
     std::atomic<uint32_t> s_activeSkip{ 0 };
     uint32_t ActiveSkip()
     {
-        return s_forcedSkip | (s_level.load(std::memory_order_relaxed) >= 1 ? s_liteSkip : 0u);
+        const int level = s_level.load(std::memory_order_relaxed);
+        return s_forcedSkip | (level >= 2 ? s_lite2Skip : level == 1 ? s_liteSkip : 0u);
     }
     std::string SkipNames(uint32_t m)
     {
@@ -838,6 +984,20 @@ namespace hfr
             fprintf(stderr, "[hfr] NFSMW_HFR_RENDER2=1: the render (sub_823AFC68) runs twice a frame (DIAGNOSTIC)\n");
     }
     bool Enabled() { return s_enabled; }
+    void NoteLatePicture()
+    {
+#if !defined(__APPLE__)
+        if (s_enabled && s_loadCheck && !s_overloaded.load(std::memory_order_relaxed))
+            RequestSixty(kFirstLateHoldNs, 1);
+#endif
+    }
+    void NoteHoldChange()
+    {
+#if !defined(__APPLE__)
+        if (s_enabled && s_loadCheck)
+            RequestSixty(kCutHoldNs, 2);
+#endif
+    }
     bool Render2() { return s_render2; }
     bool InBetween() { return s_inBetween.load(std::memory_order_acquire); }
     float InBetweenFraction() { return s_fraction.load(std::memory_order_relaxed); }
@@ -851,6 +1011,37 @@ namespace hfr
         LoadState& l = s_load;
         const int64_t now = SteadyNs();
         const double cost = std::max(cpMs, gpuMs);
+        if (const int64_t req = s_forceHoldNs.exchange(0, std::memory_order_relaxed))
+        {
+            const int why = s_forceWhy.exchange(0, std::memory_order_relaxed);
+            int64_t hold = req;
+            hfr::late::Kind kind = hfr::late::Kind::kFirst;
+            if (why == 1)
+            {
+                kind = hfr::late::Next(l.ghost, now, l.resumedAt, s_hitchNs.load(std::memory_order_relaxed));
+                hold = std::max(hold, l.ghost.hold);
+            }
+            const bool was = s_overloaded.load(std::memory_order_relaxed);
+            if (!was || hold > l.hold - (now - l.since))
+            {
+                l.since = now;
+                l.hold = hold;
+                l.costCount = l.costNext = 0;
+            }
+            if (!was)
+            {
+                l.overloadedAt = now;
+                l.emaFrames = 0;
+                std::fill(std::begin(l.late), std::end(l.late), false);
+                l.overloads++;
+                s_overloaded.store(true, std::memory_order_relaxed);
+                fprintf(stderr, "[hfr] no in-between pictures for now: %s%s%s; back after %.0f s once two pictures a step would take < %.1f ms in "
+                                "90%% of %u frames\n", why == 1 ? "a picture was shown on another refresh than the others (a ghost" : "a cut (the settings open or just closed, a resume, the refresh grid measured anew)",
+                    why == 1 ? ", " : "", why == 1 ? std::format("{})", hfr::late::Name(kind)).c_str() : "",
+                    double(hold) / 1e9, kResumeMs, kResumeWindow);
+            }
+            return;
+        }
         if (!s_overloaded.load(std::memory_order_relaxed))
         {
             const bool overran = s_overran.exchange(false, std::memory_order_relaxed);
@@ -860,13 +1051,20 @@ namespace hfr
             uint32_t late = 0;
             for (bool b : l.late)
                 late += b;
-            if (late < kLateOfRecent && !overran)
+            bool sustained = false;
+            if (kSustainCheck && hadBetween)
+            {
+                l.ema = l.emaFrames ? l.ema * (29.0 / 30.0) + cost / 30.0 : cost;
+                l.emaFrames++;
+                sustained = l.emaFrames >= kSustainFrames && l.ema > kSustainMs;
+            }
+            if (late < kLateOfRecent && !overran && !sustained)
             {
                 // Lite: full ones again once a step's two full pictures look
                 // affordable (this step's cost, its in-between picture's
                 // share of a real one's swapped for a whole one), or as a try
                 // after the lite hold without an overload.
-                if (s_level.load(std::memory_order_relaxed) == 1)
+                if (const int level = s_level.load(std::memory_order_relaxed); level >= 1)
                 {
                     const double share = s_betweenShare.load(std::memory_order_relaxed);
                     l.liteCosts[l.liteNext++ % kResumeWindow] = float(cost * 2.0 / (1.0 + share));
@@ -882,7 +1080,20 @@ namespace hfr
                     const bool affordable = p90 < kResumeMs && now - l.liteSince >= kFirstHoldNs;
                     if (affordable || now - l.liteSince >= l.liteHold)
                     {
-                        s_level.store(0, std::memory_order_relaxed);
+                        s_level.store(level - 1, std::memory_order_relaxed);
+                        l.emaFrames = 0;
+                        if (level == 2)
+                        {
+                            // Lite with the shadow maps again (the full step's try as below).
+                            const double held = double(now - l.liteSince) / 1e9;
+                            l.liteSince = now;
+                            l.liteCount = l.liteNext = 0;
+                            l.fullTriedAt = now;
+                            s_resumedNs.store(now, std::memory_order_relaxed);
+                            fprintf(stderr, "[hfr] lite in-between pictures with the shadow maps again: %s (%.0f s without an overload)\n",
+                                affordable ? "affordable" : "trying", held);
+                            return;
+                        }
                         l.fullTriedAt = now;
                         s_resumedNs.store(now, std::memory_order_relaxed);  // the overrun grace after a change
                         fprintf(stderr, "[hfr] full in-between pictures again: %s (lite for %.0f s without an overload; two full pictures a "
@@ -895,6 +1106,7 @@ namespace hfr
             // Full ones too heavy: lite ones first (the lite set left out).
             if (s_level.load(std::memory_order_relaxed) == 0 && (s_liteSkip & ~s_forcedSkip))
             {
+                l.emaFrames = 0;
                 if (l.fullTriedAt && now - l.fullTriedAt < kRecentResumeNs)
                     l.liteHold = std::min(l.liteHold * 2, kMaxLiteHoldNs);
                 else if (!l.liteHold || now - l.liteSince >= kHoldResetNs)
@@ -906,9 +1118,26 @@ namespace hfr
                 s_resumedNs.store(now, std::memory_order_relaxed);  // the overrun grace after a change: d8a dropped lite to 60 5 s after
                 fprintf(stderr, "[hfr] lite in-between pictures for now: %s (the last frame: %.1f ms of the command processor, %.1f of the "
                                 "GPU); they leave out %s, full ones again after %.0f s without an overload\n",
-                    overran ? "a frame with full ones ran two world steps" : std::format("{} of the last {} frames with full ones took more than "
+                    overran ? "a frame with full ones ran two world steps" : sustained ? std::format("{:.1f} ms a frame on average with them", l.ema).c_str() : std::format("{} of the last {} frames with full ones took more than "
                         "{:.1f} ms of the command processor or the GPU", late, kRecent, kBudgetMs).c_str(),
                     cpMs, gpuMs, SkipNames(s_liteSkip & ~s_forcedSkip).c_str(), double(l.liteHold) / 1e9);
+                return;
+            }
+            if (s_level.load(std::memory_order_relaxed) == 1 && TopLevel() == 2)
+            {
+                if (l.fullTriedAt && now - l.fullTriedAt < kRecentResumeNs)
+                    l.liteHold = std::min(std::max(l.liteHold, kFirstLiteHoldNs) * 2, kMaxLiteHoldNs);
+                else if (!l.liteHold)
+                    l.liteHold = kFirstLiteHoldNs;
+                l.liteSince = now;
+                l.liteCount = l.liteNext = 0;
+                l.emaFrames = 0;
+                std::fill(std::begin(l.late), std::end(l.late), false);
+                s_level.store(2, std::memory_order_relaxed);
+                s_resumedNs.store(now, std::memory_order_relaxed);
+                fprintf(stderr, "[hfr] lite in-between pictures without the shadow maps for now: %s (the last frame: %.1f ms of the command "
+                                "processor, %.1f of the GPU)\n", sustained ? std::format("{:.1f} ms a frame on average", l.ema).c_str()
+                                    : overran ? "a frame with them ran two world steps" : "frames over budget", cpMs, gpuMs);
                 return;
             }
             // Again soon after a resume: twice the hold (at most kMaxHold); a
@@ -923,10 +1152,11 @@ namespace hfr
             l.since = now;
             l.costCount = l.costNext = 0;
             l.overloads++;
+            l.emaFrames = 0;
             s_overloaded.store(true, std::memory_order_relaxed);
             fprintf(stderr, "[hfr] no in-between pictures for now: %s (the last frame: %.1f ms of the command processor, %.1f of the GPU); "
                             "back when two pictures would take < %.1f ms in 90%% of %u frames (an in-between picture %.2f of a real one), after %.0f s at least (overload %lld)\n",
-                overran ? "a frame with them ran two world steps" : std::format("{} of the last {} frames with them took more than {:.1f} ms "
+                overran ? "a frame with them ran two world steps" : sustained ? std::format("{:.1f} ms a frame on average with them", l.ema).c_str() : std::format("{} of the last {} frames with them took more than {:.1f} ms "
                     "of the command processor or the GPU", late, kRecent, kBudgetMs).c_str(),
                 cpMs, gpuMs, kResumeMs, kResumeWindow, double(s_betweenShare.load(std::memory_order_relaxed)), double(l.hold) / 1e9,
                 (long long)l.overloads);
@@ -954,7 +1184,7 @@ namespace hfr
         // Back lite (when there is a lite step), full ones after its hold.
         if (s_liteSkip & ~s_forcedSkip)
         {
-            s_level.store(1, std::memory_order_relaxed);
+            s_level.store(TopLevel(), std::memory_order_relaxed);
             l.liteSince = now;
             l.liteCount = l.liteNext = 0;
             if (!l.liteHold)
@@ -962,7 +1192,7 @@ namespace hfr
         }
         s_overloaded.store(false, std::memory_order_relaxed);
         fprintf(stderr, "[hfr] in-between pictures again%s: %s (two pictures a step would have taken %.1f ms or less in 90%% of the last %u "
-                        "frames)\n", s_level.load(std::memory_order_relaxed) == 1 ? ", lite" : "", p90 < kResumeMs ? "affordable" : "trying", p90,
+                        "frames)\n", s_level.load(std::memory_order_relaxed) >= 1 ? ", lite" : "", p90 < kResumeMs ? "affordable" : "trying", p90,
             kResumeWindow);
     }
 
@@ -978,7 +1208,7 @@ namespace hfr
 // times and calls the render frame sub_82441050). Called from the frame
 // (sub_823AFE20) after the world steps and the cameras' and cars' updates.
 extern "C" PPC_FUNC(__imp__sub_823AFC68);
-PPC_FUNC(sub_823AFC68)
+SB_HOOK(sub_823AFC68)
 {
     s_writeSet = 0;
     float ownFraction = 1.0f;  // < 1: this step's own picture drawn between (no real picture)
@@ -1072,7 +1302,7 @@ PPC_FUNC(sub_823AFC68)
                         s_fraction.store(t, std::memory_order_relaxed);
                         s_inBetween.store(true, std::memory_order_release);
                     }
-                    __imp__sub_823AFC68(ctx, base);
+                    SB_ORIGINAL(sub_823AFC68)(ctx, base);
                     times[2] = SinceVblankMs(vblank);
                     if (s_enabled)
                     {
@@ -1108,7 +1338,7 @@ PPC_FUNC(sub_823AFC68)
             WaitPlayed(base, true);
         s_target.store(lastTarget, std::memory_order_relaxed);
     }
-    __imp__sub_823AFC68(ctx, base);
+    SB_ORIGINAL(sub_823AFC68)(ctx, base);
     if (ownFraction < 1.0f)
         EndOwn(base);
     times[4] = SinceVblankMs(vblank);
@@ -1177,6 +1407,13 @@ PPC_FUNC(sub_823AFC68)
             s_stats.pictures ? double(s_stats.cameras) / double(s_stats.pictures) : 0.0, (unsigned long long)s_stats.cameraCuts,
             s_stats.pictures ? double(s_stats.particlesBlended) / double(s_stats.pictures) : 0.0,
             s_stats.pictures ? double(s_stats.particles) / double(s_stats.pictures) : 0.0, s_cars.size(), s_cameras.size());
+        if (s_ownParticlesMoved || s_ownParticlesKept)
+            fprintf(stderr, "[hfr] steps' own pictures drawn between: %llu particle positions the render moved itself (kept, from the step's), "
+                            "%llu it didn't\n", (unsigned long long)s_ownParticlesMoved, (unsigned long long)s_ownParticlesKept);
+        s_ownParticlesMoved = s_ownParticlesKept = 0;
+        if (s_stats.settles)
+            fprintf(stderr, "[hfr] %llu loads or hitches over %lld ms: %d steps after each drawn without pictures between\n",
+                (unsigned long long)s_stats.settles, (long long)(kSettleGapNs / 1'000'000), kSettleSteps);
         s_stats = {};
         // Forget what wasn't seen for a few seconds (render objects are freed and reused).
         const uint32_t now = s_step;
@@ -1189,21 +1426,21 @@ PPC_FUNC(sub_823AFC68)
 // A car's render update: copies the body's matrix (its pointer at +52) to
 // +816, deriving the render's velocities from the change (dt in f1).
 extern "C" PPC_FUNC(__imp__sub_824E9C38);
-PPC_FUNC(sub_824E9C38)
+SB_HOOK(sub_824E9C38)
 {
     if (!s_enabled)
-        return __imp__sub_824E9C38(ctx, base);
+        return SB_ORIGINAL(sub_824E9C38)(ctx, base);
     const uint32_t object = ctx.r3.u32;
     Car& car = s_cars[object];
     Load(base, object + kCarMatrix, car.before);
-    __imp__sub_824E9C38(ctx, base);
+    SB_ORIGINAL(sub_824E9C38)(ctx, base);
     Load(base, object + kCarMatrix, car.after);
     car.step = Step(base);
 }
 
 // A view setup: records the camera each view of the real picture used.
 extern "C" PPC_FUNC(__imp__sub_8243EAC0);
-PPC_FUNC(sub_8243EAC0)
+SB_HOOK(sub_8243EAC0)
 {
     const uint32_t view = ctx.r4.u32;
     // M3: an in-between picture that leaves a pass out keeps that pass's
@@ -1219,7 +1456,7 @@ PPC_FUNC(sub_8243EAC0)
             c.step = Step(base);
         }
     hfrdiag::OnViewSetup(base, view);
-    __imp__sub_8243EAC0(ctx, base);
+    SB_ORIGINAL(sub_8243EAC0)(ctx, base);
 }
 
 // A camera's update (sub_82161000: keeps its last pose at +224 and derives
@@ -1229,7 +1466,7 @@ PPC_FUNC(sub_8243EAC0)
 // (the motion blur's) is the step's, not t of it (run h5: the in-between
 // pictures' road streaks in a cutscene alternated by up to 14 levels).
 extern "C" PPC_FUNC(__imp__sub_82161000);
-PPC_FUNC(sub_82161000)
+SB_HOOK(sub_82161000)
 {
     if (s_enabled && s_inBetween.load(std::memory_order_acquire) && ctx.r3.u32)
     {
@@ -1240,7 +1477,7 @@ PPC_FUNC(sub_82161000)
     }
     else if (const float own = s_ownFraction.load(std::memory_order_acquire); s_enabled && own > 0.0f && s_blendCameras)
         ctx.f1.f64 *= own;
-    __imp__sub_82161000(ctx, base);
+    SB_ORIGINAL(sub_82161000)(ctx, base);
 }
 
 // D3D's swap sync (sub_82598670, from the swap sub_82598DD0, before the
@@ -1253,14 +1490,14 @@ PPC_FUNC(sub_82161000)
 // packets), so the guest vblank, the game's frame clock, still releases one
 // swap a step: the real picture's.
 extern "C" PPC_FUNC(__imp__sub_82598670);
-PPC_FUNC(sub_82598670)
+SB_HOOK(sub_82598670)
 {
     if (!s_inBetween.load(std::memory_order_acquire))
-        return __imp__sub_82598670(ctx, base);
+        return SB_ORIGINAL(sub_82598670)(ctx, base);
     const uint32_t device = ctx.r3.u32;
     const uint32_t interval = PPC_LOAD_U32(device + kDevicePresentInterval);
     PPC_STORE_U32(device + kDevicePresentInterval, 0x80000000u);
-    __imp__sub_82598670(ctx, base);
+    SB_ORIGINAL(sub_82598670)(ctx, base);
     PPC_STORE_U32(device + kDevicePresentInterval, interval);
 }
 
@@ -1278,7 +1515,7 @@ PPC_FUNC(sub_82598670)
 // segments of the same size (when D3D allocates it itself: no memory given).
 // NFSMW_HFR_SECONDARY=<n> sets the factor (1: the game's own).
 extern "C" PPC_FUNC(__imp__sub_82597FF0);
-PPC_FUNC(sub_82597FF0)
+SB_HOOK(sub_82597FF0)
 {
     const uint32_t params = ctx.r4.u32;
     if (params)
@@ -1312,7 +1549,7 @@ PPC_FUNC(sub_82597FF0)
             fprintf(stderr, "[hfr] D3D's primary ring made %u times larger: %u bytes\n", primaryFactor, size);
         }
     }
-    __imp__sub_82597FF0(ctx, base);
+    SB_ORIGINAL(sub_82597FF0)(ctx, base);
 }
 
 // The eye adaptation's luminance readback (sub_82223308, from sub_822234F0:
@@ -1331,7 +1568,7 @@ PPC_FUNC(sub_82597FF0)
 // (a frame old: the exposure moves 2% a frame toward it, which doesn't show).
 // NFSMW_HFR_STALE_LUMINANCE=0: it waits, as before.
 extern "C" PPC_FUNC(__imp__sub_82223308);
-PPC_FUNC(sub_82223308)
+SB_HOOK(sub_82223308)
 {
     static double last = 0.0;  // the last real picture's (whichever thread plays it)
     if (s_enabled && s_inBetween.load(std::memory_order_acquire))
@@ -1361,7 +1598,7 @@ PPC_FUNC(sub_82223308)
         {
             s_staleLuminance.fetch_add(1, std::memory_order_relaxed);
             ctx.r3.u32 = other;
-            __imp__sub_82223308(ctx, base);
+            SB_ORIGINAL(sub_82223308)(ctx, base);
             last = ctx.f1.f64;
             stale = 0;
             return;
@@ -1375,7 +1612,7 @@ PPC_FUNC(sub_82223308)
         }
     }
     stale = 0;
-    __imp__sub_82223308(ctx, base);
+    SB_ORIGINAL(sub_82223308)(ctx, base);
     last = ctx.f1.f64;
 }
 
@@ -1393,38 +1630,38 @@ PPC_FUNC(sub_82223308)
 // maps, 3.8 without the environment map, 4.5 without the mirror, 1.6
 // without all three.
 extern "C" PPC_FUNC(__imp__sub_824439B0);
-PPC_FUNC(sub_824439B0)
+SB_HOOK(sub_824439B0)
 {
     if (Skip(kSkipShadow))
         return;
-    __imp__sub_824439B0(ctx, base);
+    SB_ORIGINAL(sub_824439B0)(ctx, base);
 }
 
 // The shadow views' fit to the player's view (render setup sub_82440F98:
 // sub_82454DC8 sets up view 13 or 14 from view 1 or 2, sub_82456030 view 15
 // or 16): kept from the real picture with the shadow maps (KeepView).
 extern "C" PPC_FUNC(__imp__sub_82454DC8);
-PPC_FUNC(sub_82454DC8)
+SB_HOOK(sub_82454DC8)
 {
     if (KeepShadowFit())
         return;
-    __imp__sub_82454DC8(ctx, base);
+    SB_ORIGINAL(sub_82454DC8)(ctx, base);
 }
 
 extern "C" PPC_FUNC(__imp__sub_82456030);
-PPC_FUNC(sub_82456030)
+SB_HOOK(sub_82456030)
 {
     if (KeepShadowFit())
         return;
-    __imp__sub_82456030(ctx, base);
+    SB_ORIGINAL(sub_82456030)(ctx, base);
 }
 
 extern "C" PPC_FUNC(__imp__sub_82444178);
-PPC_FUNC(sub_82444178)
+SB_HOOK(sub_82444178)
 {
     if (Skip(kSkipView4))
         return;
-    __imp__sub_82444178(ctx, base);
+    SB_ORIGINAL(sub_82444178)(ctx, base);
 }
 
 // The eye adaptation's luminance measurement (sub_822234F0: downsamples the
@@ -1436,19 +1673,19 @@ PPC_FUNC(sub_82444178)
 // waits for the in-between picture's resolve, in the same pages.
 // NFSMW_HFR_SKIP=lum (M3): none in in-between pictures.
 extern "C" PPC_FUNC(__imp__sub_822234F0);
-PPC_FUNC(sub_822234F0)
+SB_HOOK(sub_822234F0)
 {
     if (Skip(kSkipLum))
         return;
-    __imp__sub_822234F0(ctx, base);
+    SB_ORIGINAL(sub_822234F0)(ctx, base);
 }
 
 extern "C" PPC_FUNC(__imp__sub_82444520);
-PPC_FUNC(sub_82444520)
+SB_HOOK(sub_82444520)
 {
     if (Skip(kSkipEnv))
         return;
-    __imp__sub_82444520(ctx, base);
+    SB_ORIGINAL(sub_82444520)(ctx, base);
 }
 
 // M3: each picture's own command-processor time and draws (command processor

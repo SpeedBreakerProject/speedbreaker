@@ -44,6 +44,7 @@
 // false, so the presenter letterboxes a narrower screen as before instead
 // of the build failing on an undefined symbol.
 #include <stdafx.h>
+#include <region/region.h>
 #include "ultrawide.h"
 #include "front_end_matrix.h"
 #include "glare.h"
@@ -156,7 +157,7 @@ namespace game
         float aspect = (16.0f / 9.0f) * next.y / next.x;
         uint32_t bits;
         memcpy(&bits, &aspect, sizeof(bits));
-        *static_cast<uint32_t*>(g_memory.Translate(kMovieDisplayAspect)) = ByteSwap(bits);
+        *static_cast<uint32_t*>(g_memory.Translate(region::Addr(kMovieDisplayAspect))) = ByteSwap(bits);
     }
 
     float AspectScaleX()

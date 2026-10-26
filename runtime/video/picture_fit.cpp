@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <format>
 
 namespace video
 {
@@ -163,5 +164,22 @@ namespace video
         uint32_t sx = 1, sy = 1;
         AutoRenderScale(regionW, regionH, budget, sx, sy);
         return NativeAuto(sx, sy, regionW, regionH, budget);
+    }
+
+    gpu::RenderScale SplitScreenScale(gpu::RenderScale want, uint32_t regionW, uint32_t regionH, uint32_t budget)
+    {
+        if (!regionW || !regionH)
+            return want;
+        const gpu::RenderScale cap = AutoNativeScale(regionW, regionH, budget);
+        // Host pixels per guest pixel, exactly: num x num / (den x den).
+        const uint64_t w = uint64_t(want.x.num) * want.y.num * cap.x.den * cap.y.den;
+        const uint64_t c = uint64_t(cap.x.num) * cap.y.num * want.x.den * want.y.den;
+        return w > c ? cap : want;
+    }
+
+    std::string ResolutionLabel(std::string_view label, gpu::RenderScale scale)
+    {
+        const std::string_view name = label.substr(0, label.find(" ("));
+        return std::format("{} ({}x{})", name, scale.x.Size(1280), scale.y.Size(720));
     }
 }

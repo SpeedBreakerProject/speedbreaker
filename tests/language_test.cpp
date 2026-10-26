@@ -298,7 +298,9 @@ namespace
         CHECK(!o.hidden, "shown");
 #endif
         CHECK(std::string_view(o.description).find("next launch") == std::string_view::npos, "said once, by the file's env note");
-        CHECK(std::string_view(o.description).find("PAL") == std::string_view::npos, "no PAL in the description");
+        // v0.2.0: the European (PAL) Spanish disc is supported, and named.
+        CHECK(std::string_view(o.description).find("European (PAL) Spanish disc has Spanish movies and speech") != std::string_view::npos,
+            "the PAL disc in the description");
         CHECK(o.entries.size() == std::size(kLanguages), "%zu entries", o.entries.size());
         for (size_t i = 0; i < o.entries.size() && i < std::size(kLanguages); i++)
         {
@@ -343,6 +345,60 @@ namespace
     }
 }
 
+namespace
+{
+    // The European (PAL, Spanish) disc: every language's text, Spanish
+    // speech only (COPSPEECH_SP), and its 33 movies as <name>_spanish_pal.wmv.
+    void TestPalDisc()
+    {
+        std::vector<uint8_t> index;
+        PutHash(index, ArchiveHash("SOUND\\SPEECH\\COPSPEECH_SP.BIG"));
+        for (const Language& l : kLanguages)
+            PutHash(index, ArchiveHash(std::string("LANGUAGES\\") + l.disc + ".BIN"));
+        std::vector<std::string> movies;
+        for (const std::string& m : UsaMovies())
+            movies.push_back(m.substr(0, m.size() - std::string("_english_ntsc.wmv").size()) + "_spanish_pal.wmv");
+
+        // Spanish, the disc's own: all of it, nothing redirected.
+        Files es = Scan(L(4), movies, index, true);
+        CHECK(es.text && es.pal && es.ownMovies && es.speech && !es.movieRedirect && !es.speechRedirect, "Spanish on the PAL disc");
+        CHECK(Note(L(4), es) == "Menus, race text, movies and speech in Spanish.", "%s", Note(L(4), es).c_str());
+        CHECK(LogLine(L(4), es) == "[language] Spanish (spanish): text yes; movies Spanish (_pal); speech Spanish (copspeech_sp present)",
+            "%s", LogLine(L(4), es).c_str());
+        // Every other language: its text, Spanish movies and speech (no
+        // English ones on this disc for the game's fallback to find).
+        for (const Language& l : kLanguages)
+        {
+            if (l.id == 4)
+                continue;
+            Files f = Scan(l, movies, index, true);
+            CHECK(f.text && !f.ownMovies && !f.englishMovies && f.movieRedirect && f.movieRedirect->id == 4, "%s: Spanish movies", l.token);
+            CHECK(!f.speech && !f.speechToEnglish && f.speechRedirect && f.speechRedirect->id == 4, "%s: Spanish speech", l.token);
+            CHECK(Note(l, f) == std::string("Menus and race text in ") + l.name + ". Movies and speech in Spanish.", "%s", Note(l, f).c_str());
+            CHECK(SpeechIndexTo(kSpeechPickBegin + 0xE0, kSpeechCollection, 0, f.speechRedirect->id) == 4, "%s: record 4", l.token);
+        }
+        CHECK(LogLine(L(kEnglish), Scan(L(kEnglish), movies, index, true)) == "[language] English (english): text yes; movies Spanish (_pal); "
+            "speech Spanish (copspeech_en absent: Spanish's instead)", "%s", LogLine(L(kEnglish), Scan(L(kEnglish), movies, index, true)).c_str());
+        // The USA executable's rules don't redirect (its disc has English's).
+        Files usaRules = Scan(L(kEnglish), movies, index);
+        CHECK(!usaRules.movieRedirect && !usaRules.speechRedirect, "no redirects for the USA build");
+
+        // The boot: the PAL build passes 4; the chosen language applies, English too.
+        for (uint32_t lr : kCallers)
+            for (const Language& l : kLanguages)
+            {
+                CHECK(BootLanguageFor(lr, 4, l.id, true) == (lr == kBootCall ? l.id : 4), "PAL boot %s lr %08X", l.token, lr);
+                CHECK(BootLanguageFor(lr, 0, l.id, false) == BootLanguage(lr, 0, l.id), "USA boot unchanged %s", l.token);
+            }
+        // SpeechIndexTo(-1) never changes anything; (0) is SpeechIndex's fallback.
+        for (uint32_t r5 : { 0u, 1u, 4u })
+        {
+            CHECK(SpeechIndexTo(kSpeechPickBegin, kSpeechCollection, r5, -1) == r5, "no redirect");
+            CHECK(SpeechIndexTo(kSpeechPickBegin, kSpeechCollection, r5, 0) == SpeechIndex(kSpeechPickBegin, kSpeechCollection, r5, true), "= SpeechIndex");
+        }
+    }
+}
+
 int main()
 {
     TestTable();
@@ -351,6 +407,7 @@ int main()
     TestSpeechIndex();
     TestArchiveHash();
     TestFiles();
+    TestPalDisc();
 
 #ifdef _WIN32
     // Windows has no mkdtemp (settings_keys_test's way): a folder named

@@ -45,6 +45,7 @@
 // guard (default 10, at most 12). Each movie leaves a [movie] line: its
 // frames by vblanks shown, and those held.
 #include <stdafx.h>
+#include <region/region.h>
 #include "movie_pacing.h"
 
 #include <cpu/guest_time.h>
@@ -107,9 +108,9 @@ namespace
     }
 }
 
-PPC_FUNC(sub_826E8CF8)
+SB_HOOK(sub_826E8CF8)
 {
-    __imp__sub_826E8CF8(ctx, base);
+    SB_ORIGINAL(sub_826E8CF8)(ctx, base);
     s_movieRenders.fetch_add(1, std::memory_order_release);
     s_lastMovieFrame.store(NowNs(), std::memory_order_relaxed);
 }
@@ -119,14 +120,14 @@ int64_t game::LastMovieFrameNs()
     return s_lastMovieFrame.load(std::memory_order_relaxed);
 }
 
-PPC_FUNC(sub_825985A0)
+SB_HOOK(sub_825985A0)
 {
     uint32_t arg = ctx.r3.u32;
-    __imp__sub_825985A0(ctx, base);
+    SB_ORIGINAL(sub_825985A0)(ctx, base);
 
     auto& s = s_state;
     int64_t now = NowNs();
-    uint32_t device = PPC_LOAD_U32(PPC_LOAD_U32(0x82000B48));  // (KeGetCurrentProcessType() is 1: the title's)
+    uint32_t device = PPC_LOAD_U32(PPC_LOAD_U32(region::Addr(0x82000B48)));  // (KeGetCurrentProcessType() is 1: the title's)
     uint32_t released = PPC_LOAD_U32(device + kDeviceReleased);
     // A movie frame: the XMV player rendered since the last swap (the game
     // thread waits for that swap before it renders the next frame).

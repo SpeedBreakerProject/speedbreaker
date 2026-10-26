@@ -2,10 +2,13 @@
 #include <stdafx.h>
 #include "indirect.h"
 
+// The running release's code end (region::Select moves it for the PAL code).
+uint64_t g_indirectCodeEnd = PPC_CODE_BASE + PPC_CODE_SIZE;
+
 void PPCCallIndirect(PPCContext& ctx, uint8_t* base, uint32_t target)
 {
     PPCFunc* fn = nullptr;
-    if (target >= PPC_CODE_BASE && target < PPC_CODE_BASE + PPC_CODE_SIZE && (target & 3) == 0)
+    if (target >= PPC_CODE_BASE && target < g_indirectCodeEnd && (target & 3) == 0)
         fn = PPC_LOOKUP_FUNC(base, target);
     if (fn == nullptr)
     {

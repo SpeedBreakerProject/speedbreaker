@@ -13,6 +13,7 @@
 // at once, as an in-between picture's, so the world keeps its 60 steps a
 // second at the 60 Hz guest vblank and each step is presented twice).
 #include <stdafx.h>
+#include <region/region.h>
 #include <kernel/function.h>
 
 #include <atomic>
@@ -103,11 +104,10 @@ void hfrdiag::AfterRenderEntry(uint8_t* base)
 }
 
 #define HFR_COUNT(sub, id)                \
-    extern "C" PPC_FUNC(__imp__##sub);    \
-    PPC_FUNC(sub)                         \
+    SB_HOOK(sub)                          \
     {                                     \
         Bump(id);                         \
-        __imp__##sub(ctx, base);          \
+        SB_ORIGINAL(sub)(ctx, base);      \
     }
 
 HFR_COUNT(sub_82441050, RenderFrame)
@@ -132,14 +132,14 @@ namespace
     }
 }
 extern "C" PPC_FUNC(__imp__sub_82223220);
-PPC_FUNC(sub_82223220)
+SB_HOOK(sub_82223220)
 {
     Bump(Exposure);
     const bool log = s_exposureLeft.load() > 0 &&
         std::chrono::duration<double>(std::chrono::steady_clock::now() - s_exposureT0).count() >= s_exposureFrom;
     const float before = LoadF(base, 0x82908AB8), measured = LoadF(base, 0x82908ABC);
     const bool between = hfr::InBetween();
-    __imp__sub_82223220(ctx, base);
+    SB_ORIGINAL(sub_82223220)(ctx, base);
     if (log && s_exposureLeft.fetch_sub(1) > 0)
         fprintf(stderr, "[hfrexpo] %s adapted %.6f -> %.6f measured %.6f\n", between ? "between" : "real", before,
             LoadF(base, 0x82908AB8), measured);
@@ -221,10 +221,10 @@ void hfrdiag::OnViewSetup(uint8_t* base, uint32_t view)
 }
 
 extern "C" PPC_FUNC(__imp__sub_8243B0B0);
-PPC_FUNC(sub_8243B0B0)
+SB_HOOK(sub_8243B0B0)
 {
     Bump(FrameGate);
-    __imp__sub_8243B0B0(ctx, base);
+    SB_ORIGINAL(sub_8243B0B0)(ctx, base);
     if (ctx.r3.u32 == 1)
         Bump(FrameGateReset);
 }

@@ -3,6 +3,7 @@
 // EA SND's CPU budget on a host: never expel voices for time (see
 // ea_cpu_budget.h; GitHub issue #35).
 #include <stdafx.h>
+#include <region/region.h>
 #include "ea_cpu_budget.h"
 #include <kernel/function.h>
 #include <report/report.h>
@@ -28,11 +29,11 @@ namespace
 
 // sub_82601528's over-budget step: f1 = how far over, in EA's units (r3 =
 // mixer + 68). EA expels the lowest-priority voices until it fits.
-PPC_FUNC(sub_82601788)
+SB_HOOK(sub_82601788)
 {
     if (s_eaExpels)
     {
-        __imp__sub_82601788(ctx, base);
+        SB_ORIGINAL(sub_82601788)(ctx, base);
         return;
     }
     // Nothing is expelled. Say so, at most once a minute.

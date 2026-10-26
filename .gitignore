@@ -20,6 +20,7 @@ PAD[AB][12]
 # Generated recompiler output (from the player's own default.xex)
 ppc/
 /ppc
+/ppc-*
 
 # Build output and packages
 build/

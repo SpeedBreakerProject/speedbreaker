@@ -9,6 +9,7 @@
 // NFSMW_LIGHT_TRAILS=0 leaves the ring as the game writes it (an A/B switch:
 // trails half the 360's length at 60 fps).
 #include <stdafx.h>
+#include <region/region.h>
 #include "light_trails.h"
 #include "frame_time.h"
 #include "hfr.h"
@@ -116,9 +117,9 @@ namespace
     }
 }
 
-PPC_FUNC(sub_82134608)
+SB_HOOK(sub_82134608)
 {
-    if (s_enabled && static_cast<uint32_t>(ctx.lr) == kRingWriteReturn)
+    if (s_enabled && static_cast<uint32_t>(ctx.lr) == region::Addr(kRingWriteReturn))
         RingWrite(ctx, base);
-    __imp__sub_82134608(ctx, base);
+    SB_ORIGINAL(sub_82134608)(ctx, base);
 }

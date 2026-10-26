@@ -43,3 +43,33 @@ endif()
 if(IOS)
     target_compile_options(NfsmwRecompLib PRIVATE -mcpu=apple-a15)
 endif()
+
+# The European (PAL, Spanish) release's code (../ppc-pal-es: XenonRecomp with
+# config/pal-es/nfsmw.toml on that disc's default.xex, then
+# scripts/region_ppc.py ppc-pal-es pal_es), linked beside the USA's under
+# namespace pal_es; the runtime picks one at startup (runtime/region/region.h).
+# SB_PAL_ES: AUTO (when ppc-pal-es/ is there), ON (required) or OFF.
+set(SB_PAL_ES AUTO CACHE STRING "Link the PAL (Spanish) release's recompiled code: AUTO, ON or OFF")
+file(GLOB PPC_PAL_ES_SOURCES ${ROOT}/ppc-pal-es/*.cpp)
+if(SB_PAL_ES STREQUAL "ON" AND NOT PPC_PAL_ES_SOURCES)
+    message(FATAL_ERROR "SB_PAL_ES=ON, but ppc-pal-es/ has no generated sources")
+endif()
+if(PPC_PAL_ES_SOURCES AND NOT SB_PAL_ES STREQUAL "OFF")
+    file(READ ${ROOT}/ppc-pal-es/ppc_recomp_shared.h _sb_pal_head LIMIT 64)
+    if(NOT _sb_pal_head MATCHES "^// Namespaced by scripts/region_ppc.py: pal_es")
+        message(FATAL_ERROR "ppc-pal-es/ isn't namespaced: run python3 scripts/region_ppc.py ppc-pal-es pal_es")
+    endif()
+    add_library(NfsmwRecompPalEsLib STATIC ${PPC_PAL_ES_SOURCES})
+    target_compile_features(NfsmwRecompPalEsLib PUBLIC cxx_std_20)
+    target_include_directories(NfsmwRecompPalEsLib PRIVATE
+        ${ROOT}/ppc-pal-es
+        ${ROOT}/tools/XenonRecomp/XenonUtils
+        ${ROOT}/tools/XenonRecomp/thirdparty/simde)
+    get_target_property(_sb_ppc_options NfsmwRecompLib COMPILE_OPTIONS)
+    target_compile_options(NfsmwRecompPalEsLib PRIVATE ${_sb_ppc_options})
+    set(SB_HAVE_PAL_ES ON CACHE INTERNAL "ppc-pal-es is linked")
+    message(STATUS "PAL (Spanish) release: linked (ppc-pal-es/)")
+else()
+    set(SB_HAVE_PAL_ES OFF CACHE INTERNAL "ppc-pal-es is linked")
+    message(STATUS "PAL (Spanish) release: not linked (no ppc-pal-es/, or SB_PAL_ES=OFF)")
+endif()

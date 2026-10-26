@@ -2,11 +2,18 @@
 user's disc against (relative path, size, SHA-256 of every file).
 
     python3 scripts/gen_install_manifest.py game/files
+    python3 scripts/gen_install_manifest.py --tsv files.tsv --xex default.xex \
+        --config config/nfsmw-pal-es.toml -o runtime/install/manifest_pal_es.inc
 
-Run it over a known-good extracted dump (extract-xiso output). It reads the dump
-and writes only names, sizes and hashes, never game content, so the output is
-committed. default.xex must match the hash this build was recompiled from
-(config/nfsmw.toml); --expect-xex overrides that for test manifests.
+Run it over a known-good extracted dump (extract-xiso output), or over a list
+of the disc's files (--tsv: path, size, SHA-256 per line, tab-separated, as a
+lister reading the disc image writes it; --xex is that disc's default.xex, for
+its title ID, and must have the listed hash). It writes only names, sizes and
+hashes, never game content, so the output is committed. default.xex must match
+the hash the region's code was recompiled from (the "default.xex SHA-256" line
+of --config, config/nfsmw.toml by default); --expect-xex overrides that for
+test manifests. The installer checks every file against the manifest as it
+copies, so a list that doesn't match the disc can't install.
 
 The manifest version is derived from the entries, so installs made with an
 older manifest stop counting as valid (FindGameInstall) whenever it changes.
@@ -26,11 +33,11 @@ MARKER = '.nfsmw-install'         # written by the installer; not a disc file
 CHUNK = 8 << 20
 
 
-def expected_xex_hash():
-    text = (ROOT / 'config/nfsmw.toml').read_text()
+def expected_xex_hash(config):
+    text = config.read_text()
     m = re.search(r'default\.xex SHA-256 ([0-9a-f]{64})', text)
     if not m:
-        sys.exit('config/nfsmw.toml has no "default.xex SHA-256 <hash>" comment; pass --expect-xex')
+        sys.exit(f'{config} has no "default.xex SHA-256 <hash>" comment; pass --expect-xex')
     return m.group(1)
 
 
@@ -61,10 +68,35 @@ def sha256_of(path, done, total):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument('game_dir', type=pathlib.Path, help='extracted disc (default.xex, NFS/, Movies/)')
+    ap.add_argument('game_dir', type=pathlib.Path, nargs='?', help='extracted disc (default.xex, NFS/, Movies/)')
     ap.add_argument('-o', '--out', type=pathlib.Path, default=OUT)
-    ap.add_argument('--expect-xex', help='required default.xex SHA-256 (default: from config/nfsmw.toml)')
+    ap.add_argument('--tsv', type=pathlib.Path, help="the disc's file list (path, size, SHA-256) instead of game_dir")
+    ap.add_argument('--xex', type=pathlib.Path, help="with --tsv: the disc's default.xex (for its title ID)")
+    ap.add_argument('--config', type=pathlib.Path, default=ROOT / 'config/nfsmw.toml',
+                    help='the XenonRecomp config naming the default.xex SHA-256 (default: config/nfsmw.toml)')
+    ap.add_argument('--expect-xex', help='required default.xex SHA-256 (default: from --config)')
     args = ap.parse_args()
+    if bool(args.tsv) == bool(args.game_dir):
+        ap.error('give an extracted disc folder or --tsv, not both')
+    if args.tsv and not args.xex:
+        ap.error('--tsv needs --xex')
+
+    if args.tsv:
+        entries = []
+        for line in args.tsv.read_text().splitlines():
+            if not line.strip():
+                continue
+            rel, size, h = line.split('\t')
+            if not re.fullmatch(r'[\x21-\x7e ]+', rel) or '"' in rel or '\\' in rel or rel.startswith('.'):
+                sys.exit(f'unexpected characters in {rel!r}')
+            if not re.fullmatch(r'[0-9a-f]{64}', h):
+                sys.exit(f'{rel}: {h!r} is not a SHA-256')
+            entries.append((rel, int(size), h))
+        entries.sort()
+        xex_file = args.xex
+        if hashlib.sha256(xex_file.read_bytes()).hexdigest() != dict((r, x) for r, _, x in entries).get('default.xex'):
+            sys.exit(f'{xex_file} is not the default.xex the list names')
+        return write(args, entries, xex_file)
 
     game = args.game_dir.resolve()
     files = []
@@ -95,15 +127,26 @@ def main():
     entries = [(rel, p.stat().st_size, sha256_of(p, done, total)) for rel, p in files]
     if sys.stderr.isatty():
         print(file=sys.stderr)
+    write(args, entries, game / 'default.xex')
 
+
+def write(args, entries, xex_file):
+    by_lower = {}
+    for rel, _, _ in entries:
+        if rel.lower() in by_lower:
+            sys.exit(f'{rel} and {by_lower[rel.lower()]} differ only in case')
+        by_lower[rel.lower()] = rel
+    if 'default.xex' not in by_lower:
+        sys.exit('the disc has no default.xex at its root')
+    total = sum(size for _, size, _ in entries)
     xex_hash = next(h for rel, _, h in entries if rel == 'default.xex')
-    expected = args.expect_xex or expected_xex_hash()
+    expected = args.expect_xex or expected_xex_hash(args.config)
     if xex_hash != expected.lower():
         sys.exit(f'default.xex is {xex_hash}, expected {expected}: not the dump this build was recompiled from')
 
     canonical = f'nfsmw-install-manifest {FORMAT}\n' + ''.join(f'{rel}\t{size}\t{h}\n' for rel, size, h in entries)
     version = hashlib.sha256(canonical.encode()).hexdigest()[:16]
-    title_id = xex_title_id(game / 'default.xex')
+    title_id = xex_title_id(xex_file)
 
     lines = [
         '// Generated by scripts/gen_install_manifest.py from a known-good dump. Do not edit;',

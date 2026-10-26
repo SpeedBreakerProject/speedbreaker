@@ -14,12 +14,14 @@
 #include "quit_game.h"
 
 #include <game/language.h>  // the Language row's note: what the installed files give
+#include <gpu/renderer.h>    // Internal Resolution's labels: what each entry renders now
 #include <report/report.h>
 #include <user/settings.h>
 #include <hid/key_map.h>     // the Controls page: one row per control, two keys each
 #include <hid/wheel.h>       // the Wheel page: the device, its pedals and what they read
 #include <user/key_names.h>  // a key's name in the file, when SDL has none
 #include <video/frame_rate.h>
+#include <video/picture_fit.h>
 #include <video/presenter.h>
 
 #include <imgui.h>
@@ -167,11 +169,29 @@ namespace ui
             return kSpaceM * Scale();
         }
 
+        // A value as the menu shows it: settings::FormatValue's (what the
+        // log says), but Internal Resolution's entries name the size they
+        // render for the picture on this screen now ("1x (1280x800)" on a
+        // Steam Deck filled; the table's "1x (720p)" is a 16:9 screen's),
+        // and Auto what it picked. No window: the table's.
+        std::string ValueText(const settings::Option& o, double value)
+        {
+            std::string text = settings::FormatValue(o.id, value);
+            if (o.id == Id::InternalResolution && text != "?")
+            {
+                uint32_t regionW = 0, regionH = 0;
+                video::FrameRegion(regionW, regionH);
+                if (regionW && regionH)
+                    return video::ResolutionLabel(text, gpu::renderer::InternalResolutionScale(int32_t(value), regionW, regionH));
+            }
+            return text;
+        }
+
         // Widest value this option can show, for the value column.
         float ValueWidth(const settings::Option& o)
         {
             float width = 0.0f;
-            auto measure = [&](double v) { width = std::max(width, ImGui::CalcTextSize(settings::FormatValue(o.id, v).c_str()).x); };
+            auto measure = [&](double v) { width = std::max(width, ImGui::CalcTextSize(ValueText(o, v).c_str()).x); };
             switch (o.type)
             {
             case settings::Type::Bool:
@@ -351,7 +371,7 @@ namespace ui
             ImGui::PopStyleColor();
             ImGui::PopItemFlag();
 
-            std::string text = settings::FormatValue(o.id, stored);
+            std::string text = ValueText(o, stored);
             ImVec2 size = ImGui::CalcTextSize(text.c_str());
             ImDrawList* draw = ImGui::GetWindowDrawList();
             ImU32 color = ImGui::GetColorU32(focused ? ImGuiCol_PlotLines : ImGuiCol_Text);
@@ -815,7 +835,7 @@ namespace ui
                 ImGui::TextDisabled("NFSMW_PRESENT_SCALE sets %.2f for this run.", double(scale));
             else if (const char* env = settings::EnvOverride(o.id))
                 ImGui::TextDisabled("%s sets this for this run: %s. The choice here is saved for later runs.", env,
-                    settings::FormatValue(o.id, settings::GetValue(o.id)).c_str());
+                    ValueText(o, settings::GetValue(o.id)).c_str());
             else if (settings::RestartPending(o.id))
             {
                 PushAccentText();

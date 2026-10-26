@@ -635,9 +635,35 @@ static void DiskRules(const fs::path& root, const char* argv0)
     CHECK(CheckRecordedInstall(manifest).state == RecordedState::NotCurrent, "recorded: not current");
 }
 
+// Windows (context.windows): a drive's root, C:\ or D:\, is that drive's
+// top, where the game goes in its SpeedBreaker\game (the To row's entry for
+// the drive), not "the system's root folder"; OneDrive is a cloud folder.
+static void WindowsRules()
+{
+    PlacementContext windows = Context(false);
+    windows.windows = true;
+    const fs::path root = fs::current_path().root_path();  // "/" here, "C:\\" on Windows
+    FolderFacts f = Facts(root.string().c_str(), FolderState::Other);
+    f.driveTop = true;  // ProbeFolder: IsRoot
+    FolderChoice c = PlaceInPicked(f, windows);
+    CHECK(c.result.Ok() && c.gameDir == root / kUserFolderName / "game" && c.subfolder == SubfolderReason::DriveTop,
+        "windows: a drive's root: %s %s", c.gameDir.string().c_str(), c.result.message.c_str());
+    c = PlaceInPicked(f, Context(false));
+    CHECK(c.result.error == Error::DestinationNotWritable && Has(c.result.message, "system's root folder"),
+        "elsewhere the root stays refused: %s", c.result.message.c_str());
+    f = Facts("/home/p/OneDrive/Games", FolderState::Empty);
+    f.cloud = true;  // ProbeFolder: InOneDrive
+    c = PlaceInPicked(f, windows);
+    CHECK(c.result.error == Error::DestinationNotWritable && Has(c.result.message, "is in OneDrive"), "windows: OneDrive: %s",
+        c.result.message.c_str());
+    f.cloud = false;
+    CHECK(PlaceInPicked(f, windows).result.Ok(), "windows: a folder outside OneDrive is fine");
+}
+
 int main(int argc, char** argv)
 {
     PureRules();
+    WindowsRules();
 
     // The disk checks' own new folder, made inside the one given (which is
     // never emptied or deleted: a mistyped argument must lose nothing).

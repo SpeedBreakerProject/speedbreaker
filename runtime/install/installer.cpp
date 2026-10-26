@@ -36,8 +36,9 @@ namespace install
         namespace fs = std::filesystem;
 
         constexpr const char* kGameName = "Need for Speed: Most Wanted";
-        // The release manifest.inc was generated from (config/nfsmw.toml).
-        constexpr const char* kRelease = "the USA Xbox 360 release";
+        // The releases the compiled-in manifests were generated from
+        // (config/nfsmw.toml, config/nfsmw-pal-es.toml).
+        constexpr const char* kReleases = "the USA and the European (PAL, Spanish) Xbox 360 releases";
         constexpr size_t kChunk = 4 << 20;
         // Room beyond the files themselves: directory blocks, the marker, and
         // not filling the user's disk to the last byte.
@@ -423,6 +424,31 @@ namespace install
             return std::nullopt;
         }
 
+        // A file of the game: in `manifest`, or, for a compiled-in one, in any
+        // region's (a USA install replaced by a PAL one, or the other way
+        // round, leaves none of its movies behind as the player's files).
+        bool IsGameFile(const Manifest& manifest, std::string_view relative)
+        {
+            if (manifest.Find(relative))
+                return true;
+            if (IsGameManifest(manifest))
+                for (const Manifest* m : GameManifests())
+                    if (m->Find(relative))
+                        return true;
+            return false;
+        }
+
+        std::optional<std::string> GameFolder(const Manifest& manifest, std::string_view relative)
+        {
+            if (std::optional<std::string> folder = ManifestFolder(manifest, relative))
+                return folder;
+            if (IsGameManifest(manifest))
+                for (const Manifest* m : GameManifests())
+                    if (std::optional<std::string> folder = ManifestFolder(*m, relative))
+                        return folder;
+            return std::nullopt;
+        }
+
         // Moves everything in the old install `from` that isn't the game's
         // into the new install `to`: DLC (xam.cpp keeps it in the game
         // folder's dlc/), a disc image or notes the player put there, files
@@ -451,10 +477,10 @@ namespace install
                 std::string relative = prefix + name;
                 if (prefix.empty() && (name == kInstallMarker || name == kPartialTag))
                     continue;
-                if (manifest.Find(relative))
+                if (IsGameFile(manifest, relative))
                     continue;
                 std::error_code typeEc;
-                if (std::optional<std::string> folder = ManifestFolder(manifest, relative))
+                if (std::optional<std::string> folder = GameFolder(manifest, relative))
                 {
                     if (!entry.is_symlink(typeEc) && entry.is_directory(typeEc))
                         complete &= CarryOver(entry.path(), to / fs::path(*folder).filename(), relative + "/", manifest);
@@ -530,8 +556,10 @@ namespace install
                 "manifest_version = \"{}\"\n"
                 "xex_sha256 = \"{}\"\n"
                 "files = {}\n"
-                "bytes = {}\n",
-                manifest.version, manifest.Xex().sha256, manifest.files.size(), manifest.totalBytes);
+                "bytes = {}\n"
+                "{}",
+                manifest.version, manifest.Xex().sha256, manifest.files.size(), manifest.totalBytes,
+                manifest.region.empty() ? std::string() : std::format("region = \"{}\"  # {}\n", manifest.region, manifest.regionName));
             fs::path path = dir / kInstallMarker;
             int fd = platform::OpenFile(path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
             if (fd < 0)
@@ -580,7 +608,17 @@ namespace install
         }
     }
 
-    Result CheckGameVersion(const DiscSource& source, const Manifest& manifest, XexIdentity* identity)
+    const Manifest& SourceManifest(const DiscSource& source, const Manifest& manifest)
+    {
+        if (!IsGameManifest(manifest))
+            return manifest;
+        XexIdentity id;
+        if (!IdentifyXex(source, id).Ok())
+            return manifest;
+        return Pick(manifest, ManifestForXexHash(ToHex(id.sha256)));
+    }
+
+    Result CheckGameVersion(const DiscSource& source, const Manifest& requested, XexIdentity* identity)
     {
         XexIdentity local;
         XexIdentity& id = identity ? *identity : local;
@@ -597,8 +635,9 @@ namespace install
         if (!r.Ok())
             return r;
 
-        const ManifestFile& xex = manifest.Xex();
         std::string found = ToHex(id.sha256);
+        const Manifest& manifest = Pick(requested, ManifestForXexHash(found));
+        const ManifestFile& xex = manifest.Xex();
         if (found == xex.sha256)
             return {};
 
@@ -615,16 +654,29 @@ namespace install
         // Same title, different executable: another region or revision. The
         // recompiled code matches one executable byte for byte, so nothing
         // else can run, whatever else is on the disc.
-        r = Fail(Error::UnsupportedVersion, std::format("{} is {}, but not the version this build supports: its "
-            "default.xex has SHA-256 {}. Only {} is supported (default.xex {}){}.", What(source), kGameName, found,
-            kRelease, std::string(xex.sha256),
-            id.file->size == xex.size ? ", unless this one is a damaged dump" : ""), id.file->path);
+        std::string supported, damaged;
+        if (IsGameManifest(manifest))
+        {
+            for (const Manifest* m : GameManifests())
+            {
+                supported += std::format("{}{} {}", supported.empty() ? "" : ", ", m->regionName, std::string(m->Xex().sha256));
+                if (id.file->size == m->Xex().size)
+                    damaged = ", unless this one is a damaged dump";
+            }
+            supported = std::format("Only {} are supported (default.xex {}){}", kReleases, supported, damaged);
+        }
+        else
+            supported = std::format("Only default.xex {} is supported{}", std::string(xex.sha256),
+                id.file->size == xex.size ? ", unless this one is a damaged dump" : "");
+        r = Fail(Error::UnsupportedVersion, std::format("{} is {}, but not a version this build supports: its "
+            "default.xex has SHA-256 {}. {}.", What(source), kGameName, found, supported), id.file->path);
         r.foundHash = found;
         return r;
     }
 
-    Result CheckSource(const DiscSource& source, const Manifest& manifest)
+    Result CheckSource(const DiscSource& source, const Manifest& requested)
     {
+        const Manifest& manifest = SourceManifest(source, requested);
         if (source.Truncated())
             return Fail(Error::TruncatedImage, "This disc image is incomplete: it ends before some of its files do. "
                 "Copy it again, or make a new backup from your disc.", source.Path().string());
@@ -692,8 +744,9 @@ namespace install
     }
 
     Result Install(const DiscSource& source, const std::filesystem::path& destination,
-        const ProgressCallback& progress, const std::atomic<bool>* cancel, const Manifest& manifest)
+        const ProgressCallback& progress, const std::atomic<bool>* cancel, const Manifest& requested)
     {
+        const Manifest& manifest = SourceManifest(source, requested);
         Progress p;
         p.bytesTotal = manifest.totalBytes;
         p.filesTotal = manifest.files.size();
@@ -820,8 +873,9 @@ namespace install
     }
 
     Result Verify(const DiscSource& source, const ProgressCallback& progress, const std::atomic<bool>* cancel,
-        const Manifest& manifest)
+        const Manifest& requested)
     {
+        const Manifest& manifest = SourceManifest(source, requested);
         Progress p;
         p.bytesTotal = manifest.totalBytes;
         p.filesTotal = manifest.files.size();

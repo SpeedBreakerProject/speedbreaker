@@ -12,6 +12,7 @@
 //     projection hook widens, its corners are fitted to the view scales.
 // NFSMW_GLARE_FIT=0 leaves the glow as the game builds it (an A/B switch).
 #include <stdafx.h>
+#include <region/region.h>
 #include "glare.h"
 #include "ultrawide.h"
 
@@ -50,19 +51,19 @@ namespace
     }
 }
 
-PPC_FUNC(sub_82225730)
+SB_HOOK(sub_82225730)
 {
     const uint32_t outer = t_sunView;
     t_sunView = ctx.r4.u32;
-    __imp__sub_82225730(ctx, base);
+    SB_ORIGINAL(sub_82225730)(ctx, base);
     t_sunView = outer;
 }
 
-PPC_FUNC(sub_822251C8)
+SB_HOOK(sub_822251C8)
 {
     const uint32_t lr = static_cast<uint32_t>(ctx.lr), verts = ctx.r5.u32;
-    __imp__sub_822251C8(ctx, base);
-    if (lr != game::glare::kGlowCall || !t_sunView)
+    SB_ORIGINAL(sub_822251C8)(ctx, base);
+    if (lr != region::Addr(game::glare::kGlowCall) || !t_sunView)
         return;
     const float sx = game::AspectScaleX(), sy = game::AspectScaleY();
     const uint32_t id = PPC_LOAD_U32(t_sunView);

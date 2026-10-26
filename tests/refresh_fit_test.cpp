@@ -364,6 +364,30 @@ int main()
         CHECK(three.Describe(60, 3, false).find("(NFSMW_REFRESH_MULTIPLE)") != std::string::npos, "forced");
     }
 
+    printf("14b. Smooth Motion's rates on SteamOS and Linux (RefreshMultiple::SmoothMotionRate)\n");
+    {
+        using video::RefreshMultiple;
+        const RefreshMultiple autoMode = RefreshMultiple::FromEnv(nullptr), off = RefreshMultiple::FromEnv("0");
+        struct Row { double hz; const RefreshMultiple* p; bool want; };
+        const Row rows[] = {
+            { 119.88, &autoMode, true }, { 120, &autoMode, true }, { 89.89, &autoMode, true }, { 90, &autoMode, true },
+            { 91, &autoMode, true },
+            { 180, &autoMode, false }, { 240, &autoMode, false }, { 143.9, &autoMode, false }, { 144, &autoMode, false },
+            { 165, &autoMode, false }, { 59.94, &autoMode, false }, { 60, &autoMode, false }, { 50, &autoMode, false },
+            { 75, &autoMode, false }, { 100, &autoMode, false }, { 0, &autoMode, false }, { 300, &autoMode, false },
+            { 120, &off, false }, { 240, &off, false }, { 90, &off, true },
+        };
+        for (const Row& r : rows)
+        {
+            const int m = r.p->For(r.hz, false);
+            CHECK(RefreshMultiple::SmoothMotionRate(r.hz, m) == r.want, "%.2f Hz (multiple %d): %d, want %d", r.hz, m,
+                RefreshMultiple::SmoothMotionRate(r.hz, m), r.want);
+        }
+        // A multiple the mode doesn't have (forced): not a rate the lock holds.
+        CHECK(!RefreshMultiple::SmoothMotionRate(144, 3) && !RefreshMultiple::SmoothMotionRate(60, 2) &&
+                  !RefreshMultiple::SmoothMotionRate(180, 3), "a forced multiple, or 180 Hz's");
+    }
+
     printf("15. planted wrong configurations, each must fail a check above\n");
     {
         int caught = 0, plants = 0;

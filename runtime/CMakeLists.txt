@@ -171,6 +171,10 @@ add_custom_target(nfsmw_build_info
     VERBATIM)
 add_dependencies(SpeedBreaker nfsmw_build_info)
 
+if(SB_HAVE_PAL_ES)
+    target_link_libraries(SpeedBreaker PRIVATE NfsmwRecompPalEsLib)
+    target_compile_definitions(SpeedBreaker PRIVATE SB_PAL_ES=1)
+endif()
 target_link_libraries(SpeedBreaker PRIVATE NfsmwRecompLib XenonUtilsLite o1heap imgui SDL3::SDL3 Vulkan::Vulkan glslang::glslang glslang::glslang-default-resource-limits ${AVCODEC_LIBRARY} ${AVUTIL_LIBRARY})
 # glslang before 15 (the Steam Frame's 14) keeps the C API's SPIR-V
 # generation in its own library.

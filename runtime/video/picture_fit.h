@@ -20,6 +20,8 @@
 #include <gpu/render_scale.h>
 
 #include <cstdint>
+#include <string>
+#include <string_view>
 
 namespace video
 {
@@ -92,4 +94,23 @@ namespace video
     gpu::RenderScale NativeAuto(uint32_t sx, uint32_t sy, uint32_t regionW, uint32_t regionH, uint32_t budget);
     // AutoRenderScale's scale through NativeAuto.
     gpu::RenderScale AutoNativeScale(uint32_t regionW, uint32_t regionH, uint32_t budget);
+
+    // Split screen: the world is drawn twice a frame (two views, each with
+    // its own shadow and environment maps), into the same pixels a single
+    // view fills. A scale (Internal Resolution's, Auto's) with more host
+    // pixels than Auto's for the picture (AutoNativeScale: at most what
+    // covers the screen, within `budget`) gets Auto's while split screen
+    // lasts; one at or under it is kept. 3440x1440 at 3x: 4.031x3 (5160x2160)
+    // -> 2.6875x2 (3440x1440). tests/picture_fit_test.cpp.
+    gpu::RenderScale SplitScreenScale(gpu::RenderScale want, uint32_t regionW, uint32_t regionH, uint32_t budget);
+
+    // Settings > Video > Internal Resolution's menu text for an entry: its
+    // name ("1x", the table's label up to " (", so "1x (720p)" gives "1x")
+    // and the size it renders for the picture now, `scale` being that
+    // entry's scale for it (gpu::renderer::InternalResolutionScale): "1x
+    // (1280x800)" on a Steam Deck filled, "1.5x (1920x1200)", "1x (1280x720)"
+    // at 16:9 or with Aspect Ratio 16:9, "1x (1720x720)" on a 3440x1440
+    // ultrawide; Auto's says what Auto picked: "Auto (1280x800)".
+    // tests/resolution_label_test.cpp.
+    std::string ResolutionLabel(std::string_view label, gpu::RenderScale scale);
 }

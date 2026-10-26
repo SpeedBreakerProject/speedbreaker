@@ -60,8 +60,9 @@ namespace report::detail
     // which DbgHelp loads on a thread at startup (platform/stack.h); else the
     // recompiled functions from the generated table (PPCFuncMappings: guest
     // address -> host function) and the rest through dladdr. Built once at
-    // startup (BuildSymbols).
-    void BuildSymbols();
+    // startup (BuildSymbols), and again for the guest names when the running
+    // release changes (elf false: Linux's .symtab isn't read twice).
+    void BuildSymbols(bool elf = true);
     // "0x0000555555a0b3c4  sub_825A5B20+0x64  (SpeedBreaker+0xa0b3c4)".
     // Async-signal-safe (dladdr aside, which glibc and macOS implement
     // without allocating). A caller's frame holds a return address, which

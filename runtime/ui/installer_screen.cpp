@@ -345,6 +345,14 @@ namespace ui
             if (!gameMode)
                 return install::FolderPickerHint(false, true, false, bundle.extension() == ".app"
                     ? ShellPath(bundle / "Contents/MacOS/SpeedBreaker") : std::string("SpeedBreaker"), image);
+#elif defined(_WIN32)
+            // A Command Prompt's quoting, and SpeedBreaker.exe.
+            (void)gameMode;
+            (void)noPickerApp;
+            auto quoted = [](const std::filesystem::path& p) { return "\"" + p.string() + "\""; };
+            return std::format("The folder picker couldn't open. Install from a Command Prompt instead: {} --install {} "
+                "--dest <folder>", bundle.empty() ? std::string("SpeedBreaker.exe") : quoted(bundle / "SpeedBreaker.exe"),
+                source.empty() ? std::string("<image>") : quoted(source));
 #endif
             return install::FolderPickerHint(gameMode, false, noPickerApp, launcher, image);
         }
@@ -409,15 +417,20 @@ namespace ui
             uint64_t access = 0;  // once abandoned: the grant the thread gives back
             install::Result result;
             std::unique_ptr<install::DiscSource> source;
+            const install::Manifest* manifest = &install::GameManifest();  // the region the source is
 
             static std::shared_ptr<CheckJob> Start(const std::filesystem::path& path)
             {
                 auto job = std::make_shared<CheckJob>();
                 std::thread([job, path] {
                     std::unique_ptr<install::DiscSource> opened;
+                    const install::Manifest* manifest = &install::GameManifest();
                     install::Result r = install::OpenDiscSource(path, opened);
                     if (r.Ok())
-                        r = install::CheckSource(*opened);
+                    {
+                        manifest = &install::SourceManifest(*opened);
+                        r = install::CheckSource(*opened, *manifest);
+                    }
                     uint64_t release = 0;
                     {
                         std::lock_guard lock(job->mutex);
@@ -430,7 +443,12 @@ namespace ui
                         else
                         {
                             if (r.Ok())
+                            {
                                 job->source = std::move(opened);
+                                job->manifest = manifest;
+                                fprintf(stderr, "[installer] %s: %.*s\n", path.string().c_str(), int(manifest->regionName.size()),
+                                    manifest->regionName.data());
+                            }
                             job->result = std::move(r);
                         }
                     }
@@ -459,6 +477,7 @@ namespace ui
         std::shared_ptr<CheckJob> check;
         std::future<install::Result> task;
         std::unique_ptr<install::DiscSource> source;
+        const install::Manifest* sourceManifest = &install::GameManifest();  // the region `source` is
         std::filesystem::path sourcePath;
         // iOS: the Files app's grant to read sourcePath, when it was picked
         // outside SpeedBreaker's folder. Held while anything may still read
@@ -471,8 +490,8 @@ namespace ui
 
         // Where to install: internal storage or a removable drive, each
         // checked (space, permissions) when the Confirm page opens, then
-        // (not on iOS, whose app keeps the game in its own storage, nor yet
-        // on Windows: install/placement.h) a folder the player picks.
+        // (not on iOS, whose app keeps the game in its own storage) a folder
+        // the player picks.
         struct Destination
         {
             install::InstallDestination where;  // the custom entry's path: where in the picked folder the game goes
@@ -480,7 +499,25 @@ namespace ui
             install::DestinationInfo info;
             bool custom = false;                // "Choose a folder..."
             install::FolderChoice choice;       // custom, once a folder is picked
+            // The folder held another region's install, which this disc would
+            // replace: the game goes beside it (install::KeepOtherRegion), and
+            // the Confirm page says so.
+            std::string regionNote;
         };
+
+        // A destination's game folder holding another region's install:
+        // moved beside it, with the line that says so.
+        void KeepOtherRegion(Destination& d)
+        {
+            install::RegionKeep keep = install::KeepOtherRegion(d.where.path, *sourceManifest);
+            if (!keep.kept)
+                return;
+            d.regionNote = install::RegionKeepNote(keep, *sourceManifest, HomeRelative(keep.keptDir), HomeRelative(keep.gameDir));
+            d.where.path = keep.gameDir;
+            fprintf(stderr, "[installer] %s holds the %.*s install: the %.*s disc goes to %s instead\n", keep.keptDir.string().c_str(),
+                int(keep.kept->regionName.size()), keep.kept->regionName.data(), int(sourceManifest->regionName.size()),
+                sourceManifest->regionName.data(), keep.gameDir.string().c_str());
+        }
         std::vector<Destination> destinations;
         size_t chosen = 0;
 
@@ -508,9 +545,19 @@ namespace ui
                 d.check.error = install::Error::DestinationNotWritable;  // nothing chosen yet (not shown as an error)
                 return d;
             }
-            d.choice = customExact ? install::CheckExactFolder(*customFolder, false) : install::CheckPickedFolder(*customFolder);
+            d.choice = customExact ? install::CheckExactFolder(*customFolder, false, *sourceManifest)
+                                   : install::CheckPickedFolder(*customFolder, *sourceManifest);
             d.where.label = customExact ? "Folder chosen last time" : "Chosen folder";
             d.where.path = d.choice.gameDir;
+            // A picked folder holding another region's install: beside it,
+            // with the exact folder's checks there.
+            KeepOtherRegion(d);
+            if (!d.regionNote.empty())
+            {
+                const std::filesystem::path picked = d.choice.picked;
+                d.choice = install::CheckExactFolder(d.where.path, false, *sourceManifest);
+                d.choice.picked = picked;
+            }
             d.check = d.choice.result;
             d.info = d.choice.info;
             return d;
@@ -522,15 +569,20 @@ namespace ui
             for (auto& where : install::InstallDestinations())
             {
                 Destination d{ where };
-                d.check = install::CheckDestination(where.path, &d.info);
+                KeepOtherRegion(d);
+                d.check = install::CheckDestination(d.where.path, &d.info, *sourceManifest);
                 destinations.push_back(std::move(d));
             }
             std::optional<std::filesystem::path> recorded = install::RecordedInstallPath();
-#if !(defined(__APPLE__) && TARGET_OS_IOS) && !defined(_WIN32)
+#if !(defined(__APPLE__) && TARGET_OS_IOS)
             // A folder chosen last time (not internal storage or a drive's
             // own folder) comes back as the chosen folder, as it is. The same
             // folder however it was spelled (`--dest dir/`, or through a link).
-            if (!customFolder && recorded && std::none_of(destinations.begin(), destinations.end(),
+            // Not when it holds another region's install (the other disc's
+            // own folder): that isn't where this disc goes.
+            const install::Manifest* recordedRegion = recorded ? install::InstalledRegion(*recorded) : nullptr;
+            if (!customFolder && recorded && (!recordedRegion || recordedRegion == sourceManifest)
+                && std::none_of(destinations.begin(), destinations.end(),
                     [&](const Destination& d) { return install::SameFolder(d.where.path, *recorded); }))
             {
                 customFolder = *recorded;
@@ -589,7 +641,7 @@ namespace ui
         // it can't be shown. Never waits: the answer comes in a later frame.
         void RequestFolder()
         {
-#if !(defined(__APPLE__) && TARGET_OS_IOS) && !defined(_WIN32)
+#if !(defined(__APPLE__) && TARGET_OS_IOS)
             // The system's picker is already open: A again (a controller
             // still reaches the page behind a macOS sheet) waits for it. A
             // second request would make the open one's answer a stale one,
@@ -734,6 +786,7 @@ namespace ui
                     return false;
                 result = std::move(check->result);
                 source = std::move(check->source);
+                sourceManifest = check->manifest;
             }
             check.reset();
             return true;
@@ -1142,10 +1195,11 @@ namespace ui
             ImGui::TextUnformatted("Ready to install");
             PopAccentText();
             ImGui::Spacing();
-            const auto& manifest = install::GameManifest();
             ImGui::TextDisabled("From");
             ImGui::TextWrapped("%s", HomeRelative(st.sourcePath).c_str());
-            (void)manifest;
+            // Which release it is, when more than one is supported.
+            if (install::GameManifests().size() > 1 && !st.sourceManifest->regionName.empty())
+                ImGui::TextDisabled("%.*s disc", int(st.sourceManifest->regionName.size()), st.sourceManifest->regionName.data());
             ImGui::Spacing();
             ImGui::TextDisabled("To");
             const State::Destination& dest = st.destinations[st.chosen];
@@ -1248,6 +1302,13 @@ namespace ui
                         ImGui::TextWrapped("%s", why.c_str());
                     for (const std::string& note : d.choice.notes)
                         ImGui::TextWrapped("%s", note.c_str());
+                }
+                // Beside another region's install, not over it.
+                if (!d.regionNote.empty())
+                {
+                    PushAccentText();
+                    ImGui::TextWrapped("%s", d.regionNote.c_str());
+                    PopAccentText();
                 }
                 ImGui::TextDisabled("%s needed", install::FormatSize(d.info.required).c_str());
                 if (d.info.replacing)

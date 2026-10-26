@@ -1,5 +1,6 @@
 // SpeedBreaker runtime. GPL-3.0-or-later (see COPYING). See cover_callers.h.
 #include <stdafx.h>
+#include <region/region.h>
 #include "cover_callers.h"
 
 #include <kernel/function.h>
@@ -90,8 +91,9 @@ namespace game::covers
         // The recompiled functions' guest addresses, sorted (once).
         static const std::vector<uint32_t> starts = [] {
             std::vector<uint32_t> v;
-            for (size_t i = 0; PPCFuncMappings[i].guest != 0; i++)
-                v.push_back(PPCFuncMappings[i].guest);
+            const PPCFuncMapping* const mappings = region::FuncMappings();
+            for (size_t i = 0; mappings[i].guest != 0; i++)
+                v.push_back(mappings[i].guest);
             std::sort(v.begin(), v.end());
             return v;
         }();
@@ -139,16 +141,16 @@ extern "C" PPC_FUNC(__imp__sub_824457B0);
 
 // The ePoly vertex writer (cover_callers.h): with NFSMW_LOG_COVERS=1, the
 // quad it wrote (at r3) and the return addresses above the call.
-PPC_FUNC(sub_824457B0)
+SB_HOOK(sub_824457B0)
 {
     if (!game::covers::Enabled() || !ctx.r3.u32)
     {
-        __imp__sub_824457B0(ctx, base);
+        SB_ORIGINAL(sub_824457B0)(ctx, base);
         return;
     }
     const uint32_t dest = ctx.r3.u32;
     const game::covers::Chain chain = CallChain(ctx, base);
-    __imp__sub_824457B0(ctx, base);
+    SB_ORIGINAL(sub_824457B0)(ctx, base);
     uint32_t words[16];
     for (uint32_t v = 0; v < 4; v++)
         for (uint32_t j = 0; j < 4; j++)

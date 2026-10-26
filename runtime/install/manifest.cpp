@@ -8,11 +8,21 @@ namespace install
 {
     namespace
     {
+        // One namespace per region: its files, then its MANIFEST_INFO.
 #define MANIFEST_INFO(version, titleId, count, bytes)
 #define MANIFEST_FILE(path, size, sha256) ManifestFile{ path, size, sha256 },
-        constexpr ManifestFile s_files[] = {
+        namespace usa
+        {
+            constexpr ManifestFile s_files[] = {
 #include "manifest.inc"
-        };
+            };
+        }
+        namespace pal_es
+        {
+            constexpr ManifestFile s_files[] = {
+#include "manifest_pal_es.inc"
+            };
+        }
 #undef MANIFEST_INFO
 #undef MANIFEST_FILE
 
@@ -22,30 +32,52 @@ namespace install
         constexpr size_t s_count = count; \
         constexpr uint64_t s_bytes = bytes;
 #define MANIFEST_FILE(path, size, sha256)
+        namespace usa
+        {
 #include "manifest.inc"
+        }
+        namespace pal_es
+        {
+#include "manifest_pal_es.inc"
+        }
 #undef MANIFEST_INFO
 #undef MANIFEST_FILE
 
-        constexpr uint64_t SumSizes()
+        template <size_t N>
+        constexpr uint64_t SumSizes(const ManifestFile (&files)[N])
         {
             uint64_t sum = 0;
-            for (const ManifestFile& f : s_files)
+            for (const ManifestFile& f : files)
                 sum += f.size;
             return sum;
         }
 
-        constexpr bool HasXex()
+        template <size_t N>
+        constexpr const ManifestFile* XexOf(const ManifestFile (&files)[N])
         {
-            for (const ManifestFile& f : s_files)
+            for (const ManifestFile& f : files)
                 if (f.path == "default.xex")
-                    return true;
-            return false;
+                    return &f;
+            return nullptr;
         }
 
-        // A hand-edited or truncated manifest.inc fails the build, not an install.
-        static_assert(std::size(s_files) == s_count, "manifest.inc: file count does not match MANIFEST_INFO");
-        static_assert(SumSizes() == s_bytes, "manifest.inc: sizes do not add up to MANIFEST_INFO's total");
-        static_assert(HasXex(), "manifest.inc: no default.xex entry");
+        // A hand-edited or truncated .inc fails the build, not an install.
+        static_assert(std::size(usa::s_files) == usa::s_count, "manifest.inc: file count does not match MANIFEST_INFO");
+        static_assert(SumSizes(usa::s_files) == usa::s_bytes, "manifest.inc: sizes do not add up to MANIFEST_INFO's total");
+        static_assert(XexOf(usa::s_files), "manifest.inc: no default.xex entry");
+        static_assert(std::size(pal_es::s_files) == pal_es::s_count, "manifest_pal_es.inc: file count does not match MANIFEST_INFO");
+        static_assert(SumSizes(pal_es::s_files) == pal_es::s_bytes, "manifest_pal_es.inc: sizes do not add up to MANIFEST_INFO's total");
+        static_assert(XexOf(pal_es::s_files), "manifest_pal_es.inc: no default.xex entry");
+        // The regions are told apart by default.xex (hash, or size where no
+        // hashing is done) and by the version an install's marker records.
+        static_assert(XexOf(usa::s_files)->sha256 != XexOf(pal_es::s_files)->sha256, "two regions with one default.xex");
+        static_assert(XexOf(usa::s_files)->size != XexOf(pal_es::s_files)->size, "two regions' default.xex of one size");
+        static_assert(usa::s_version != pal_es::s_version, "two regions with one manifest version");
+
+        constexpr Manifest s_usa{ usa::s_version, usa::s_titleId, usa::s_files, usa::s_bytes, "usa", "USA" };
+        constexpr Manifest s_palEs{ pal_es::s_version, pal_es::s_titleId, pal_es::s_files, pal_es::s_bytes, "pal-es",
+            "Europe (PAL, Spanish)" };
+        constexpr const Manifest* s_manifests[] = { &s_usa, &s_palEs };
 
         char Lower(char c)
         {
@@ -80,7 +112,43 @@ namespace install
 
     const Manifest& GameManifest()
     {
-        static const Manifest manifest{ s_version, s_titleId, s_files, s_bytes };
-        return manifest;
+        return s_usa;
+    }
+
+    std::span<const Manifest* const> GameManifests()
+    {
+        return s_manifests;
+    }
+
+    bool IsGameManifest(const Manifest& manifest)
+    {
+        for (const Manifest* m : s_manifests)
+            if (m == &manifest)
+                return true;
+        return false;
+    }
+
+    const Manifest* ManifestForXexHash(std::string_view sha256)
+    {
+        for (const Manifest* m : s_manifests)
+            if (m->Xex().sha256 == sha256)
+                return m;
+        return nullptr;
+    }
+
+    const Manifest* ManifestForXexSize(uint64_t size)
+    {
+        for (const Manifest* m : s_manifests)
+            if (m->Xex().size == size)
+                return m;
+        return nullptr;
+    }
+
+    const Manifest* ManifestForVersion(std::string_view version)
+    {
+        for (const Manifest* m : s_manifests)
+            if (m->version == version)
+                return m;
+        return nullptr;
     }
 }

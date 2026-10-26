@@ -30,6 +30,7 @@
 // the crash broke it, PPCFuncMappings names the recompiled functions and the
 // RtlVirtualUnwind walk below gives the frames.
 #include <stdafx.h>
+#include <region/region.h>
 #include "report.h"
 #include "internal.h"
 #include "crash_marker.h"
@@ -304,17 +305,21 @@ namespace report
 
     namespace detail
     {
-        void BuildSymbols()
+        void BuildSymbols(bool elf)
         {
 #ifdef __linux__
-            std::thread(LoadElfSymbols).detach();
+            if (elf)
+                std::thread(LoadElfSymbols).detach();
+#else
+            (void)elf;
 #endif
             std::vector<GuestSymbol> symbols;
-            for (size_t i = 0; PPCFuncMappings[i].guest != 0; i++)
-                if (PPCFuncMappings[i].host != nullptr)
+            const PPCFuncMapping* const mappings = region::FuncMappings();
+            for (size_t i = 0; mappings[i].guest != 0; i++)
+                if (mappings[i].host != nullptr)
                 {
-                    uintptr_t entry = reinterpret_cast<uintptr_t>(PPCFuncMappings[i].host), body = FollowJump(entry);
-                    symbols.push_back({ body, uint32_t(PPCFuncMappings[i].guest), body != entry });
+                    uintptr_t entry = reinterpret_cast<uintptr_t>(mappings[i].host), body = FollowJump(entry);
+                    symbols.push_back({ body, uint32_t(mappings[i].guest), body != entry });
                 }
             std::sort(symbols.begin(), symbols.end(), [](const GuestSymbol& a, const GuestSymbol& b) { return a.host < b.host; });
             symbols.erase(std::unique(symbols.begin(), symbols.end(), [](const GuestSymbol& a, const GuestSymbol& b) { return a.host == b.host; }),
@@ -484,6 +489,11 @@ namespace report
                 out.Str("  (").Str(BaseName(info.dli_fname)).Str("+0x").Hex(shown - reinterpret_cast<uintptr_t>(info.dli_fbase)).Char(')');
 #endif
         }
+    }
+
+    void RefreshGuestSymbols()
+    {
+        detail::BuildSymbols(false);
     }
 
     void PrepareCrashReports()

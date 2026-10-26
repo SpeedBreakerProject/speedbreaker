@@ -102,6 +102,13 @@ namespace settings
         // to the screen); elsewhere the window's size is the player's.
         constexpr bool kPresentScaleHidden = !kFullscreenHidden;
 
+        // Smooth Motion's description: the screens it draws for (video::HfrOffered).
+#if defined(__APPLE__)
+        constexpr const char* kSmoothMotionDescription = "Up to 120 fps on a 120 Hz screen (ProMotion): the game still runs at 60 steps a second, and a picture between each two is drawn from the poses either side. A little more delay and power. Heavy scenes drop to an even 60 for a while; off at 30 fps.";
+#else
+        constexpr const char* kSmoothMotionDescription = "Up to 120 fps on a 120 Hz screen, or 90 on a 90 Hz one (not on a Steam Deck): the game still runs at 60 steps a second, and a picture between each two is drawn from the poses either side. A little more delay and power. Heavy scenes drop to an even 60 for a while; off at 30 fps and with variable refresh.";
+#endif
+
         // Settings > Game > Language: game/language.h's table, in its order.
         constexpr auto kLanguageEntries = [] {
             std::array<EnumEntry, std::size(game::language::kLanguages)> entries {};
@@ -235,7 +242,7 @@ namespace settings
             // game's command buffers are sized for it when its device is made.
             { .id = Id::SmoothMotion, .category = Category::Display, .type = Type::Bool, .apply = Apply::Restart,
               .table = "video", .key = "smooth_motion", .label = "Smooth Motion",
-              .description = "Up to 120 fps on a 120 Hz screen (ProMotion): the game still runs at 60 steps a second, and a picture between each two is drawn from the poses either side. A little more delay and power. Heavy scenes drop to an even 60 for a while; off at 30 fps.",
+              .description = kSmoothMotionDescription,
               .env = "NFSMW_HFR", .defaultValue = 0 },
             { .id = Id::PresentScale, .category = Category::Display, .type = Type::Enum, .apply = Apply::Live, .hidden = kPresentScaleHidden,
               .table = "video", .key = "present_scale", .label = "Screen Resolution",
@@ -440,7 +447,7 @@ namespace settings
             // Game
             { .id = Id::GameLanguage, .category = Category::Game, .type = Type::Enum, .apply = Apply::Restart, .hidden = kLanguageHidden,
               .table = "game", .key = "language", .label = "Language",
-              .description = "The language of the game's menus and race text: English (the USA disc's), or French, German, Italian, Spanish, Dutch, Swedish, Danish, Polish or Finnish, from the same disc's files. The movies and the speech stay in English, as the disc has them.",
+              .description = "The language of the game's menus and race text: English (the USA disc's), or French, German, Italian, Spanish, Dutch, Swedish, Danish, Polish or Finnish, from the same disc's files. The movies and the speech stay in English, as the disc has them. The European (PAL) Spanish disc has Spanish movies and speech, and starts in Spanish; another language there keeps them in Spanish.",
               .env = "NFSMW_LANGUAGE", .defaultValue = double(game::language::kEnglish), .entries = kLanguageEntries },
         };
         static_assert(std::size(kOptions) == kCount, "one row per settings::Id");

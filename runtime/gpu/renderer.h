@@ -19,6 +19,8 @@
 // State translation follows Xenia (BSD): draw_util.cc (viewport, scissor,
 // resolve rectangles) and the Vulkan backend's pipeline cache.
 #pragma once
+#include <gpu/render_scale.h>
+
 #include <cstdint>
 #include <cstdlib>
 #include <atomic>
@@ -140,6 +142,13 @@ namespace gpu::renderer
     void PublishPerfNumbers(const PerfNumbers& numbers);
     // At exit: persist caches.
     void Shutdown();
+    // The scale Settings > Video > Internal Resolution's `setting` (an
+    // entry's value; kResolutionAuto: Auto) renders a picture covering
+    // regionW x regionH with (video::FrameRegion): what the renderer would
+    // take for it, native rows and columns, Auto's budget and Smooth Motion
+    // included; NFSMW_RENDER_SCALE's for every entry while it is set. For
+    // the menu's labels (video::ResolutionLabel). Any thread.
+    gpu::RenderScale InternalResolutionScale(int32_t setting, uint32_t regionW, uint32_t regionH);
     // GLSL to SPIR-V (glslang, through the shader disk cache): stage 0
     // vertex, 1 fragment, 2 compute. Empty on failure, with `log` set.
     std::vector<uint32_t> CompileShader(const std::string& glsl, int stage, std::string& log);

@@ -131,6 +131,10 @@ namespace ui
     void OpenSettings();
     void CloseSettings();  // saves any change
     bool SettingsOpen();
+    // As F1 (Cmd+, on macOS) does: opens the settings menu or closes it, but
+    // not while one of its own dialogs is up. For the macOS menu bar's
+    // SpeedBreaker > Settings... (platform/apple/macos_window.mm).
+    void ToggleSettings();
 
     // Screens (settings_menu.cpp, perf_overlay.cpp, installer_screen.cpp).
     void DrawSettings();

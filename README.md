@@ -68,13 +68,16 @@ and a settings menu you can open mid-race.
   own resolution: a Steam Deck renders 1280x800 at 1x, pixel for pixel.
 - **Up to 60 fps,** locked to your 60 Hz display. You can also pick a steady 30 at full game
   speed, or *Auto*, which drops to 30 only while a device is hot or can't hold 60. On a Mac with
-  a 120 Hz screen, *Smooth Motion* draws up to 120 fps (off by default).
+  a 120 Hz screen, and on a SteamOS or Linux PC with a 120 Hz or 90 Hz one, *Smooth Motion* draws
+  up to 120 fps (off by default; not on the Steam Deck).
 - **Two-player split screen** (Quick Race > Split Screen), with two controllers.
 - **USB steering wheels (experimental).** Tested with a Logitech G29 on a Mac, force feedback
   included; the steering feel is still being tuned.
+- **Two discs: USA and European (PAL) Spanish.** One app plays either; the PAL disc brings its
+  Spanish movies and police radio, and installs beside a USA install, each with its own saves.
 - **Ten languages.** English, French, German, Italian, Spanish, Dutch, Swedish, Danish, Polish
-  and Finnish, from the USA disc's own text (Settings > Game > Language). The movies and the
-  speech stay in English, as on the USA disc.
+  and Finnish, from the disc's own text (Settings > Game > Language). On the USA disc the movies
+  and the speech stay in English; on the PAL disc they're Spanish.
 - **The sun glare is back.** The low sun glows in open sky and fades behind buildings, as it did
   on the console.
 - **The original look:** sunlit roads and shadows as on the console, the picture a real Xbox 360
@@ -124,7 +127,7 @@ belongs to its owners.</sub>
 | **Linux** (x86-64) | [Download][dl-steamos-x86_64] the x86-64 SteamOS build, `SpeedBreaker-steamos-x86_64.tar.xz`, or [build from source](#building-from-source) | Tested here on SteamOS. Players reported v0.1.1 working on Fedora 44 (GeForce GTX 1080 Ti) and Ubuntu 24.04 (Intel Arc 140T). Other setups: reports welcome. |
 | **Mac** (Apple silicon) | [Download][dl-macos]<br>`SpeedBreaker-macos.dmg` | MacBook Pro (M1 Pro) on macOS 27 and Mac Studio (M4 Max) on macOS 26; macOS 15.6 (Sequoia) in a virtual machine. There is no Intel Mac build. |
 | **iPhone** and **iPad** | [Sideload the IPA](#iphone-and-ipad) (experimental), `SpeedBreaker-<version>-ios.ipa` on the [release page][releases], or [build it yourself](#iphone-and-ipad) with Xcode | iPhone 15 Pro Max and iPhone 18 Pro Max (iOS 27). iPad Pro 12.9-inch (M2, iPadOS 27) with a Backbone Pro. Not on the App Store. Those were Xcode-signed builds: the IPA itself hasn't been installed on a device yet. |
-| **Windows** (beta) | [Download][all-releases] `SpeedBreaker-0.1.9-windows-x64-beta.zip` from the Releases page; see [Windows (beta)](#windows-beta) | A laptop with Intel UHD Graphics (60 Hz). NVIDIA, AMD and recent Intel Arc graphics and 120/144 Hz monitors haven't been tested yet: [reports welcome](#reporting-a-bug). |
+| **Windows** (beta) | [Download][all-releases] `SpeedBreaker-0.2.0-windows-x64-beta.zip` from the Releases page; see [Windows (beta)](#windows-beta) | A laptop with Intel UHD Graphics (60 Hz). NVIDIA, AMD and recent Intel Arc graphics and 120/144 Hz monitors haven't been tested yet: [reports welcome](#reporting-a-bug). |
 | **Android** | Coming soon | |
 
 Each link downloads the newest release. Every file and its `.sha256` checksum file are on the
@@ -135,12 +138,14 @@ should say OK. What changed in each release is in [CHANGELOG.md](CHANGELOG.md).
 
 ### System requirements
 
-- **Everyone:** a disc image of your own **USA (NTSC-U) Xbox 360 disc** (see
+- **Everyone:** a disc image of your own Xbox 360 disc, the **USA (NTSC-U)** release or the
+  **European (PAL) release with Spanish movies and speech** (see
   [Quick start](#quick-start)), about **7.2 GB** of free space, and a display running at about
   **60 Hz** (or 120 Hz, 180 Hz or 240 Hz on SteamOS and Linux).
 - **Split screen:** two controllers.
 - **Smooth Motion** (up to 120 fps): a Mac with a 120 Hz screen (a ProMotion MacBook Pro or a
-  120 Hz monitor). Not yet on SteamOS, Linux, iPhone or iPad.
+  120 Hz monitor), or a SteamOS or Linux PC (such as a Steam Machine) with a 120 Hz or 90 Hz
+  screen. Not on the Steam Deck (it stays at a steady 60), nor yet on Windows, iPhone or iPad.
 - **Steering wheels (experimental):** a USB wheel on a Mac, SteamOS or Linux. The Logitech G29
   is the one tested (on a Mac). Force feedback works on a Mac with the G29 in its PS3 position,
   the G27, G25, Driving Force GT and Pro; not yet a G29 in its PS4 position, a G920 or a G923,
@@ -161,8 +166,8 @@ should say OK. What changed in each release is in [CHANGELOG.md](CHANGELOG.md).
 
 ## Quick start
 
-1. **Back up your own disc.** SpeedBreaker supports one version of the game: the **USA (NTSC-U,
-   English) Xbox 360 disc**. The installer takes a full `.iso`, a trimmed XISO, or a folder with
+1. **Back up your own disc.** SpeedBreaker supports two versions of the game: the **USA (NTSC-U,
+   English) Xbox 360 disc** and the **European (PAL) disc with Spanish movies and speech**. The installer takes a full `.iso`, a trimmed XISO, or a folder with
    the extracted disc files. No title update is needed. SpeedBreaker doesn't provide game files
    or disc images, or link to them.
 2. **Get SpeedBreaker.** [Download it](#download) for Steam Deck, Steam Machine and Steam Frame
@@ -302,7 +307,7 @@ its name>`, e.g. `NFSMW_GPU=intel %command%` in Steam's launch options.
 ### Windows (beta)
 
 The Windows version is a **beta**: so far it has been tested on one laptop with Intel UHD
-Graphics and a 60 Hz screen. Download `SpeedBreaker-0.1.9-windows-x64-beta.zip` from the
+Graphics and a 60 Hz screen. Download `SpeedBreaker-0.2.0-windows-x64-beta.zip` from the
 [Releases page][all-releases], right-click it, choose **Extract All**, and double-click
 `SpeedBreaker.exe` in the extracted folder (not inside the zip). SpeedBreaker isn't signed, so
 Windows may say **"Windows protected your PC"**: click **More info**, then **Run anyway**.
@@ -399,7 +404,8 @@ is B, Square is X and Triangle is Y.
   time. The keyboard always works as well.
 - **Split screen** (Quick Race > Split Screen): the second controller joins at "Player 2 press
   START" and drives the second half of the screen. If a player's controller disconnects, the
-  game pauses and says so until it's back.
+  game pauses and says so until it's back. It renders at most what Internal Resolution's Auto
+  would for your screen, so it holds 60 fps; single player keeps your setting.
 - **A steering wheel** (experimental) is used instead of a controller while both are plugged in:
   the wheel steers, the pedals are the throttle and the brake, the paddles shift gears, and the
   menus work from its D-pad, Cross (A) and Circle (B). On a G29, Share + Options opens the
@@ -444,7 +450,7 @@ switcher).
 | Fullscreen | On / Off | Off: a 1280x720 window you can resize. The game always starts as set here; on a Mac, the window's green button switches only until you quit, and the row then says NOW FULLSCREEN or NOW WINDOWED. Always on in SteamOS Game Mode. Not shown on iPhone and iPad, which are always full screen. |
 | V-Sync | On / Off | On. Off can tear, but shows frames sooner. |
 | Frame Rate | Auto / 60 fps / 30 fps | 60 fps on most devices. 30 fps keeps the game at full speed. Auto runs at 60, or at a steady 30 while the device is hot or can't hold 60. |
-| Smooth Motion | On / Off | Off. On a Mac with a 120 Hz screen: up to 120 fps. The game still runs at 60 steps a second, as on the console, and draws one more picture between each two; the controls answer a few milliseconds later. Heavy scenes ease off, down to an even 60 for a while. Takes effect the next time the game starts. Shown only where it works. |
+| Smooth Motion | On / Off | Off. On a Mac with a 120 Hz screen: up to 120 fps; on a SteamOS or Linux PC, 120 fps at 120 Hz and 90 at 90 Hz (it drops to an even 60 whenever pictures can't be shown on time; not on the Steam Deck). The game still runs at 60 steps a second, as on the console, and draws one more picture between each two; the controls answer a few milliseconds later. Heavy scenes ease off, down to an even 60 for a while. Takes effect the next time the game starts. Shown only where it works. |
 | Screen Resolution | Full / 75% | Full. iPhone and iPad only: 75% is slightly softer and saves graphics work. |
 | Aspect Ratio | Fill Screen / 16:9 | Fill Screen: wider screens get a wider view; 4:3, 3:2 and 16:10 screens (the Steam Deck, many Macs) a taller one. Since v0.1.9 the game renders the screen's own shape: a Steam Deck draws 1280x800 at 1x, a 1920x1200 screen 1920x1200 at 1.5x. 16:9 always shows the classic picture with bars. |
 | Brightness | -5 to +5 | 0, the picture as it is. Each step makes the shadows and mid-tones a little lighter or darker, like a TV's brightness; black and white stay put, and the menus never change. |
@@ -463,11 +469,12 @@ then Yes, puts it back.
 | Sharpening | 0.00 to 1.00 | 0.30 (0 turns it off). With FSR 1, the share of its sharpening pass's full strength. |
 | Anisotropic Filtering | Auto / Off / 2x / 4x / 8x / 16x / Original | Auto: 16x on dedicated graphics cards and M-series iPads, 4x elsewhere. Original uses each texture's own setting, as on the 360. |
 | Mipmaps | On / Off | On, so distant textures don't shimmer |
-| Internal Resolution | Auto / 1x (720p) / 1.5x (1080p) / 2x (1440p) / 3x (2160p) | Sun shadows follow this setting, capped at 2x. Auto: enough to cover your screen, within what the device can afford: the screen's own shape when that fits (a Steam Deck's 1280x800), otherwise whole scales (1x, 2x, 3x, or 3x2 on an ultrawide). On iPhone and iPad, Auto always picks 1x. With Fill Screen, the rows count the screen's shape: 1x on a 16:10 screen is 1280x800. |
+| Internal Resolution | Auto / 1x / 1.5x / 2x / 3x | Each entry shows the size it renders on your screen (1x (1280x720) on a 16:9 screen, 1x (1280x800) on a Steam Deck with Fill Screen), and Auto the one it picked. Sun shadows follow this setting, capped at 2x. Auto: enough to cover your screen, within what the device can afford: the screen's own shape when that fits (a Steam Deck's 1280x800), otherwise whole scales (1x, 2x, 3x, or 3x2 on an ultrawide). On iPhone and iPad, Auto always picks 1x. With Fill Screen, the rows count the screen's shape: 1x on a 16:10 screen is 1280x800. |
 
 **Game:** Language (English): French, German, Italian, Spanish, Dutch, Swedish, Danish, Polish or
 Finnish switch the menus and the race text (European languages show km/h) the next time the game
-starts. The text comes from the USA disc's own files; the movies and the speech stay in English.
+starts. The text comes from the disc's own files; the movies and the speech stay in the disc's
+language (English on the USA disc, Spanish on the PAL one). The PAL disc starts in Spanish.
 The line under the row says what your installed files give the language you choose. Not shown on
 iPhone and iPad.
 
@@ -528,14 +535,17 @@ No. No game files are included or distributed. You install the game from your ow
 your own disc, and SpeedBreaker checks it file by file.
 
 **Which version of the game do I need?**
-The Xbox 360 **USA release (NTSC-U, English)**. The installer checks your image and tells you if
-it's a different version. PAL and Japanese discs and re-releases haven't been tested, so expect
-the installer to refuse them. The USA disc already holds the game's text in nine more languages:
-pick one in Settings > Game > Language. Games on Demand packages aren't supported, and no title update is
+The Xbox 360 **USA release (NTSC-U, English)** or the **European (PAL) release with Spanish
+movies and speech** (since v0.2.0). The installer checks your image and tells you which one it
+found, or that it's a different version. Other PAL discs (German and the rest), Japanese discs and
+re-releases have different code, so the installer refuses them for now. Installing one disc
+beside the other keeps both installs. Both discs hold the game's text in ten languages: pick one
+in Settings > Game > Language. Games on Demand packages aren't supported, and no title update is
 used.
 
 **Does it work with the PC version of the game?**
-No. SpeedBreaker is built from the Xbox 360 version and installs only from the Xbox 360 USA disc.
+No. SpeedBreaker is built from the Xbox 360 version and installs only from the Xbox 360 USA or
+European (PAL) Spanish disc.
 PC copies of *Most Wanted*, including the Black Edition, aren't supported.
 
 **Is this an emulator?**
@@ -552,7 +562,7 @@ No. Xbox 360 saves can't be imported, so your career starts fresh.
 **The installer refused my image. Why?**
 It always says what to do. The usual causes:
 
-- *Another game, or an unsupported version:* it isn't the USA disc.
+- *Another game, or an unsupported version:* it isn't the USA or the European (PAL) Spanish disc.
 - *Truncated image:* most often a copy cut off at 4 GB by a FAT32 drive. Copy it again from your
   own backup, onto a drive that can hold files over 4 GB.
 - *Not a disc image,* a Games on Demand package, or a video-only DVD image.
@@ -625,7 +635,7 @@ SpeedBreaker folder instead: `data/`, `data/game` and `cache/`.
 2. A notice says where the zip file went: your **Desktop** (on SteamOS, pick it up in Desktop
    Mode, or in the Desktop app on a Steam Frame), the **SpeedBreaker** folder in the Files app on
    iPhone and iPad, or the data folder above when there is no Desktop. Its name says which
-   version you were running, for example `speedbreaker-bug-report-v0.1.9-<date>_<time>.zip`.
+   version you were running, for example `speedbreaker-bug-report-v0.2.0-<date>_<time>.zip`.
 3. Open an [issue][issues], attach the zip, and say what you were doing, what you expected, what
    happened, and roughly how long into the session it happened.
 
@@ -641,7 +651,12 @@ pull requests are handled.
   connected by USB through its own controller framework, which never runs the motors. Pair it
   over Bluetooth for rumble (a DualSense rumbles either way). The game says so once.
 - **Languages:** the movies and the speech (the police radio, the voices in the scenes) stay in
-  English in every language, as the USA disc has them. Fan translations aren't supported.
+  the disc's language in every language: English on the USA disc, Spanish on the PAL one. Fan
+  translations aren't supported.
+- **Discs:** only the USA and the European (PAL) Spanish discs install; German and the other PAL
+  discs are still to come.
+- **Smooth Motion on SteamOS and Linux:** offered only at 120 Hz and 90 Hz, and not on the Steam
+  Deck, where busy scenes can't keep up and it would ghost.
 - **Steering wheels are experimental:** the steering feel is still being tuned; see
   [Settings](#settings).
 
@@ -755,6 +770,15 @@ shasum -a 256 game/files/default.xex
 # Translate the game's code into C++ (writes ppc/).
 mkdir -p ppc
 tools/XenonRecomp/build/XenonRecomp/XenonRecomp config/nfsmw.toml tools/XenonRecomp/XenonUtils/ppc_context.h
+
+# Optional, for the European (PAL) Spanish disc too: its own code, beside the USA's (the build
+# links it when ppc-pal-es/ is there; -DSB_PAL_ES=OFF leaves it out and refuses that disc).
+mkdir -p game/files-pal-es ppc-pal-es
+tools/extract-xiso/build/extract-xiso -d game/files-pal-es -x /path/to/your-pal-backup.iso
+shasum -a 256 game/files-pal-es/default.xex
+# must print aad15fc218d034de3131f746e0b763dd8049a40dd676efc87667fcaf4fc72694
+tools/XenonRecomp/build/XenonRecomp/XenonRecomp config/pal-es/nfsmw.toml tools/XenonRecomp/XenonUtils/ppc_context.h
+python3 scripts/region_ppc.py ppc-pal-es pal_es
 ```
 
 #### 3. Build
