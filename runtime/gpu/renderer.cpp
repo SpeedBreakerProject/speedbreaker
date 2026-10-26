@@ -5366,6 +5366,7 @@ void main()
             // (r + the tile shift), which its host pixels count from.
             uint32_t denX, denY;
             int32_t srcGuestX, srcGuestY;
+            uint32_t scaledScaleX, scaledScaleY, scaledDenX, scaledDenY;
             // Also store into a cached direct texture (binding 4), as its
             // untile would have from the words (see Resolve); texX, texY:
             // where the destination's texel 0,0 is in it (NFSMW_FUSE_PARTIAL,
@@ -5407,6 +5408,7 @@ layout(push_constant) uniform P
     uint scaledWrite, slotWords;
     uvec2 den;          // a texel axis's denominator (SB_TEXEL_X, SB_TEXEL_Y)
     ivec2 srcGuest;     // the rectangle's first pixel in the source target, guest pixels (texel axes)
+    uvec2 scaledScale, scaledDen;
     uint texWrite, texEndian, texConvert, texWidth, texHeight;  // also into a cached texture (binding 4)
 #ifdef TEX_OFFSET
     uint texX, texY;    // the destination's texel 0,0 in it (whole tiles)
@@ -5603,108 +5605,155 @@ void main()
     uint w;
     if (bl == 2u && p.scaledWrite != 0u)
     {
-        // Each host sample this guest pixel owns into its block's place in
-        // the page's scaled slot (see ScaledMemory, gpu/render_scale.h): at a
-        // whole scale all its sx x sy, at 1.5x one, two or four of its 2x2
-        // block's 3x3, from where its texel sits in the block (its word's
-        // bits 0 and 2; the rectangle's origin is even, so gx and gy agree).
-        uint a = word << 2;
-        uint slot = inside ? s_table[a >> 12] : 0u;
-#ifdef SB_TEXEL
-        // With a texel axis: on it, all the texel's stride of samples (the
-        // ones it owns, then its last again), from its own place in the
-        // source target; on a block axis as below, from the block's corner.
-        uvec2 n = TEXEL_NUM, d = texelDen();
-        uint sX = sbStride(n.x, d.x);
-        uint s = sX * sbStride(n.y, d.y);  // samples a block
-        uint k = (a & 4095u) >> 2;
-        uint o = (slot - 1u) * p.slotWords + sbBlockIndex(k, d.x, d.y) * s;
-        uint subX = sbSubX(k, d.x), subY = sbSubY(k, d.y);
-        uint i0 = sbSampleLo(subX, n.x, d.x), i1 = sbSampleHi(subX, n.x, d.x);
-        uint j0 = sbSampleLo(subY, n.y, d.y), j1 = sbSampleHi(subY, n.y, d.y);
-        uvec2 g = uvec2(p.srcGuest) + uvec2(gx, gy);
-#else
-        uint sX = p.scale.x;
-        uint s = p.scale.x * p.scale.y;  // samples a block
-        uint k = (a & 4095u) >> 2;
-        uint o = (slot - 1u) * p.slotWords + sbBlockIndex(k, kDen.x, kDen.y) * s;
-        uint subX = sbSubX(k, kDen.x), subY = sbSubY(k, kDen.y);
-        uint i0 = sbHostEdge(subX, p.scale.x, kDen.x), i1 = sbHostEdge(subX + 1u, p.scale.x, kDen.x);
-        uint j0 = sbHostEdge(subY, p.scale.y, kDen.y), j1 = sbHostEdge(subY + 1u, p.scale.y, kDen.y);
-#endif
-#ifdef COALESCED
-        uint lb = sbBlockIndex(l, kDen.x, kDen.y);  // the block's in this group (l is the word order)
-#endif
-#ifdef SCALED_FUSE
-        uint tx = x + p.hostX, ty = y + p.hostY;  // the texel in the cached scaled texture
-#endif
-        if (slot != 0u)
+        // Shadow targets cap at 2x; map their samples onto the pool's higher
+        // scale so texture loads still use the common scaled-memory layout.
+        if (any(notEqual(p.scale, p.scaledScale)) || any(notEqual(p.den, p.scaledDen)))
         {
-#ifndef SB_TEXEL
-            ivec2 c0 = p.srcOrigin + ivec2(sbHostEdge(gx, p.scale.x, kDen.x), sbHostEdge(gy, p.scale.y, kDen.y)) - ivec2(i0, j0);
-#endif
-            for (uint j = j0; j < j1; j++)
-                for (uint i = i0; i < i1; i++)
-                {
-#ifdef SB_TEXEL
-                    ivec2 c = ivec2(sbSampleHost(g.x, subX, i, n.x, d.x), sbSampleHost(g.y, subY, j, n.y, d.y));
-#else
-                    ivec2 c = c0 + ivec2(i, j);
-#endif
-                    vec4 v = texelFetch(src, clamp(c, ivec2(0), ivec2(p.srcSize) - 1), 0);
-                    if ((p.flags & 2u) == 0u)
+            uint a = word << 2;
+            uint slot = inside ? s_table[a >> 12] : 0u;
+            uint sX = sbStride(p.scaledScale.x, p.scaledDen.x);
+            uint s = sX * sbStride(p.scaledScale.y, p.scaledDen.y);
+            uint k = (a & 4095u) >> 2;
+            uint o = (slot - 1u) * p.slotWords + sbBlockIndex(k, p.scaledDen.x, p.scaledDen.y) * s;
+            uint outSubX = sbSubX(k, p.scaledDen.x), outSubY = sbSubY(k, p.scaledDen.y);
+            uint outI0 = sbSampleLo(outSubX, p.scaledScale.x, p.scaledDen.x);
+            uint outI1 = sbSampleHi(outSubX, p.scaledScale.x, p.scaledDen.x);
+            uint outJ0 = sbSampleLo(outSubY, p.scaledScale.y, p.scaledDen.y);
+            uint outJ1 = sbSampleHi(outSubY, p.scaledScale.y, p.scaledDen.y);
+            uint srcSubX = sbSubX(k, p.den.x), srcSubY = sbSubY(k, p.den.y);
+            uint srcI0 = sbSampleLo(srcSubX, p.scale.x, p.den.x);
+            uint srcI1 = sbSampleHi(srcSubX, p.scale.x, p.den.x);
+            uint srcJ0 = sbSampleLo(srcSubY, p.scale.y, p.den.y);
+            uint srcJ1 = sbSampleHi(srcSubY, p.scale.y, p.den.y);
+            uvec2 guest = uvec2(p.srcGuest) + uvec2(gx, gy);
+            uvec2 sourceBase = uvec2(sbHostEdge(uint(p.srcGuest.x), p.scale.x, p.den.x),
+                sbHostEdge(uint(p.srcGuest.y), p.scale.y, p.den.y));
+            if (slot != 0u)
+            {
+                for (uint j = outJ0; j < outJ1; j++)
+                    for (uint i = outI0; i < outI1; i++)
                     {
-                        v *= p.expScale;
-                        if ((p.flags & 1u) != 0u) v = v.bgra;
-                    }
-                    uint word32 = swapWord(pack32(v), p.endian);
-#ifdef COALESCED
-                    g_samples[lb * s + j * sX + i] = word32;
-#elif defined(SCALED_FUSE)
-                    if (p.hostWrite != 2u)  // (2: into the texture alone)
-                        s_pool[o + j * sX + i] = word32;
-#else
-                    s_pool[o + j * sX + i] = word32;
-#endif
-#ifdef SCALED_FUSE
-                    // The texture's host texel this sample is (sbReaderHost:
-                    // the untile's own mapping; none for a texel axis's
-                    // padding), from its texel (tx, ty).
-                    if (p.hostWrite != 0u && tx < p.hostWidth && ty < p.hostHeight)
-                    {
-#ifdef SB_TEXEL
-                        uint hx = sbReaderHost(tx, subX, i, n.x, d.x), hy = sbReaderHost(ty, subY, j, n.y, d.y);
-#else
-                        uint hx = sbReaderHost(tx, subX, i, p.scale.x, kDen.x), hy = sbReaderHost(ty, subY, j, p.scale.y, kDen.y);
-#endif
-                        if (hx != ~0u && hy != ~0u)
+                        uint si = srcI0 + min(((2u * (i - outI0) + 1u) * (srcI1 - srcI0)) /
+                            (2u * (outI1 - outI0)), srcI1 - srcI0 - 1u);
+                        uint sj = srcJ0 + min(((2u * (j - outJ0) + 1u) * (srcJ1 - srcJ0)) /
+                            (2u * (outJ1 - outJ0)), srcJ1 - srcJ0 - 1u);
+                        ivec2 c = p.srcOrigin + ivec2(sbSampleHost(guest.x, srcSubX, si, p.scale.x, p.den.x) - sourceBase.x,
+                            sbSampleHost(guest.y, srcSubY, sj, p.scale.y, p.den.y) - sourceBase.y);
+                        vec4 v = texelFetch(src, clamp(c, ivec2(0), ivec2(p.srcSize) - 1), 0);
+                        if ((p.flags & 2u) == 0u)
                         {
-                            uint hostWord = swapWord(word32, p.hostEndian);
-                            if (p.hostConvert == 4u)
-                                hostWord = floatBitsToUint(float(hostWord >> 8) / 16777215.0);
-                            imageStore(h_image, ivec2(int(hx), int(hy)), uvec4(hostWord, 0u, 0u, 0u));
+                            v *= p.expScale;
+                            if ((p.flags & 1u) != 0u) v = v.bgra;
                         }
+                        s_pool[o + j * sX + i] = swapWord(pack32(v), p.endian);
                     }
-#endif
-                }
+            }
         }
+        else
+        {
+            // Each host sample this guest pixel owns into its block's place in
+            // the page's scaled slot (see ScaledMemory, gpu/render_scale.h): at a
+            // whole scale all its sx x sy, at 1.5x one, two or four of its 2x2
+            // block's 3x3, from where its texel sits in the block (its word's
+            // bits 0 and 2; the rectangle's origin is even, so gx and gy agree).
+            uint a = word << 2;
+            uint slot = inside ? s_table[a >> 12] : 0u;
+#ifdef SB_TEXEL
+            // With a texel axis: on it, all the texel's stride of samples (the
+            // ones it owns, then its last again), from its own place in the
+            // source target; on a block axis as below, from the block's corner.
+            uvec2 n = TEXEL_NUM, d = texelDen();
+            uint sX = sbStride(n.x, d.x);
+            uint s = sX * sbStride(n.y, d.y);  // samples a block
+            uint k = (a & 4095u) >> 2;
+            uint o = (slot - 1u) * p.slotWords + sbBlockIndex(k, d.x, d.y) * s;
+            uint subX = sbSubX(k, d.x), subY = sbSubY(k, d.y);
+            uint i0 = sbSampleLo(subX, n.x, d.x), i1 = sbSampleHi(subX, n.x, d.x);
+            uint j0 = sbSampleLo(subY, n.y, d.y), j1 = sbSampleHi(subY, n.y, d.y);
+            uvec2 g = uvec2(p.srcGuest) + uvec2(gx, gy);
+#else
+            uint sX = p.scale.x;
+            uint s = p.scale.x * p.scale.y;  // samples a block
+            uint k = (a & 4095u) >> 2;
+            uint o = (slot - 1u) * p.slotWords + sbBlockIndex(k, kDen.x, kDen.y) * s;
+            uint subX = sbSubX(k, kDen.x), subY = sbSubY(k, kDen.y);
+            uint i0 = sbHostEdge(subX, p.scale.x, kDen.x), i1 = sbHostEdge(subX + 1u, p.scale.x, kDen.x);
+            uint j0 = sbHostEdge(subY, p.scale.y, kDen.y), j1 = sbHostEdge(subY + 1u, p.scale.y, kDen.y);
+#endif
+#ifdef COALESCED
+            uint lb = sbBlockIndex(l, kDen.x, kDen.y);  // the block's in this group (l is the word order)
+#endif
+#ifdef SCALED_FUSE
+            uint tx = x + p.hostX, ty = y + p.hostY;  // the texel in the cached scaled texture
+#endif
+            if (slot != 0u)
+            {
+#ifndef SB_TEXEL
+                ivec2 c0 = p.srcOrigin + ivec2(sbHostEdge(gx, p.scale.x, kDen.x), sbHostEdge(gy, p.scale.y, kDen.y)) - ivec2(i0, j0);
+#endif
+                for (uint j = j0; j < j1; j++)
+                    for (uint i = i0; i < i1; i++)
+                    {
+#ifdef SB_TEXEL
+                        ivec2 c = ivec2(sbSampleHost(g.x, subX, i, n.x, d.x), sbSampleHost(g.y, subY, j, n.y, d.y));
+#else
+                        ivec2 c = c0 + ivec2(i, j);
+#endif
+                        vec4 v = texelFetch(src, clamp(c, ivec2(0), ivec2(p.srcSize) - 1), 0);
+                        if ((p.flags & 2u) == 0u)
+                        {
+                            v *= p.expScale;
+                            if ((p.flags & 1u) != 0u) v = v.bgra;
+                        }
+                        uint word32 = swapWord(pack32(v), p.endian);
+#ifdef COALESCED
+                        g_samples[lb * s + j * sX + i] = word32;
+#elif defined(SCALED_FUSE)
+                        if (p.hostWrite != 2u)  // (2: into the texture alone)
+                            s_pool[o + j * sX + i] = word32;
+#else
+                        s_pool[o + j * sX + i] = word32;
+#endif
+#ifdef SCALED_FUSE
+                        // The texture's host texel this sample is (sbReaderHost:
+                        // the untile's own mapping; none for a texel axis's
+                        // padding), from its texel (tx, ty).
+                        if (p.hostWrite != 0u && tx < p.hostWidth && ty < p.hostHeight)
+                        {
+#ifdef SB_TEXEL
+                            uint hx = sbReaderHost(tx, subX, i, n.x, d.x), hy = sbReaderHost(ty, subY, j, n.y, d.y);
+#else
+                            uint hx = sbReaderHost(tx, subX, i, p.scale.x, kDen.x), hy = sbReaderHost(ty, subY, j, p.scale.y, kDen.y);
+#endif
+                            if (hx != ~0u && hy != ~0u)
+                            {
+                                uint hostWord = swapWord(word32, p.hostEndian);
+                                if (p.hostConvert == 4u)
+                                    hostWord = floatBitsToUint(float(hostWord >> 8) / 16777215.0);
+                                imageStore(h_image, ivec2(int(hx), int(hy)), uvec4(hostWord, 0u, 0u, 0u));
+                            }
+                        }
+#endif
+                    }
+            }
 #ifdef COALESCED
 #ifdef SCALED_FUSE
-        if (subX == 0u && subY == 0u)  // (every pixel at a whole scale; hostWrite 2: into the texture alone)
-            g_offsets[lb] = slot != 0u && p.hostWrite != 2u ? o : ~0u;
+            if (subX == 0u && subY == 0u)  // (every pixel at a whole scale; hostWrite 2: into the texture alone)
+                g_offsets[lb] = slot != 0u && p.hostWrite != 2u ? o : ~0u;
 #else
-        if (subX == 0u && subY == 0u)  // (every pixel at a whole scale)
-            g_offsets[lb] = slot != 0u ? o : ~0u;
+            if (subX == 0u && subY == 0u)  // (every pixel at a whole scale)
+                g_offsets[lb] = slot != 0u ? o : ~0u;
 #endif
-        barrier();
-        uint samples = 64u / (kDen.x * kDen.y) * s;
-        for (uint q = l; q < samples; q += 64u)
-        {
-            uint po = g_offsets[q / s];
-            if (po != ~0u)
-                s_pool[po + q % s] = g_samples[q];
+            barrier();
+            uint samples = 64u / (kDen.x * kDen.y) * s;
+            for (uint q = l; q < samples; q += 64u)
+            {
+                uint po = g_offsets[q / s];
+                if (po != ~0u)
+                    s_pool[po + q % s] = g_samples[q];
+            }
+#endif
         }
-#endif
     }
     if (!inside) return;
     if (bl == 3u)
@@ -6352,9 +6401,11 @@ void main()
                     uint32_t bl = ResolveBppLog2(format);
                     uint32_t firstPage = rangeBase >> 12;
                     uint32_t lastPage = std::min<uint32_t>((rangeBase + rangeBytes - 1) >> 12, kGuestPages - 1);
-                    // A 32-bit resolve from a scaled target keeps its samples.
-                    bool scaledWrite = !directShadowResolve && !source->scale.IsOne() && wholeBlocks && bl == 2 && !destInfo.copy_dest_array &&
-                        EnsureScaledMemory() && source->scale == s_scaled.scale && ScaledWanted(rangeBase, rangeBytes);
+                    // Shadow resolves retain a scaled-memory copy as a fallback
+                    // when their render target is reused before the texture is sampled.
+                    bool scaledWrite = !source->scale.IsOne() && wholeBlocks && bl == 2 && !destInfo.copy_dest_array &&
+                        EnsureScaledMemory() && (source->scale == s_scaled.scale || directShadowResolve) &&
+                        (directShadowResolve || ScaledWanted(rangeBase, rangeBytes));
                     bool freshSlots = false;  // a page here had no current scaled copy before this
                     // Pages whose samples only a scaled texture holds (see
                     // below): their slots are filled from the 1x data too
@@ -6362,6 +6413,10 @@ void main()
                     std::vector<std::pair<uint32_t, uint32_t>> heldSlots;
                     if (scaledWrite)
                     {
+                        rc.scaledScaleX = s_scaled.scale.x.num;
+                        rc.scaledScaleY = s_scaled.scale.y.num;
+                        rc.scaledDenX = s_scaled.scale.x.den;
+                        rc.scaledDenY = s_scaled.scale.y.den;
                         std::vector<std::pair<uint32_t, uint32_t>> fresh;
                         for (uint32_t page = firstPage; page <= lastPage; page++)
                         {
@@ -6508,7 +6563,7 @@ void main()
                     const char* unhosted = !scaledWrite ? nullptr : !s_scaledFuse || !s_resolveToTexture ? "off"
                         : freshSlots ? "fresh slots" : "no scaled texture there";
                     uint32_t hostX = 0, hostY = 0;
-                    if (scaledWrite && s_scaledFuse && s_resolveToTexture && !freshSlots)
+                    if (scaledWrite && source->scale == s_scaled.scale && s_scaledFuse && s_resolveToTexture && !freshSlots)
                         for (auto it = s_scaledByStart.upper_bound(rc.destBase); !hosted && it != s_scaledByStart.begin();)
                         {
                             if (rc.destBase - (--it)->first >= s_maxScaledSize)
@@ -6630,7 +6685,8 @@ void main()
                     w[5] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, VK_NULL_HANDLE, 5, 0, 1,
                         VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &hi, nullptr, nullptr };
                     s_stateEpoch++;
-                    bool coalesced = scaledWrite && s_scaled.coalesce && CoalescedFits(source->scale);  // 32x2 pixels a group
+                    bool coalesced = scaledWrite && source->scale == s_scaled.scale && s_scaled.coalesce &&
+                        CoalescedFits(source->scale);  // 32x2 pixels a group
                     vkCmdBindPipeline(s_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, ResolvePipeline(coalesced, source->scale));
                     s_pushDescriptorSet(s_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, s_resolveLayout, 0, AddSharedParts(w, 6), w);
                     vkCmdPushConstants(s_cmd, s_resolveLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0,
