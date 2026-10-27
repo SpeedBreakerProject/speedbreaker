@@ -3550,22 +3550,14 @@ namespace gpu::renderer
             VkFormat vk;
             uint32_t bpbLog2;   // guest bytes per block
             uint32_t block;     // block width/height in texels
-            uint32_t convert;   // 0 copy; 1 565, 2 1555, 3 4444 -> RGBA8; 4 24_8 -> R32F; 5 8 -> RGBA8 (R only)
+            uint32_t convert;   // 0 copy; 1 565, 2 1555, 3 4444 -> RGBA8; 4 24_8 -> R32F
         };
 
         bool GetTextureFormat(uint32_t f, TextureFormatInfo& out)
         {
             switch (f)
             {
-#if defined(__APPLE__) && defined(__x86_64__)
-            // Intel Macs: MoltenVK on the AMD card (an RX 6600 XT) samples an
-            // R8_UNORM image as zero, though a copy back reads its texels
-            // right: the movies' Y/U/V planes (k_8) came out green. Stored as
-            // RGBA8 (v, 0, 0, 255), which samples as R8 would.
-            case 2: out = { VK_FORMAT_R8G8B8A8_UNORM, 0, 1, 5 }; return true;
-#else
             case 2: out = { VK_FORMAT_R8_UNORM, 0, 1, 0 }; return true;
-#endif
             case 3: out = { VK_FORMAT_R8G8B8A8_UNORM, 1, 1, 2 }; return true;
             case 4: out = { VK_FORMAT_R8G8B8A8_UNORM, 1, 1, 1 }; return true;
             case 6: case 14: out = { VK_FORMAT_R8G8B8A8_UNORM, 2, 1, 0 }; return true;
@@ -3923,7 +3915,6 @@ void main()
             uint r, g, b, a;
             if (p.convert == 1u) { r = expand(v & 31u, 5u); g = expand((v >> 5) & 63u, 6u); b = expand((v >> 11) & 31u, 5u); a = 255u; }
             else if (p.convert == 2u) { r = expand(v & 31u, 5u); g = expand((v >> 5) & 31u, 5u); b = expand((v >> 10) & 31u, 5u); a = (v >> 15) != 0u ? 255u : 0u; }
-            else if (p.convert == 5u) { r = v; g = 0u; b = 0u; a = 255u; }
             else { r = expand(v & 15u, 4u); g = expand((v >> 4) & 15u, 4u); b = expand((v >> 8) & 15u, 4u); a = expand(v >> 12, 4u); }
             o = r | (g << 8) | (b << 16) | (a << 24);
         }
@@ -7896,9 +7887,10 @@ void main()
             bci.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
             if (VkResult r = vkCreateBuffer(s_dev, &bci, nullptr, &s_shared); r != VK_SUCCESS)
             {
-                // (MoltenVK on a discrete GPU, an Intel Mac's AMD card, takes
-                // the host pointer above and then refuses a buffer for it:
-                // VK_ERROR_FEATURE_NOT_PRESENT. The copy comes next.)
+                // (MoltenVK 1.2 on a discrete GPU, an Intel Mac's AMD card,
+                // takes the host pointer above and then refuses a buffer for
+                // it: VK_ERROR_FEATURE_NOT_PRESENT; 1.4.2 imports. The copy
+                // comes next.)
                 fprintf(stderr, "[renderer] importing guest memory failed: the driver refuses a buffer of host memory (%d)\n", int(r));
                 s_shared = VK_NULL_HANDLE;
                 return false;
