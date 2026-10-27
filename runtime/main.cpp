@@ -258,6 +258,9 @@ namespace
 #if defined(__APPLE__) && defined(__aarch64__)
         // ESR_EL1 data abort, ISS bit 6: WnR.
         isWrite = (static_cast<ucontext_t*>(context)->uc_mcontext->__es.__esr >> 6) & 1;
+#elif defined(__APPLE__) && defined(__x86_64__)
+        // Page-fault error code, bit 1: the access was a write.
+        isWrite = (static_cast<ucontext_t*>(context)->uc_mcontext->__es.__err & 2) != 0;
 #elif defined(__linux__) && defined(__x86_64__)
         // Page-fault error code, bit 1: the access was a write.
         isWrite = (static_cast<ucontext_t*>(context)->uc_mcontext.gregs[REG_ERR] & 2) != 0;
@@ -268,6 +271,8 @@ namespace
 #endif
 #if defined(__APPLE__) && defined(__aarch64__)
         writewatch::t_faultPc = reinterpret_cast<const void*>(static_cast<ucontext_t*>(context)->uc_mcontext->__ss.__pc);
+#elif defined(__APPLE__) && defined(__x86_64__)
+        writewatch::t_faultPc = reinterpret_cast<const void*>(static_cast<ucontext_t*>(context)->uc_mcontext->__ss.__rip);
 #elif defined(__linux__) && defined(__x86_64__)
         writewatch::t_faultPc = reinterpret_cast<const void*>(static_cast<ucontext_t*>(context)->uc_mcontext.gregs[REG_RIP]);
 #elif defined(__linux__) && defined(__aarch64__)

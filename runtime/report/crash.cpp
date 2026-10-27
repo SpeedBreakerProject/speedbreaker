@@ -366,6 +366,8 @@ namespace report
         {
 #if defined(__APPLE__) && defined(__aarch64__)
             return reinterpret_cast<void*>(static_cast<ucontext_t*>(context)->uc_mcontext->__ss.__pc);
+#elif defined(__APPLE__) && defined(__x86_64__)
+            return reinterpret_cast<void*>(static_cast<ucontext_t*>(context)->uc_mcontext->__ss.__rip);
 #elif defined(__linux__) && defined(__x86_64__)
             return reinterpret_cast<void*>(static_cast<ucontext_t*>(context)->uc_mcontext.gregs[REG_RIP]);
 #elif defined(__linux__) && defined(__aarch64__)
@@ -726,6 +728,10 @@ namespace report
 #if defined(__APPLE__) && defined(__aarch64__)
         auto* mc = static_cast<ucontext_t*>(context)->uc_mcontext;
         b.Str("[crash] host registers: pc=0x").Hex(mc->__ss.__pc).Str(" lr=0x").Hex(mc->__ss.__lr).Str(" sp=0x").Hex(mc->__ss.__sp).Char('\n');
+#elif defined(__APPLE__) && defined(__x86_64__)
+        auto* mc = static_cast<ucontext_t*>(context)->uc_mcontext;
+        b.Str("[crash] host registers: rip=0x").Hex(uint64_t(mc->__ss.__rip)).Str(" rsp=0x").Hex(uint64_t(mc->__ss.__rsp))
+            .Str(" rbp=0x").Hex(uint64_t(mc->__ss.__rbp)).Char('\n');
 #elif defined(__linux__) && defined(__x86_64__)
         auto& gregs = static_cast<ucontext_t*>(context)->uc_mcontext.gregs;
         b.Str("[crash] host registers: rip=0x").Hex(uint64_t(gregs[REG_RIP])).Str(" rsp=0x").Hex(uint64_t(gregs[REG_RSP]))
