@@ -7885,7 +7885,16 @@ void main()
             bci.pNext = &embci;
             bci.size = kSharedSize;
             bci.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
-            Check(vkCreateBuffer(s_dev, &bci, nullptr, &s_shared), "vkCreateBuffer(shared)");
+            if (VkResult r = vkCreateBuffer(s_dev, &bci, nullptr, &s_shared); r != VK_SUCCESS)
+            {
+                // (MoltenVK 1.2 on a discrete GPU, an Intel Mac's AMD card,
+                // takes the host pointer above and then refuses a buffer for
+                // it: VK_ERROR_FEATURE_NOT_PRESENT; 1.4.2 imports. The copy
+                // comes next.)
+                fprintf(stderr, "[renderer] importing guest memory failed: the driver refuses a buffer of host memory (%d)\n", int(r));
+                s_shared = VK_NULL_HANDLE;
+                return false;
+            }
             VkMemoryRequirements req;
             vkGetBufferMemoryRequirements(s_dev, s_shared, &req);
 
