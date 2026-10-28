@@ -245,12 +245,6 @@ namespace gpu
         static RenderScale Whole(uint32_t sx, uint32_t sy) { return { { sx, 1 }, { sy, 1 } }; }
     };
 
-    inline RenderScale ShadowScale(const RenderScale& internal)
-    {
-        auto cap = [](AxisScale axis) { return axis.num > 2 * axis.den ? AxisScale{ 2, 1 } : axis; };
-        return { cap(internal.x), cap(internal.y) };
-    }
-
     // The scaled resolve memory's default size in MB (renderer.cpp's
     // EnsureScaledMemory): 512 on a discrete GPU; on an integrated one, whose
     // VRAM is the system's (a Steam Deck's 1 GB carve-out), room for 16,384
@@ -271,6 +265,23 @@ namespace gpu
     {
         halves = std::max(halves, 2u);
         return halves % 2 == 0 ? AxisScale{ halves / 2, 1 } : AxisScale{ halves, 2 };
+    }
+
+    inline RenderScale ShadowScale(uint32_t halves)
+    {
+        const AxisScale axis = AxisFromHalves(std::clamp(halves, 2u, 4u));
+        return { axis, axis };
+    }
+
+    // The shadow scaled-memory pool's minimum budgets at its supported
+    // non-native sizes. The general scaled pool may need more for scene data.
+    inline uint64_t ShadowPoolMegabytes(const RenderScale& scale)
+    {
+        if (scale == RenderScale{ { 3, 2 }, { 3, 2 } })
+            return 256;
+        if (scale == RenderScale::Whole(2, 2))
+            return 384;
+        return 0;
     }
 
     // num / den with no common factor.

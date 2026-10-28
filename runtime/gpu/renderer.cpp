@@ -2337,9 +2337,10 @@ namespace gpu::renderer
         // Internal resolution. Render targets of the scene's surface pitches
         // (NFSMW_SCALE_PITCH, default 640-1280: the scene, its side-by-side
         // tiles, the road reflection, the final composite) are created at
-        // guest size x (sx, sy) host pixels; the rest (the 1600x1600 shadow
-        // map, the 256x256 cube faces, the bloom and luminance chain from
-        // 320x180 down) stay 1x. The bloom blurs step in texels: at scale
+        // guest size x (sx, sy) host pixels; the sun's 1600x1600 shadow map
+        // has its own Shadow Resolution setting, and the 256x256 cube faces,
+        // bloom and luminance chain from 320x180 down stay 1x. The bloom blurs
+        // step in texels: at scale
         // they cover a fraction of their area and the game's haze thins (the
         // colour grade visibly changed with 320 scaled), and they are blurry
         // by design anyway. Draws keep the guest's viewport transform in guest pixels
@@ -2359,6 +2360,7 @@ namespace gpu::renderer
         // size (the window, fullscreen, the aspect ratio setting).
         gpu::RenderScale s_renderScale;
         gpu::RenderScale s_shadowScale;
+        int32_t s_shadowResolutionSetting = settings::kShadowResolutionDefault;
         uint32_t s_scalePitchMin = 640, s_scalePitchMax = 1280;
         uint32_t s_scaleBudget = 6;  // Auto's most host pixels per guest pixel
         bool s_scaleFixed = false;   // NFSMW_RENDER_SCALE: no live changes
@@ -2502,7 +2504,8 @@ namespace gpu::renderer
                 video::FrameRegion(regionW, regionH);
                 s_renderScale = WantedRenderScale(setting, regionW, regionH);
             }
-            s_shadowScale = gpu::ShadowScale(s_renderScale);
+            s_shadowResolutionSetting = settings::GetInt(settings::Id::ShadowResolution);
+            s_shadowScale = gpu::ShadowScale(uint32_t(s_shadowResolutionSetting));
             if (const char* v = std::getenv("NFSMW_SCALE_PITCH"))
                 sscanf(v, "%u-%u", &s_scalePitchMin, &s_scalePitchMax);
             fprintf(stderr, "[renderer] internal resolution %s (%ux%u, %s; surface pitches %u-%u)\n", gpu::ScaleName(s_renderScale).c_str(),
@@ -4260,6 +4263,7 @@ void main()
             uint32_t levels = 1;
             uint32_t mipStart = 0, mipSize = 0;  // the mip levels' guest memory (size 0: none)
             bool scaled = false;  // host resolution, from the scaled resolve memory
+            bool shadowMap = false;
             uint32_t guestWidth = 0, guestHeight = 0;  // scaled: its guest size (width, height are the host's)
             uint64_t scaledSig = 0;  // scaled: ScaledSignature
             VkImageView storeView = VK_NULL_HANDLE;  // scaled: R32_UINT, stored into by the untile (if the device can)
@@ -4884,6 +4888,8 @@ void main()
                 t.height = height;
                 t.guestStart = base;
                 t.guestSize = size;
+                t.shadowMap = !cube && !volume && format == 22 && width == 1600 && height == 1600 &&
+                    pitchTexels == 1600 && maxLevel == 0;
                 t.cube = cube;
                 t.volume = volume;
                 t.layers = layers;
@@ -6899,10 +6905,11 @@ void main()
                     uint32_t bl = ResolveBppLog2(format);
                     uint32_t firstPage = rangeBase >> 12;
                     uint32_t lastPage = std::min<uint32_t>((rangeBase + rangeBytes - 1) >> 12, kGuestPages - 1);
-                    // Shadow resolves retain a scaled-memory copy as a fallback
-                    // when their render target is reused before the texture is sampled.
+                    // Retain a scaled-memory fallback only at the target's
+                    // scale; the shadow texture samples its render target
+                    // directly when the scene and shadow scales differ.
                     bool scaledWrite = !source->scale.IsOne() && wholeBlocks && bl == 2 && !destInfo.copy_dest_array &&
-                        EnsureScaledMemory() && (source->scale == s_scaled.scale || directShadowResolve) &&
+                        EnsureScaledMemory() && source->scale == s_scaled.scale &&
                         (directShadowResolve || ScaledWanted(rangeBase, rangeBytes));
                     bool freshSlots = false;  // a page here had no current scaled copy before this
                     // Pages whose samples only a scaled texture holds (see
@@ -7658,15 +7665,17 @@ void main()
             if (const char* v = std::getenv("NFSMW_SCALED_RESOLVE"); v && v[0] == '0')
                 return false;
             auto start = std::chrono::steady_clock::now();
-            s_scaled.scale = s_renderScale;
+            s_scaled.scale = s_renderScale.IsOne() ? s_shadowScale : s_renderScale;
             if (s_scaled.scale.IsOne())
                 return false;
             VkPhysicalDeviceProperties props;
             vkGetPhysicalDeviceProperties(s_vk->physical, &props);
-            // gpu::ScaledPoolMegabytes: 512 MB on a discrete GPU, 128 MB at a
-            // Steam Deck's native rows (1x10/9: 512 MB took ~510 MB more VRAM
-            // than 1x, and 128 MB the same GPU time, 450 MB less).
+            // gpu::ScaledPoolMegabytes sizes the scene pool. When this pool
+            // also stores shadows at their own scale, ShadowPoolMegabytes
+            // supplies the 256 MB (1.5x) or 384 MB (2x) minimum.
             uint64_t megabytes = gpu::ScaledPoolMegabytes(s_scaled.scale, props.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU);
+            if (s_scaled.scale == s_shadowScale)
+                megabytes = std::max(megabytes, gpu::ShadowPoolMegabytes(s_shadowScale));
             if (const char* v = std::getenv("NFSMW_SCALED_MB"))
                 megabytes = std::clamp<uint64_t>(std::strtoull(v, nullptr, 10), 16, 4096);
             // Kept across live changes of the internal resolution
@@ -8775,7 +8784,6 @@ void main()
             const gpu::RenderScale old = s_renderScale;
             Flush();
             s_renderScale = scale;
-            s_shadowScale = gpu::ShadowScale(scale);
             if (s_traceShadowScale)
             {
                 s_shadowResolveTraceCount = 0;
@@ -8786,6 +8794,8 @@ void main()
             }
             s_shadowTargetsByResolve.clear();
             PrewarmResolvePipelines(scale);
+            if (scale != s_shadowScale)
+                PrewarmResolvePipelines(s_shadowScale);
             size_t targets = 0;
             for (auto& [key, slot] : s_targets)
             {
@@ -8828,6 +8838,63 @@ void main()
                 std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count());
         }
 
+        void ApplyShadowResolution(int32_t setting)
+        {
+            const auto start = std::chrono::steady_clock::now();
+            const gpu::RenderScale old = s_shadowScale;
+            Flush();
+            s_shadowResolutionSetting = setting;
+            s_shadowScale = gpu::ShadowScale(uint32_t(setting));
+            if (s_traceShadowScale)
+            {
+                s_shadowResolveTraceCount = 0;
+                s_shadowSampleTraceStates.clear();
+                s_shadowTextureTraceStates.clear();
+                fprintf(stderr, "[shadow-scale] shadow resolution %s -> %s\n",
+                    gpu::ScaleName(old).c_str(), gpu::ScaleName(s_shadowScale).c_str());
+            }
+            s_shadowTargetsByResolve.clear();
+            PrewarmResolvePipelines(s_shadowScale);
+            size_t targets = 0;
+            for (auto& [key, slot] : s_targets)
+            {
+                RenderTarget& was = *slot;
+                if (!was.depth || was.pitch != 1600 || was.scale == s_shadowScale)
+                    continue;
+
+                std::vector<PendingClear> moved;
+                std::erase_if(s_pendingClears, [&](const PendingClear& pc) {
+                    if (pc.rt != &was)
+                        return false;
+                    const uint32_t x0 = was.scale.x.GuestEdge(uint32_t(pc.rect.offset.x));
+                    const uint32_t y0 = was.scale.y.GuestEdge(uint32_t(pc.rect.offset.y));
+                    const uint32_t x1 = was.scale.x.GuestEdge(uint32_t(pc.rect.offset.x) + pc.rect.extent.width);
+                    const uint32_t y1 = was.scale.y.GuestEdge(uint32_t(pc.rect.offset.y) + pc.rect.extent.height);
+                    moved.push_back({ nullptr, { { int32_t(x0), int32_t(y0) }, { x1 - x0, y1 - y0 } }, pc.value });
+                    return true;
+                });
+                const uint32_t base = was.base, format = was.format, pitch = was.pitch;
+                const bool depth = was.depth, wide = was.wide;
+                DestroyTarget(was);
+                slot = CreateTarget(base, format, depth, pitch, wide);
+                for (PendingClear& pc : moved)
+                {
+                    pc.rt = slot.get();
+                    pc.rect = HostRect(s_shadowScale, pc.rect.offset.x, pc.rect.offset.y,
+                        pc.rect.offset.x + int32_t(pc.rect.extent.width), pc.rect.offset.y + int32_t(pc.rect.extent.height));
+                    s_pendingClears.push_back(pc);
+                }
+                targets++;
+            }
+            for (RecentTarget& recent : s_recentTargets)
+                recent = {};
+            const size_t textures = DropTextures([](const Texture& t) { return t.shadowMap; });
+            ResetScaledMemory(!s_renderScale.IsOne());
+            fprintf(stderr, "[renderer] shadow resolution %s: %zu targets and %zu shadow textures replaced in %.1f ms\n",
+                gpu::ScaleName(s_shadowScale).c_str(), targets, textures,
+                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count());
+        }
+
         void ApplyMipmaps(bool mips)
         {
             auto start = std::chrono::steady_clock::now();
@@ -8857,6 +8924,9 @@ void main()
                 if (mips != s_loadMips)
                     ApplyMipmaps(mips);
             }
+            const int32_t shadowSetting = settings::GetInt(settings::Id::ShadowResolution);
+            if (shadowSetting != s_shadowResolutionSetting)
+                ApplyShadowResolution(shadowSetting);
             if (s_scaleFixed)
                 return;
             int32_t setting = settings::GetInt(settings::Id::InternalResolution);
