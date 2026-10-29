@@ -36,9 +36,6 @@ namespace gpu::renderer
     bool Initialize(const uint32_t* regs);
     bool Enabled();
 
-    enum class ShadowBenchmarkAction { kDisabled, kCapture, kStarted, kStopped, kUnavailable };
-    ShadowBenchmarkAction ShadowBenchmarkHotkey(bool toggleContinuous);
-
     // NFSMW_LOG_COVERS=1 (gpu/covers.h): the lines logged so far (each a new
     // place).
     uint64_t CoverHits();

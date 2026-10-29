@@ -757,27 +757,6 @@ namespace ui
             UpdateCursor();
         }
 #endif
-        if (e.type == SDL_EVENT_KEY_DOWN && !e.key.repeat && (e.key.key == SDLK_F9 || e.key.key == SDLK_F10))
-        {
-            const auto action = gpu::renderer::ShadowBenchmarkHotkey(e.key.key == SDLK_F10);
-            switch (action)
-            {
-            case gpu::renderer::ShadowBenchmarkAction::kCapture:
-                Toast("Measuring the next frame's shadow passes; the report will appear in the log when ready.", 6.0);
-                return;
-            case gpu::renderer::ShadowBenchmarkAction::kStarted:
-                Toast("Shadow-pass GPU timing started. Press F10 again to stop.", 6.0);
-                return;
-            case gpu::renderer::ShadowBenchmarkAction::kStopped:
-                Toast("Shadow capture stopped; the report will appear in the log when ready.", 6.0);
-                return;
-            case gpu::renderer::ShadowBenchmarkAction::kUnavailable:
-                Toast("Shadow timing is unavailable; check GPU timestamp support, pending reports, or NFSMW_SHADER_PROFILE.", 6.0);
-                return;
-            case gpu::renderer::ShadowBenchmarkAction::kDisabled:
-                break;
-            }
-        }
         if (!s_ready)
             return;
         bool forward = s_capturing.load(std::memory_order_relaxed);

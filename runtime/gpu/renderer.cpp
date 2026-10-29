@@ -136,13 +136,6 @@ namespace gpu::renderer
         // calls, 2 skip resolve copies, 4 skip texture loads, 8 bind 1x1
         // placeholders instead of textures.
         const uint32_t s_exp = [] { const char* v = std::getenv("NFSMW_GPU_EXP"); return v ? uint32_t(std::atoi(v)) : 0u; }();
-        const bool s_traceShadowScale = [] {
-            const char* v = std::getenv("NFSMW_TRACE_SHADOW_SCALE");
-            return v && v[0] && v[0] != '0';
-        }();
-        uint32_t s_shadowResolveTraceCount = 0;
-        std::unordered_set<uint64_t> s_shadowSampleTraceStates;
-        std::unordered_set<uint64_t> s_shadowTextureTraceStates;
         // Fewer render passes and texture reloads (NFSMW_PASS_MERGE,
         // NFSMW_CLEAR_FLUSH_RECT, NFSMW_DIRECT_CUBE, NFSMW_FUSE_PARTIAL): on
         // by default where passes cost most, the tile GPUs: under MoltenVK
@@ -718,7 +711,6 @@ namespace gpu::renderer
         // with the samples of segments [s0, s1).
         struct ZpdSegment { uint64_t id; uint32_t query, num, den; };
         struct ZpdEnd { uint32_t address; uint64_t s0, s1, frame; std::chrono::steady_clock::time_point queued; };
-        struct ShadowPassQuery { uint32_t query; uint64_t frame; };
         struct Submission
         {
             VkCommandBuffer cmd = VK_NULL_HANDLE;
@@ -737,8 +729,6 @@ namespace gpu::renderer
             // here, harvested at completion, then the END reports, in order.
             std::vector<ZpdSegment> zpdSegments;
             std::vector<ZpdEnd> zpdEnds;
-            std::vector<ShadowPassQuery> shadowPassQueries;
-            uint32_t shadowPassQueryNext = 0;
 #ifdef _WIN32
             // NFSMW_BLACK_CHECK=1: the present whose front image this
             // submission probes (its entry in s_black.host, else -1).
@@ -775,102 +765,7 @@ namespace gpu::renderer
         // print them (targets, area, draws, GPU us). 256 passes max.
         const int s_profileFrame = [] { const char* v = std::getenv("NFSMW_PASS_PROFILE"); return v ? std::atoi(v) : -1; }();
         VkQueryPool s_passQueries = VK_NULL_HANDLE;
-        constexpr uint32_t kShaderProfileDrawLimit = 2048;
-        enum class ShaderProfileKind { kOff, kPixelShader, kVertexShader, kShadowTargets };
-        struct ShaderProfileRequest
-        {
-            uint64_t frame = 0;
-            uint64_t hash = 0;
-            ShaderProfileKind kind = ShaderProfileKind::kOff;
-        };
-        const ShaderProfileRequest s_shaderProfileRequest = [] {
-            const char* v = std::getenv("NFSMW_SHADER_PROFILE");
-            if (!v || !v[0])
-                return ShaderProfileRequest{};
-            char* end = nullptr;
-            errno = 0;
-            uint64_t frame = std::strtoull(v, &end, 10);
-            if (v[0] < '0' || v[0] > '9' || errno || end == v || *end != ',' || frame == UINT64_MAX)
-            {
-                fprintf(stderr, "[renderer] NFSMW_SHADER_PROFILE must be <frame>,shadow or <frame>,ps:<hex-hash> or <frame>,vs:<hex-hash>\n");
-                return ShaderProfileRequest{};
-            }
-            const char* selector = end + 1;
-            if (strcmp(selector, "shadow") == 0)
-            {
-                fprintf(stderr, "[renderer] shader profiling frame %llu: draws to 1600-pitch depth targets (max %u draws)\n",
-                    (unsigned long long)frame, kShaderProfileDrawLimit);
-                return ShaderProfileRequest{ frame, 0, ShaderProfileKind::kShadowTargets };
-            }
-            ShaderProfileKind kind = ShaderProfileKind::kOff;
-            if (strncmp(selector, "ps:", 3) == 0)
-                kind = ShaderProfileKind::kPixelShader;
-            else if (strncmp(selector, "vs:", 3) == 0)
-                kind = ShaderProfileKind::kVertexShader;
-            if (kind == ShaderProfileKind::kOff)
-            {
-                fprintf(stderr, "[renderer] NFSMW_SHADER_PROFILE selector must be shadow, ps:<hex-hash> or vs:<hex-hash>\n");
-                return ShaderProfileRequest{};
-            }
-            errno = 0;
-            const char* hashText = selector + 3;
-            const char* hashDigits = hashText;
-            if (hashDigits[0] == '0' && (hashDigits[1] == 'x' || hashDigits[1] == 'X'))
-                hashDigits += 2;
-            bool validHex = *hashDigits != '\0';
-            for (const char* p = hashDigits; *p; p++)
-                validHex = validHex && ((*p >= '0' && *p <= '9') || (*p >= 'a' && *p <= 'f') || (*p >= 'A' && *p <= 'F'));
-            uint64_t hash = std::strtoull(hashText, &end, 16);
-            if (!validHex || errno || end == hashText || *end)
-            {
-                fprintf(stderr, "[renderer] NFSMW_SHADER_PROFILE shader hash must be hexadecimal\n");
-                return ShaderProfileRequest{};
-            }
-            fprintf(stderr, "[renderer] shader profiling frame %llu: %s_%016llx (max %u draws)\n",
-                (unsigned long long)frame, kind == ShaderProfileKind::kPixelShader ? "ps" : "vs",
-                (unsigned long long)hash, kShaderProfileDrawLimit);
-            return ShaderProfileRequest{ frame, hash, kind };
-        }();
-        const bool s_shadowBenchmarkEnabled = [] {
-            const char* v = std::getenv("NFSMW_SHADOW_BENCHMARK");
-            return v && strcmp(v, "1") == 0;
-        }();
-        constexpr uint32_t kShadowBenchmarkPassLimit = 4096;
-        VkQueryPool s_shaderProfileQueries = VK_NULL_HANDLE;
-        VkQueryPool s_shadowPassQueries[kSlots] = {};
-        bool s_shadowPassQueryPoolInitialized[kSlots] = {};
-        uint32_t s_shadowTimestampValidBits = 0;
-        bool s_shadowBenchmarkAvailable = false;
-        struct ShaderProfileDraw { uint32_t query; uint64_t vsHash, psHash, frame; };
-        std::vector<ShaderProfileDraw> s_shaderProfileDraws;
-        struct ShadowBenchmarkReport
-        {
-            uint64_t firstFrame = 0, lastFrame = 0, submission = 0;
-            bool continuous = false;
-        };
-        struct ShadowBenchmarkStats
-        {
-            uint64_t passes = 0, timed = 0, unavailable = 0, invalid = 0, apiErrors = 0, overLimit = 0;
-            uint64_t framesWithPasses = 0, currentFrame = 0;
-            double sumUs = 0, maxPassUs = 0, currentFrameUs = 0, maxFrameUs = 0;
-            bool hasCurrentFrame = false;
-        } s_shadowBenchmarkStats;
-        std::mutex s_shadowBenchmarkStatsMutex;
-        std::mutex s_shadowBenchmarkReportMutex;
-        std::condition_variable s_shadowBenchmarkReportCv;
-        std::deque<ShadowBenchmarkReport> s_shadowBenchmarkReports;
-        std::atomic<bool> s_shadowBenchmarkReportsPending{ false };
-        std::atomic<bool> s_shadowBenchmarkContinuousRequested{ false };
-        std::atomic<bool> s_shadowBenchmarkSingleRequested{ false };
-        bool s_shadowBenchmarkActive = false;
-        bool s_shadowBenchmarkContinuous = false;
-        bool s_shadowBenchmarkSinglePending = false;
         uint64_t s_frame = 0;
-        uint64_t s_shadowBenchmarkFirstFrame = 0;
-        uint32_t s_shaderProfileQueryNext = 0;
-        uint32_t s_shaderProfileDropped = 0;
-        bool s_shaderProfiling = false;
-        bool s_shaderProfileQueriesReset = false;
         // Per profiled pass, also what was recorded in the gap before it:
         // resolves, texture uploads, submissions, guest memory synced to the
         // GPU copy (KB).
@@ -1061,17 +956,6 @@ namespace gpu::renderer
             s_recording = true;
             s_stateEpoch++;
             s_recordStart = std::chrono::steady_clock::now();
-            if (s_shadowBenchmarkAvailable && !s_shadowPassQueryPoolInitialized[s_slot])
-            {
-                vkCmdResetQueryPool(s_cmd, s_shadowPassQueries[s_slot], 0, kShadowBenchmarkPassLimit * 2);
-                s_shadowPassQueryPoolInitialized[s_slot] = true;
-            }
-            else if (s_shadowBenchmarkAvailable && sub.shadowPassQueryNext)
-            {
-                vkCmdResetQueryPool(s_cmd, s_shadowPassQueries[s_slot], 0, sub.shadowPassQueryNext);
-            }
-            sub.shadowPassQueryNext = 0;
-            sub.shadowPassQueries.clear();
             if (s_timestamps)
             {
                 vkCmdResetQueryPool(s_cmd, s_timestamps, s_slot * 2, 2);
@@ -1184,56 +1068,6 @@ namespace gpu::renderer
                 s_zpdResults->Put(s.id, guest, raw);
                 ZpdLog("segment %llu: %s%llu host samples x %u/%u = %llu", (unsigned long long)s.id, available ? "" : "not available, ",
                     (unsigned long long)raw, s.num, s.den, (unsigned long long)guest);
-            }
-        }
-
-        void ShadowBenchmarkHarvest(uint32_t slot, Submission& sub)
-        {
-            const uint32_t queryCount = sub.shadowPassQueryNext;
-            std::vector<uint64_t> results(size_t(queryCount) * 2);
-            VkResult result = vkGetQueryPoolResults(s_dev, s_shadowPassQueries[slot], 0, queryCount,
-                results.size() * sizeof(uint64_t), results.data(), 2 * sizeof(uint64_t),
-                VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WITH_AVAILABILITY_BIT | VK_QUERY_RESULT_WAIT_BIT);
-                std::lock_guard lock(s_shadowBenchmarkStatsMutex);
-                ShadowBenchmarkStats& stats = s_shadowBenchmarkStats;
-                if (result != VK_SUCCESS)
-                {
-                stats.apiErrors++;
-                return;
-            }
-            const uint64_t mask = s_shadowTimestampValidBits == 64
-                ? UINT64_MAX
-                : (uint64_t(1) << s_shadowTimestampValidBits) - 1;
-            for (const ShadowPassQuery& pass : sub.shadowPassQueries)
-            {
-                const uint32_t query = pass.query;
-                if (query + 1 >= queryCount)
-                {
-                    stats.invalid++;
-                    continue;
-                }
-                if (!results[size_t(query) * 2 + 1] || !results[size_t(query + 1) * 2 + 1])
-                {
-                    stats.unavailable++;
-                    continue;
-                }
-                const uint64_t ticks = (results[size_t(query + 1) * 2] - results[size_t(query) * 2]) & mask;
-                const double us = double(ticks) * s_timestampPeriod / 1000.0;
-                if (!stats.hasCurrentFrame || stats.currentFrame != pass.frame)
-                {
-                    if (stats.hasCurrentFrame)
-                    {
-                        stats.framesWithPasses++;
-                        stats.maxFrameUs = std::max(stats.maxFrameUs, stats.currentFrameUs);
-                    }
-                    stats.hasCurrentFrame = true;
-                    stats.currentFrame = pass.frame;
-                    stats.currentFrameUs = 0;
-                }
-                stats.currentFrameUs += us;
-                stats.timed++;
-                stats.sumUs += us;
-                stats.maxPassUs = std::max(stats.maxPassUs, us);
             }
         }
 
@@ -1427,8 +1261,6 @@ namespace gpu::renderer
                             VK_QUERY_RESULT_64_BIT) == VK_SUCCESS && ts[1] > ts[0])
                         s_gpuExecNs += uint64_t(double(ts[1] - ts[0]) * s_timestampPeriod);
                 }
-                if (s_shadowBenchmarkAvailable && !sub.shadowPassQueries.empty())
-                    ShadowBenchmarkHarvest(slot, sub);
                 if (!sub.zpdSegments.empty())
                     ZpdHarvest(slot, sub);
 #ifdef _WIN32
@@ -1448,7 +1280,6 @@ namespace gpu::renderer
                         ZpdStore(end);
                     sub.zpdEnds.clear();
                     sub.zpdSegments.clear();
-                    sub.shadowPassQueries.clear();
                     sub.unsignaled = 0;
                     for (VkEvent event : sub.events)
                     {
@@ -2221,7 +2052,9 @@ namespace gpu::renderer
 
         struct ShadowResolveTarget
         {
-            RenderTarget* target;
+            RenderTarget* source;
+            std::shared_ptr<PooledDepth> depth;
+            gpu::RenderScale scale;
             uint64_t writeSequence;
         };
         std::unordered_map<uint32_t, ShadowResolveTarget> s_shadowTargetsByResolve;
@@ -2230,36 +2063,7 @@ namespace gpu::renderer
         {
             if (!target || !target->depth || target->pitch != 1600)
                 return;
-            std::erase_if(s_shadowTargetsByResolve, [&](const auto& entry) { return entry.second.target == target; });
-        }
-
-        uint32_t ShaderProfileBegin(RenderTarget* depth)
-        {
-            if (!s_shaderProfiling || !s_shaderProfileQueriesReset)
-                return UINT32_MAX;
-            const ShaderProfileRequest& request = s_shaderProfileRequest;
-            const bool selected = request.kind == ShaderProfileKind::kShadowTargets
-                ? depth && depth->depth && depth->pitch == 1600
-                : request.kind == ShaderProfileKind::kPixelShader ? s_ps->hash == request.hash
-                : request.kind == ShaderProfileKind::kVertexShader && s_vs->hash == request.hash;
-            if (!selected)
-                return UINT32_MAX;
-            if (s_shaderProfileQueryNext + 2 > kShaderProfileDrawLimit * 2)
-            {
-                return UINT32_MAX;
-            }
-            const uint32_t query = s_shaderProfileQueryNext;
-            s_shaderProfileQueryNext += 2;
-            vkCmdWriteTimestamp(s_cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, s_shaderProfileQueries, query);
-            return query;
-        }
-
-        void ShaderProfileEnd(uint32_t query, uint64_t frame)
-        {
-            if (query == UINT32_MAX)
-                return;
-            vkCmdWriteTimestamp(s_cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, s_shaderProfileQueries, query + 1);
-            s_shaderProfileDraws.push_back({ query, s_vs->hash, s_ps->hash, frame });
+            std::erase_if(s_shadowTargetsByResolve, [&](const auto& entry) { return entry.second.source == target; });
         }
 
         VkFormat ColorFormat(uint32_t format)
@@ -2639,6 +2443,7 @@ namespace gpu::renderer
 
         void DestroyTarget(RenderTarget& rt)
         {
+            InvalidateShadowResolve(&rt);
             if (rt.shared)
             {
                 // The pool's (a texture or a deferred resolve may still use it).
@@ -2673,7 +2478,6 @@ namespace gpu::renderer
         RenderTarget* s_passColor[4] = {};
         RenderTarget* s_passDepth = nullptr;
         bool s_passActive = false;
-        uint32_t s_passShadowQuery = UINT32_MAX;
         VkExtent2D s_passExtent{};  // the attachments' common size
         VkRect2D s_passArea{};      // what this pass loads and stores (tile GPUs move only this)
         // NFSMW_PASS_MERGE bitmask (Draw; default 3 with kFewerPasses, else
@@ -2693,11 +2497,6 @@ namespace gpu::renderer
             ZpdEndSegment();  // a segment never outlives its pass
             s_vk->cmdEndRendering(s_cmd);
             s_passActive = false;
-            if (s_passShadowQuery != UINT32_MAX)
-            {
-                vkCmdWriteTimestamp(s_cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, s_shadowPassQueries[s_slot], s_passShadowQuery + 1);
-                s_passShadowQuery = UINT32_MAX;
-            }
             if (s_profiling && !s_passInfos.empty() && s_passInfos.back().query + 1 < s_passQueryNext)
                 vkCmdWriteTimestamp(s_cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, s_passQueries, s_passInfos.back().query + 1);
             PassEndBarrier();
@@ -2792,11 +2591,6 @@ namespace gpu::renderer
 
         void BeginPass(RenderTarget* const color[4], RenderTarget* depth, VkRect2D area)
         {
-            const bool measureShadowPass = s_shadowBenchmarkActive && s_shadowBenchmarkAvailable &&
-                depth && depth->depth && depth->pitch == 1600;
-            for (uint32_t i = 0; i < 4; i++)
-                InvalidateShadowResolve(color[i]);
-            InvalidateShadowResolve(depth);
             bool sameTargets = s_passActive && depth == s_passDepth && std::equal(color, color + 4, s_passColor);
             if (sameTargets && Contains(s_passArea, area))
                 return;
@@ -2811,8 +2605,6 @@ namespace gpu::renderer
                 if (attached(pc.rt))
                     area = Union(area, pc.rect);
             EndPass();
-            if (measureShadowPass && s_submissions[s_slot].shadowPassQueryNext + 2 > kShadowBenchmarkPassLimit * 2)
-                SubmitRecorded(5);
             Begin();
             uint32_t w = UINT32_MAX, h = UINT32_MAX;
             VkRenderingAttachmentInfoKHR colors[4]{};
@@ -2957,26 +2749,6 @@ namespace gpu::renderer
                     uint32_t(now.uploads - s_gapLast.uploads), uint32_t(now.submits - s_gapLast.submits), (now.shadowBytes - s_gapLast.shadowBytes) / 1024 });
                 s_gapLast = now;
                 s_passQueryNext += 2;
-            }
-            if (measureShadowPass)
-            {
-                Submission& sub = s_submissions[s_slot];
-                std::lock_guard lock(s_shadowBenchmarkStatsMutex);
-                s_shadowBenchmarkStats.passes++;
-                if (sub.shadowPassQueryNext + 2 <= kShadowBenchmarkPassLimit * 2)
-                {
-                    s_passShadowQuery = sub.shadowPassQueryNext;
-                    sub.shadowPassQueryNext += 2;
-                    sub.shadowPassQueries.push_back({ s_passShadowQuery, s_frame + 1 });
-                    vkCmdWriteTimestamp(s_cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, s_shadowPassQueries[s_slot], s_passShadowQuery);
-                }
-                else
-                    s_shadowBenchmarkStats.overLimit++;
-            }
-            if (s_shaderProfiling && !s_shaderProfileQueriesReset)
-            {
-                vkCmdResetQueryPool(s_cmd, s_shaderProfileQueries, 0, kShaderProfileDrawLimit * 2);
-                s_shaderProfileQueriesReset = true;
             }
             s_vk->cmdBeginRendering(s_cmd, &ri);
             s_passActive = true;
@@ -3844,9 +3616,9 @@ namespace gpu::renderer
 
         // Stored as resolves write it: one 32-bit word a texel, unconverted
         // (the formats a scaled texture can have).
-        bool ScaledFormat(const TextureFormatInfo& fi)
+        bool ScaledFormat(const TextureFormatInfo& fi, bool shadowMap)
         {
-            return fi.bpbLog2 == 2 && (fi.convert == 0 || fi.convert == 4) && fi.block == 1;
+            return fi.bpbLog2 == 2 && (fi.convert == 0 || (shadowMap && fi.convert == 4)) && fi.block == 1;
         }
 
         uint32_t Tiled2D(uint32_t x, uint32_t y, uint32_t pitchAligned, uint32_t bppLog2)
@@ -4794,65 +4566,25 @@ void main()
                     mipSize = std::min(mipSize, uint32_t(kSharedSize) - mipBase);
                 }
             }
-            if (!cube && !volume && format == 22 && width == 1600 && height == 1600 && maxLevel == 0)
+            const bool shadowMap = !cube && !volume && format == 22 && width == 1600 && height == 1600 &&
+                pitchTexels == 1600 && maxLevel == 0;
+            if (shadowMap)
             {
                 auto it = s_shadowTargetsByResolve.find(base);
-                RenderTarget* target = it == s_shadowTargetsByResolve.end() ? nullptr : it->second.target;
+                const ShadowResolveTarget* resolved = it == s_shadowTargetsByResolve.end() ? nullptr : &it->second;
                 uint64_t sampleSequence = 0;
-                int traceReason = 0;
-                if (!target)
-                    traceReason = 0;
-                else
+                if (resolved)
                 {
                     sampleSequence = writewatch::WriteSequence(base, size);
-                    if (target->scale != s_shadowScale)
-                        traceReason = 1;
-                    else if (!target->sampleView)
-                        traceReason = 2;
-                    else if (!f.tiled || pitchTexels != 1600 ||
-                        (!(f.endianness == xenos::Endian::kNone && f.swizzle == 0x688) &&
-                            !(f.endianness == xenos::Endian::k8in32 && f.swizzle == 0xB48)))
-                        traceReason = 3;
-                    else if (sampleSequence != it->second.writeSequence)
-                        traceReason = 4;
-                    else
-                        traceReason = 5;
-                    if (traceReason == 5)
+                    if (resolved->scale == s_shadowScale && resolved->depth && resolved->depth->sampleView &&
+                        f.tiled && pitchTexels == 1600 &&
+                        ((f.endianness == xenos::Endian::kNone && f.swizzle == 0x688) ||
+                            (f.endianness == xenos::Endian::k8in32 && f.swizzle == 0xB48)) &&
+                        sampleSequence == it->second.writeSequence)
                     {
                         sampler = GetSampler(f, maxLevel);
-                        if (s_traceShadowScale)
-                        {
-                            uint64_t traceKey = base;
-                            auto mix = [&](uint64_t value) { traceKey ^= value + 0x9E3779B97F4A7C15ull + (traceKey << 6) + (traceKey >> 2); };
-                            mix(uint64_t(s_shadowScale.x.num) << 48 | uint64_t(s_shadowScale.x.den) << 32 |
-                                uint64_t(s_shadowScale.y.num) << 16 | uint64_t(s_shadowScale.y.den));
-                            mix(uint64_t(traceReason));
-                            if (s_shadowSampleTraceStates.size() < 32 && s_shadowSampleTraceStates.insert(traceKey).second)
-                                fprintf(stderr, "[shadow-scale] sample scaled target base %08X at %s, host %ux%u (write %llu)\n",
-                                    base, gpu::ScaleName(target->scale).c_str(), target->width, target->height,
-                                    (unsigned long long)sampleSequence);
-                        }
-                        return target->sampleView;
+                        return resolved->depth->sampleView;
                     }
-                }
-                if (s_traceShadowScale)
-                {
-                    uint64_t traceKey = base;
-                    auto mix = [&](uint64_t value) { traceKey ^= value + 0x9E3779B97F4A7C15ull + (traceKey << 6) + (traceKey >> 2); };
-                    mix(uint64_t(s_shadowScale.x.num) << 48 | uint64_t(s_shadowScale.x.den) << 32 |
-                        uint64_t(s_shadowScale.y.num) << 16 | uint64_t(s_shadowScale.y.den));
-                    mix(uint64_t(traceReason));
-                    if (s_shadowSampleTraceStates.size() < 32 && s_shadowSampleTraceStates.insert(traceKey).second)
-                        fprintf(stderr, "[shadow-scale] sample fallback base %08X (%s): registered %s, scale %s, target %s, tiled %u, "
-                            "pitch %u, endian %u, swizzle %03X, write %llu/%llu\n", base,
-                            traceReason == 0 ? "no resolved target" : traceReason == 1 ? "scale mismatch"
-                                : traceReason == 2 ? "no depth sample view" : traceReason == 3 ? "texture layout mismatch"
-                                : "guest copy changed after resolve",
-                            target ? "yes" : "no", target ? gpu::ScaleName(target->scale).c_str() : "n/a",
-                            target ? target->sampleView ? "yes" : "no" : "n/a",
-                            uint32_t(f.tiled), pitchTexels, uint32_t(f.endianness), f.swizzle,
-                            (unsigned long long)sampleSequence,
-                            (unsigned long long)(target ? it->second.writeSequence : 0));
                 }
             }
             // Drawn into scaled targets: a texture that scaled resolves wrote
@@ -4862,7 +4594,7 @@ void main()
             // At 1.5x only a texture of whole 2x2 blocks (even width and
             // height; gpu/render_scale.h).
             bool scaledCandidate = !cube && !volume && f.tiled && layers == 1 && !f.stacked &&
-                ScaledFormat(fi) && offX == 0 && offY == 0 && maxLevel == 0 && s_scaled.scale.Exact(width, height) &&
+                ScaledFormat(fi, shadowMap) && offX == 0 && offY == 0 && maxLevel == 0 && s_scaled.scale.Exact(width, height) &&
                 (s_scaled.direct || s_scaled.scale.HostPixels(width, height) * 4 <= s_scaled.scratchSize);
             // Which scaled texture this is (its cache key's surface fields):
             // pages only a scaled texture holds are current for it alone.
@@ -4888,8 +4620,7 @@ void main()
                 t.height = height;
                 t.guestStart = base;
                 t.guestSize = size;
-                t.shadowMap = !cube && !volume && format == 22 && width == 1600 && height == 1600 &&
-                    pitchTexels == 1600 && maxLevel == 0;
+                t.shadowMap = shadowMap;
                 t.cube = cube;
                 t.volume = volume;
                 t.layers = layers;
@@ -4999,29 +4730,6 @@ void main()
                         cube ? VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT : 0, t.levels);
             }
             Texture& t = *slotRef;
-            if (s_traceShadowScale && !cube && !volume && format == 22 && width == 1600 && height == 1600 &&
-                maxLevel == 0 && s_shadowTextureTraceStates.size() < 32)
-            {
-                uint64_t traceKey = base;
-                auto mix = [&](uint64_t value) { traceKey ^= value + 0x9E3779B97F4A7C15ull + (traceKey << 6) + (traceKey >> 2); };
-                mix(uint64_t(s_shadowScale.x.num) << 48 | uint64_t(s_shadowScale.x.den) << 32 |
-                    uint64_t(s_shadowScale.y.num) << 16 | uint64_t(s_shadowScale.y.den));
-                mix(uint64_t(scaled));
-                mix(uint64_t(scaledCandidate));
-                if (s_shadowTextureTraceStates.insert(traceKey).second)
-                {
-                    const char* reason = scaled ? "scaled texture selected"
-                        : !s_drawScaled ? "draw is not using a scaled target"
-                        : !s_scaled.enabled ? "scaled memory unavailable"
-                        : !scaledCandidate ? "texture is not a scaled candidate"
-                        : "no current scaled copy";
-                    fprintf(stderr, "[shadow-scale] texture lookup base %08X: %s; candidate %s, draw-scaled %s, "
-                        "scaled memory %s, guest %ux%u, selected %s %ux%u (tiled %u pitch %u endian %u swizzle %03X)\n",
-                        base, reason, scaledCandidate ? "yes" : "no", s_drawScaled ? "yes" : "no",
-                        s_scaled.enabled ? "enabled" : "disabled", width, height, t.scaled ? "scaled" : "1x",
-                        t.width, t.height, uint32_t(f.tiled), pitchTexels, uint32_t(f.endianness), f.swizzle);
-                }
-            }
             {
                 // No page written anywhere since the last check: still valid
                 // (a draw binds ~7,500 textures a frame; writes are rare).
@@ -6510,6 +6218,8 @@ void main()
         void LendTargetWrite(RenderTarget* rt, bool whole)
         {
             const bool lent = rt->shared && rt->shared.use_count() > 1;
+            const bool directShadowSnapshot = rt->shared && std::any_of(s_shadowTargetsByResolve.begin(), s_shadowTargetsByResolve.end(),
+                [&](const auto& entry) { return entry.second.depth == rt->shared; });
             switch (gpu::shadow_lend::BeforeTargetWrite(lent, whole))
             {
             case gpu::shadow_lend::TargetWrite::kInPlace:
@@ -6518,10 +6228,11 @@ void main()
                 FreshTargetImage(*rt);
                 return;
             case gpu::shadow_lend::TargetWrite::kRunDeferred:
-                if (s_shadowCopy)
+                if (s_shadowCopy || directShadowSnapshot)
                 {
                     // NFSMW_SHADOW_COPY=1: the target goes on in a copy of
-                    // its image instead; the resolves stay deferred.
+                    // its image instead; or, a direct shadow sample still
+                    // uses this image, so preserve it while rendering on.
                     std::shared_ptr<PooledDepth> old = rt->shared;
                     FreshTargetImage(*rt);
                     FullBarrier();
@@ -6756,8 +6467,6 @@ void main()
                 auto ci = RegAt<reg::RB_COLOR_INFO>(infoRegs[copyControl.copy_src_select & 3]);
                 source = GetTarget(ci.color_base, uint32_t(ci.color_format), false, pitch);
             }
-            InvalidateShadowResolve(source);
-
             // Copy.
             auto destInfo = Reg<reg::RB_COPY_DEST_INFO>();
             auto destPitch = Reg<reg::RB_COPY_DEST_PITCH>();
@@ -6892,13 +6601,6 @@ void main()
                         !destInfo.copy_dest_array && directShadowEndian &&
                         !destInfo.copy_dest_swap && destInfo.copy_dest_exp_bias == 0 && rc.destPitch == 1600 &&
                         r.x0 == 0 && r.y0 == 0 && r.x1 == 1600 && r.y1 == 1600;
-                    if (s_traceShadowScale && source->depth && source->pitch == 1600 && s_shadowResolveTraceCount++ < 16)
-                        fprintf(stderr, "[shadow-scale] resolve %s: source %s %ux%u, depthSource %u, format %u, dest %08X pitch %u, "
-                            "rect (%d,%d)-(%d,%d), array %u endian %u swap %u exp %d gpu-exp %u\n",
-                            directShadowResolve && !(s_exp & 2) ? "eligible" : "fallback",
-                            gpu::ScaleName(source->scale).c_str(), source->width, source->height, uint32_t(depthSource), format,
-                            rc.destBase, rc.destPitch, r.x0, r.y0, r.x1, r.y1, uint32_t(destInfo.copy_dest_array),
-                            uint32_t(destInfo.copy_dest_endian), uint32_t(destInfo.copy_dest_swap), destInfo.copy_dest_exp_bias, s_exp);
                     if (!wholeBlocks)
                         LogOnce(0x2500, "resolve at (%d,%d) (tile shift %d,%d) from a %s target isn't whole blocks: kept at 1x only, "
                             "its 1x average up to half a host pixel off", r.x0, r.y0, shiftX, shiftY, gpu::ScaleName(source->scale).c_str());
@@ -6908,9 +6610,12 @@ void main()
                     // Retain a scaled-memory fallback only at the target's
                     // scale; the shadow texture samples its render target
                     // directly when the scene and shadow scales differ.
+                    const bool shadowFallbackWanted = directShadowResolve && !s_renderScale.IsOne();
+                    const bool scaledTextureWanted = !directShadowResolve && ScaledWanted(rangeBase, rangeBytes);
+                    const bool scaledMemoryNeeded = shadowFallbackWanted || (!directShadowResolve && source->scale == s_renderScale);
+                    const bool scaledMemoryReady = scaledMemoryNeeded && EnsureScaledMemory() && source->scale == s_scaled.scale;
                     bool scaledWrite = !source->scale.IsOne() && wholeBlocks && bl == 2 && !destInfo.copy_dest_array &&
-                        EnsureScaledMemory() && source->scale == s_scaled.scale &&
-                        (directShadowResolve || ScaledWanted(rangeBase, rangeBytes));
+                        scaledMemoryReady && (shadowFallbackWanted || scaledTextureWanted);
                     bool freshSlots = false;  // a page here had no current scaled copy before this
                     // Pages whose samples only a scaled texture holds (see
                     // below): their slots are filled from the 1x data too
@@ -7314,10 +7019,17 @@ void main()
                         uint64_t writeSequence = writewatch::WriteSequence(rangeBase, rangeBytes);
                         if (writeSequence)
                         {
-                            s_shadowTargetsByResolve[rc.destBase] = { source, writeSequence };
-                            if (s_traceShadowScale && s_shadowResolveTraceCount <= 16)
-                                fprintf(stderr, "[shadow-scale] registered base %08X range %08X+%u write %llu\n",
-                                    rc.destBase, rangeBase, rangeBytes, (unsigned long long)writeSequence);
+                            if (!source->shared)
+                            {
+                                auto* d = new PooledDepth;
+                                d->image = source->image;
+                                d->sampleView = source->sampleView;
+                                d->format = source->vkFormat;
+                                d->width = source->width;
+                                d->height = source->height;
+                                source->shared = ShareDepth(d);
+                            }
+                            s_shadowTargetsByResolve[rc.destBase] = { source, source->shared, source->scale, writeSequence };
                         }
                     }
                     // The fused texture holds this write: its pages' sequence
@@ -7715,7 +7427,7 @@ void main()
                 {
                     TextureFormatInfo fi;
                     VkImageFormatProperties ifp;
-                    if (GetTextureFormat(f, fi) && ScaledFormat(fi))
+                    if (GetTextureFormat(f, fi) && ScaledFormat(fi, fi.convert == 4))
                         s_scaled.direct = vkGetPhysicalDeviceImageFormatProperties(s_vk->physical, fi.vk, VK_IMAGE_TYPE_2D,
                             VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT,
                             VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT | VK_IMAGE_CREATE_EXTENDED_USAGE_BIT, &ifp) == VK_SUCCESS;
@@ -8784,14 +8496,6 @@ void main()
             const gpu::RenderScale old = s_renderScale;
             Flush();
             s_renderScale = scale;
-            if (s_traceShadowScale)
-            {
-                s_shadowResolveTraceCount = 0;
-                s_shadowSampleTraceStates.clear();
-                s_shadowTextureTraceStates.clear();
-                fprintf(stderr, "[shadow-scale] internal %s -> %s; shadow scale %s\n",
-                    gpu::ScaleName(old).c_str(), gpu::ScaleName(scale).c_str(), gpu::ScaleName(s_shadowScale).c_str());
-            }
             s_shadowTargetsByResolve.clear();
             PrewarmResolvePipelines(scale);
             if (scale != s_shadowScale)
@@ -8845,14 +8549,6 @@ void main()
             Flush();
             s_shadowResolutionSetting = setting;
             s_shadowScale = gpu::ShadowScale(uint32_t(setting));
-            if (s_traceShadowScale)
-            {
-                s_shadowResolveTraceCount = 0;
-                s_shadowSampleTraceStates.clear();
-                s_shadowTextureTraceStates.clear();
-                fprintf(stderr, "[shadow-scale] shadow resolution %s -> %s\n",
-                    gpu::ScaleName(old).c_str(), gpu::ScaleName(s_shadowScale).c_str());
-            }
             s_shadowTargetsByResolve.clear();
             PrewarmResolvePipelines(s_shadowScale);
             size_t targets = 0;
@@ -9122,12 +8818,6 @@ void main()
             VkPhysicalDeviceProperties props;
             vkGetPhysicalDeviceProperties(s_vk->physical, &props);
             s_timestampPeriod = props.limits.timestampPeriod;
-            uint32_t queueFamilyCount = 0;
-            vkGetPhysicalDeviceQueueFamilyProperties(s_vk->physical, &queueFamilyCount, nullptr);
-            std::vector<VkQueueFamilyProperties> queueFamilies(queueFamilyCount);
-            vkGetPhysicalDeviceQueueFamilyProperties(s_vk->physical, &queueFamilyCount, queueFamilies.data());
-            if (s_vk->queueFamily < queueFamilyCount)
-                s_shadowTimestampValidBits = queueFamilies[s_vk->queueFamily].timestampValidBits;
             VkQueryPoolCreateInfo qpci{ VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO };
             qpci.queryType = VK_QUERY_TYPE_TIMESTAMP;
             qpci.queryCount = kSlots * 2;
@@ -9141,25 +8831,6 @@ void main()
             {
                 qpci.queryCount = 512;
                 Check(vkCreateQueryPool(s_dev, &qpci, nullptr, &s_passQueries), "pass query pool");
-            }
-            if (s_shaderProfileRequest.kind != ShaderProfileKind::kOff)
-            {
-                qpci.queryCount = kShaderProfileDrawLimit * 2;
-                Check(vkCreateQueryPool(s_dev, &qpci, nullptr, &s_shaderProfileQueries), "shader profile query pool");
-            }
-            if (s_shadowBenchmarkEnabled)
-            {
-                if (!s_shadowTimestampValidBits)
-                    fprintf(stderr, "[shadow-benchmark] unavailable: graphics queue does not support timestamp queries\n");
-                else
-                {
-                    qpci.queryCount = kShadowBenchmarkPassLimit * 2;
-                    for (uint32_t slot = 0; slot < kSlots; slot++)
-                        Check(vkCreateQueryPool(s_dev, &qpci, nullptr, &s_shadowPassQueries[slot]), "shadow pass query pool");
-                    s_shadowBenchmarkAvailable = true;
-                    fprintf(stderr, "[shadow-benchmark] GPU timing enabled: %u timestamp bits, up to %u shadow passes per submission\n",
-                        s_shadowTimestampValidBits, kShadowBenchmarkPassLimit);
-                }
             }
         }
         // NFSMW_OCCLUSION=1: a pool of occlusion queries per slot, so a reset
@@ -9243,31 +8914,6 @@ void main()
     bool Enabled()
     {
         return s_vk != nullptr;
-    }
-
-    ShadowBenchmarkAction ShadowBenchmarkHotkey(bool toggleContinuous)
-    {
-        if (!s_shadowBenchmarkEnabled)
-            return ShadowBenchmarkAction::kDisabled;
-        if (!s_shadowBenchmarkAvailable)
-            return ShadowBenchmarkAction::kUnavailable;
-        if (s_shaderProfileRequest.kind != ShaderProfileKind::kOff)
-            return ShadowBenchmarkAction::kUnavailable;
-        if (!toggleContinuous)
-        {
-            if (s_shadowBenchmarkReportsPending.load(std::memory_order_acquire))
-                return ShadowBenchmarkAction::kUnavailable;
-            s_shadowBenchmarkSingleRequested.store(true, std::memory_order_release);
-            return ShadowBenchmarkAction::kCapture;
-        }
-        bool requested = s_shadowBenchmarkContinuousRequested.load(std::memory_order_relaxed);
-        while (true)
-        {
-            if (!requested && s_shadowBenchmarkReportsPending.load(std::memory_order_acquire))
-                return ShadowBenchmarkAction::kUnavailable;
-            if (s_shadowBenchmarkContinuousRequested.compare_exchange_weak(requested, !requested, std::memory_order_acq_rel))
-                return !requested ? ShadowBenchmarkAction::kStarted : ShadowBenchmarkAction::kStopped;
-        }
     }
 
     void LoadShader(uint32_t type, const uint32_t* words, uint32_t dwords)
@@ -11345,7 +10991,6 @@ void main()
                     scissor.extent.height, scissor.offset.x, scissor.offset.y);
             }
         }
-        uint32_t shaderProfileQuery = s_shaderProfiling ? ShaderProfileBegin(depth) : UINT32_MAX;
         if (useIndices)
         {
             vkCmdBindIndexBuffer(s_cmd, s_ring, indexOffset, indices16 ? VK_INDEX_TYPE_UINT16 : VK_INDEX_TYPE_UINT32);
@@ -11355,8 +11000,6 @@ void main()
         {
             vkCmdDraw(s_cmd, vertexCount, 1, 0, 0);
         }
-        if (shaderProfileQuery != UINT32_MAX)
-            ShaderProfileEnd(shaderProfileQuery, s_frame + 1);
         // Edge bars (above): the same draw again per rectangle, with the
         // stretched posScale and the rectangle as its scissor (inside this
         // draw's own, so inside the pass); through setScissor and
@@ -11394,13 +11037,10 @@ void main()
             {
                 const gpu::bars::Rect& r = barPlan.rects[i];
                 setScissor(VkRect2D{ { r.x0, r.y0 }, { uint32_t(r.x1 - r.x0), uint32_t(r.y1 - r.y0) } });
-                shaderProfileQuery = s_shaderProfiling ? ShaderProfileBegin(depth) : UINT32_MAX;
                 if (useIndices)
                     vkCmdDrawIndexed(s_cmd, vertexCount, 1, 0, 0, 0);
                 else
                     vkCmdDraw(s_cmd, vertexCount, 1, 0, 0);
-                if (shaderProfileQuery != UINT32_MAX)
-                    ShaderProfileEnd(shaderProfileQuery, s_frame + 1);
             }
         }
         if (s_submitAfterDraw)
@@ -11791,185 +11431,6 @@ void main()
         return true;
     }
 
-    void ShadowBenchmarkReportThread()
-    {
-        SetHostThreadName("nfsmw-shadow-report");
-        hostcpu::LeaveReservedCore();
-        while (true)
-        {
-            ShadowBenchmarkReport report;
-            {
-                std::unique_lock lock(s_shadowBenchmarkReportMutex);
-                s_shadowBenchmarkReportCv.wait(lock, [] { return !s_shadowBenchmarkReports.empty(); });
-                report = std::move(s_shadowBenchmarkReports.front());
-                s_shadowBenchmarkReports.pop_front();
-            }
-            {
-                std::unique_lock lock(s_submitMutex);
-                s_submitCv.wait(lock, [&] { return s_completedSubmission >= report.submission; });
-            }
-
-            ShadowBenchmarkStats stats;
-            {
-                std::lock_guard lock(s_shadowBenchmarkStatsMutex);
-                if (s_shadowBenchmarkStats.hasCurrentFrame)
-                {
-                    s_shadowBenchmarkStats.framesWithPasses++;
-                    s_shadowBenchmarkStats.maxFrameUs = std::max(
-                        s_shadowBenchmarkStats.maxFrameUs, s_shadowBenchmarkStats.currentFrameUs);
-                }
-                stats = s_shadowBenchmarkStats;
-                s_shadowBenchmarkStats = {};
-            }
-            if (report.continuous)
-            {
-                const uint64_t frames = report.lastFrame >= report.firstFrame ? report.lastFrame - report.firstFrame + 1 : 0;
-                fprintf(stderr, "[shadow-benchmark] frames %llu-%llu: %llu frames, %llu/%llu shadow passes timed, "
-                                "%.1f us pass intervals (%.2f us/frame; max frame %.1f us, max pass %.1f us), "
-                                "%llu query failures (%llu unavailable, %llu invalid timestamps, %llu API errors), "
-                                "%llu passes over limit\n",
-                    (unsigned long long)report.firstFrame, (unsigned long long)report.lastFrame, (unsigned long long)frames,
-                    (unsigned long long)stats.timed, (unsigned long long)stats.passes, stats.sumUs,
-                    frames ? stats.sumUs / double(frames) : 0.0, stats.maxFrameUs, stats.maxPassUs,
-                    (unsigned long long)(stats.unavailable + stats.invalid + stats.apiErrors),
-                    (unsigned long long)stats.unavailable, (unsigned long long)stats.invalid,
-                    (unsigned long long)stats.apiErrors, (unsigned long long)stats.overLimit);
-            }
-            else
-                fprintf(stderr, "[shadow-benchmark] frame %llu: %llu/%llu shadow passes timed, %.1f us pass intervals, "
-                                "%llu query failures (%llu unavailable, %llu invalid timestamps, %llu API errors), "
-                                "%llu passes over limit\n",
-                    (unsigned long long)report.lastFrame, (unsigned long long)stats.timed, (unsigned long long)stats.passes,
-                    stats.sumUs, (unsigned long long)(stats.unavailable + stats.invalid + stats.apiErrors),
-                    (unsigned long long)stats.unavailable, (unsigned long long)stats.invalid,
-                    (unsigned long long)stats.apiErrors, (unsigned long long)stats.overLimit);
-            fprintf(stderr, "[shadow-benchmark] timestamps bracket complete shadow render passes; summed intervals are not exclusive shader-core time\n");
-
-            std::lock_guard lock(s_shadowBenchmarkReportMutex);
-            if (s_shadowBenchmarkReports.empty())
-                s_shadowBenchmarkReportsPending.store(false, std::memory_order_release);
-        }
-    }
-
-    void QueueShadowBenchmarkReport(uint64_t firstFrame, uint64_t lastFrame, bool continuous)
-    {
-        SubmitRecorded(5);
-        ShadowBenchmarkReport report;
-        report.firstFrame = firstFrame;
-        report.lastFrame = lastFrame;
-        report.submission = s_submissionCounter - 1;
-        report.continuous = continuous;
-        {
-            std::lock_guard lock(s_shadowBenchmarkReportMutex);
-            s_shadowBenchmarkReportsPending.store(true, std::memory_order_release);
-            s_shadowBenchmarkReports.push_back(std::move(report));
-        }
-        s_shadowBenchmarkReportCv.notify_one();
-    }
-
-    void ShadowBenchmarkOnSwap(uint64_t frame)
-    {
-        if (!s_shadowBenchmarkEnabled || !s_vk || s_shaderProfileRequest.kind != ShaderProfileKind::kOff)
-            return;
-        static std::once_flag reportThreadOnce;
-        std::call_once(reportThreadOnce, [] { std::thread(ShadowBenchmarkReportThread).detach(); });
-
-        const bool singleRequested = s_shadowBenchmarkSingleRequested.exchange(false, std::memory_order_acq_rel);
-        if (s_shadowBenchmarkActive)
-        {
-            const bool stop = s_shadowBenchmarkContinuous
-                ? !s_shadowBenchmarkContinuousRequested.load(std::memory_order_acquire)
-                : s_shadowBenchmarkSinglePending;
-            if (s_shadowBenchmarkSinglePending || stop)
-            {
-                if (stop)
-                {
-                    QueueShadowBenchmarkReport(s_shadowBenchmarkFirstFrame, frame, s_shadowBenchmarkContinuous);
-                    s_shadowBenchmarkSinglePending = false;
-                    s_shadowBenchmarkActive = false;
-                    s_shadowBenchmarkContinuous = false;
-                    return;
-                }
-                QueueShadowBenchmarkReport(frame, frame, false);
-                s_shadowBenchmarkSinglePending = false;
-            }
-        }
-
-        if (!s_shadowBenchmarkActive)
-        {
-            const bool continuous = s_shadowBenchmarkContinuousRequested.load(std::memory_order_acquire);
-            if (!continuous && !singleRequested)
-                return;
-            s_shadowBenchmarkFirstFrame = frame + 1;
-            s_shadowBenchmarkActive = true;
-            s_shadowBenchmarkContinuous = continuous;
-            s_shadowBenchmarkSinglePending = singleRequested;
-            {
-                std::lock_guard lock(s_shadowBenchmarkStatsMutex);
-                s_shadowBenchmarkStats = {};
-            }
-            fprintf(stderr, "[shadow-benchmark] measuring %s from frame %llu\n", continuous ? "continuously" : "one frame",
-                (unsigned long long)s_shadowBenchmarkFirstFrame);
-        }
-        else if (singleRequested)
-            s_shadowBenchmarkSinglePending = true;
-
-    }
-
-    void ShaderProfileOnSwap(uint64_t frame)
-    {
-        if (!s_vk || s_shaderProfileRequest.kind == ShaderProfileKind::kOff)
-            return;
-        if (frame == s_shaderProfileRequest.frame)
-        {
-            s_shaderProfiling = true;
-            s_shaderProfileQueriesReset = false;
-            s_shaderProfileQueryNext = 0;
-            s_shaderProfileDropped = 0;
-            s_shaderProfileDraws.clear();
-            s_shaderProfileDraws.reserve(kShaderProfileDrawLimit);
-            fprintf(stderr, "[shader-profile] measuring frame %llu\n", (unsigned long long)frame);
-            return;
-        }
-        if (!s_shaderProfiling || frame != s_shaderProfileRequest.frame + 1)
-            return;
-        s_shaderProfiling = false;
-        Flush();
-
-        struct Totals { uint32_t draws = 0; double sumUs = 0, maxUs = 0; };
-        std::map<std::pair<uint64_t, uint64_t>, Totals> totals;
-        uint32_t failed = 0;
-        for (const ShaderProfileDraw& draw : s_shaderProfileDraws)
-        {
-            uint64_t timestamps[2] = {};
-            VkResult result = vkGetQueryPoolResults(s_dev, s_shaderProfileQueries, draw.query, 2, sizeof(timestamps), timestamps,
-                sizeof(uint64_t), VK_QUERY_RESULT_64_BIT);
-            if (result != VK_SUCCESS || timestamps[1] <= timestamps[0])
-            {
-                failed++;
-                continue;
-            }
-            double us = double(timestamps[1] - timestamps[0]) * s_timestampPeriod / 1000.0;
-            Totals& t = totals[{ draw.vsHash, draw.psHash }];
-            t.draws++;
-            t.sumUs += us;
-            t.maxUs = std::max(t.maxUs, us);
-        }
-        uint32_t timed = 0;
-        double sumUs = 0;
-        for (const auto& [hashes, t] : totals)
-        {
-            timed += t.draws;
-            sumUs += t.sumUs;
-        }
-        fprintf(stderr, "[shader-profile] frame %llu: %u draws timed, %.1f us summed intervals, %u query failures, %u draws over limit\n",
-            (unsigned long long)s_shaderProfileRequest.frame, timed, sumUs, failed, s_shaderProfileDropped);
-        for (const auto& [hashes, t] : totals)
-            fprintf(stderr, "[shader-profile] vs_%016llx ps_%016llx: %u draws, sum %.1f us, avg %.2f us, max %.1f us\n",
-                (unsigned long long)hashes.first, (unsigned long long)hashes.second, t.draws, t.sumUs, t.sumUs / t.draws, t.maxUs);
-        fprintf(stderr, "[shader-profile] intervals use per-draw GPU timestamps; sums may include overlapped pipeline work and are not exclusive shader-core time\n");
-    }
-
     void OnSwap(uint64_t frame)
     {
         HfrDrawMatchSwap(frame);  // DIAG (v0.1.5 HFR scoping)
@@ -11997,8 +11458,6 @@ void main()
             writewatch::SetWriterFrame(frame);
         }
         s_frame = frame;
-        ShadowBenchmarkOnSwap(frame);
-        ShaderProfileOnSwap(frame);
         if (s_zpdOn)
             ZpdOnSwap(frame);
         if (s_logShadowMap)
