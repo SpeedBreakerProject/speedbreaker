@@ -696,6 +696,23 @@ namespace gpu::renderer
             img = {};
         }
 
+        // Frees the pooled depth images nobody holds (the GPU idle). A change
+        // of the shadow size leaves the old size's behind, never reused.
+        void DrainDepthPool()
+        {
+            auto& pool = DepthPool();
+            for (PooledDepth* d : pool)
+            {
+                for (auto& [swizzle, view] : d->views)
+                    vkDestroyImageView(s_dev, view, nullptr);
+                if (d->sampleView && d->sampleView != d->image.view)
+                    vkDestroyImageView(s_dev, d->sampleView, nullptr);
+                DestroyImage(d->image);
+                delete d;
+            }
+            pool.clear();
+        }
+
         // ---------------------------------------------------------------
         // Command recording
 
@@ -6612,7 +6629,7 @@ void main()
                     // directly when the scene and shadow scales differ.
                     const bool shadowFallbackWanted = directShadowResolve && !s_renderScale.IsOne();
                     const bool scaledTextureWanted = !directShadowResolve && ScaledWanted(rangeBase, rangeBytes);
-                    const bool scaledMemoryNeeded = shadowFallbackWanted || (!directShadowResolve && source->scale == s_renderScale);
+                    const bool scaledMemoryNeeded = shadowFallbackWanted || (!directShadowResolve && !source->scale.IsOne() && source->scale == s_renderScale);
                     const bool scaledMemoryReady = scaledMemoryNeeded && EnsureScaledMemory() && source->scale == s_scaled.scale;
                     bool scaledWrite = !source->scale.IsOne() && wholeBlocks && bl == 2 && !destInfo.copy_dest_array &&
                         scaledMemoryReady && (shadowFallbackWanted || scaledTextureWanted);
@@ -8585,6 +8602,7 @@ void main()
             for (RecentTarget& recent : s_recentTargets)
                 recent = {};
             const size_t textures = DropTextures([](const Texture& t) { return t.shadowMap; });
+            DrainDepthPool();
             ResetScaledMemory(!s_renderScale.IsOne());
             fprintf(stderr, "[renderer] shadow resolution %s: %zu targets and %zu shadow textures replaced in %.1f ms\n",
                 gpu::ScaleName(s_shadowScale).c_str(), targets, textures,
