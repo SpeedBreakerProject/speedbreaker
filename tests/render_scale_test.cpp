@@ -684,6 +684,12 @@ static void TestParse()
     CHECK(gpu::ScaleName(RenderScale::Whole(3, 2)) == "3x2", "%s", gpu::ScaleName(RenderScale::Whole(3, 2)).c_str());
     CHECK((gpu::AxisFromHalves(2) == AxisScale{ 1, 1 }) && (gpu::AxisFromHalves(3) == kHalf) && (gpu::AxisFromHalves(4) == AxisScale{ 2, 1 }) &&
         (gpu::AxisFromHalves(6) == AxisScale{ 3, 1 }), "half steps");
+    CHECK(gpu::ShadowScale(2) == RenderScale::Whole(1, 1), "shadow setting 1x");
+    CHECK((gpu::ShadowScale(3) == RenderScale{ kHalf, kHalf }), "shadow setting 1.5x");
+    CHECK(gpu::ShadowScale(4) == RenderScale::Whole(2, 2), "shadow setting 2x");
+    CHECK(gpu::ShadowScale(6) == RenderScale::Whole(2, 2), "shadow setting caps at 2x");
+    CHECK(gpu::ShadowPoolMegabytes(RenderScale{ kHalf, kHalf }) == 256, "1.5x shadow pool");
+    CHECK(gpu::ShadowPoolMegabytes(RenderScale::Whole(2, 2)) == 384, "2x shadow pool");
     RenderScale half{ kHalf, kHalf };
     CHECK(half.x.Size(1280) == 1920 && half.y.Size(720) == 1080 && half.SlotWords() == 2304 && half.PixelsNum() == 9 && half.PixelsDen() == 4,
         "1.5x: %ux%u, %u words a page", half.x.Size(1280), half.y.Size(720), half.SlotWords());

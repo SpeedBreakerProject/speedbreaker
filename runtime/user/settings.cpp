@@ -141,6 +141,12 @@ namespace settings
             { 6, "3x", "3x (2160p)" },
         };
 
+        constexpr EnumEntry kShadowResolutionEntries[] = {
+            { 2, "1x", "1x (1600x1600)" },
+            { 3, "1.5x", "1.5x (2400x2400)" },
+            { 4, "2x", "2x (3200x3200)" },
+        };
+
         constexpr EnumEntry kAnisotropyEntries[] = {
             { kAnisotropyAuto, "auto", "Auto" },
             { 1, "off", "Off" },
@@ -289,6 +295,10 @@ namespace settings
               .table = "video", .key = "internal_resolution", .label = "Internal Resolution",
               .description = "Render the 3D scene above the 360's 720p. 1.5x is 1080p, a little over half the pixels of 2x. On a screen of another shape filled by Fill Screen, each step renders that shape: 1x on a Steam Deck is its own 1280x800. Auto: from the screen (1440p: 2x; a Steam Deck: its 1280x800).",
               .env = "NFSMW_RESOLUTION", .defaultValue = kResolutionAuto, .entries = kResolutionEntries },
+            { .id = Id::ShadowResolution, .category = Category::Graphics, .type = Type::Enum, .apply = Apply::Live,
+              .table = "video", .key = "shadow_resolution", .label = "Shadow Resolution",
+              .description = "Sharper sun shadows: draw the game's 1600x1600 shadow map at 1.5x or 2x. 1x is as on the Xbox 360. Higher settings use more GPU time and memory.",
+              .env = "NFSMW_SHADOW_RESOLUTION", .defaultValue = kShadowResolutionDefault, .entries = kShadowResolutionEntries },
             { .id = Id::WindowWidth, .category = Category::Display, .type = Type::Int, .apply = Apply::Restart, .hidden = true,
               .table = "video", .key = "window_width", .label = "Window Width",
               .description = "The window's width when the game starts.",

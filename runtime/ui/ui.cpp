@@ -6,6 +6,7 @@
 #include <hid/input.h>
 #include <hid/wheel.h>       // the settings chord and the menus from a steering wheel
 #include <hid/wheel_map.h>   // ...which buttons those are
+#include <gpu/renderer.h>
 #include <kernel/xam.h>
 #include <report/report.h>
 #include <user/settings.h>

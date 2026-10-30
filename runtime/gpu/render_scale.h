@@ -267,6 +267,23 @@ namespace gpu
         return halves % 2 == 0 ? AxisScale{ halves / 2, 1 } : AxisScale{ halves, 2 };
     }
 
+    inline RenderScale ShadowScale(uint32_t halves)
+    {
+        const AxisScale axis = AxisFromHalves(std::clamp(halves, 2u, 4u));
+        return { axis, axis };
+    }
+
+    // The shadow scaled-memory pool's minimum budgets at its supported
+    // non-native sizes. The general scaled pool may need more for scene data.
+    inline uint64_t ShadowPoolMegabytes(const RenderScale& scale)
+    {
+        if (scale == RenderScale{ { 3, 2 }, { 3, 2 } })
+            return 256;
+        if (scale == RenderScale::Whole(2, 2))
+            return 384;
+        return 0;
+    }
+
     // num / den with no common factor.
     inline AxisScale Reduced(uint32_t num, uint32_t den)
     {
