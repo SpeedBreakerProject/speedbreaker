@@ -846,6 +846,8 @@ namespace ui
                 ImGui::TextDisabled("Off while the game runs at 30 fps (Frame Rate).");
             else if (o.id == Id::SmoothMotion && settings::GetBool(o.id) && !video::HfrOffered())
                 ImGui::TextDisabled("This screen shows 60 pictures a second: nothing to add here.");
+            else if (o.id == Id::Hdr || o.id == Id::HdrFormat || o.id == Id::HdrStrength)
+                ImGui::TextDisabled("In use: %s.", video::HdrStatus());
             else if (o.apply == settings::Apply::Restart)
                 ImGui::TextDisabled("Changes take effect the next time the game starts.");
             else if (std::string note = o.id == Id::FrameRate ? video::AutoFrameRateNote() : std::string(); !note.empty())

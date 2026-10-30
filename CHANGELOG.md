@@ -4,6 +4,35 @@ What changed in each SpeedBreaker release, newest first. Each release's notes on
 its entry here, and the game shows the entry once, the first time a new version starts (offline:
 it's built into the game).
 
+## Unreleased
+
+### What's new
+
+- HDR output on a Mac with an HDR display (Settings > Display > HDR Output, off by default): the
+  game's highlights — the sun, headlights, lit signs — reach the display's extended dynamic range.
+  This settings overlay stays at standard brightness; the game's own front end and HUD are part of
+  the picture, so their whites follow the highlights too. HDR Format chooses Auto, Extended Linear,
+  or HDR10 (PQ); Auto uses Extended Linear where the screen reports HDR capability, and stays at
+  standard range where it doesn't. HDR Strength sets how far highlights go above SDR white: 2x
+  (200 nits in HDR10) by default, up to 4x (400 nits). A mostly white frame is dimmed toward SDR,
+  so a boot flash or a full-screen logo doesn't become a 4x flash. HDR10 sends PQ with BT.2020
+  primaries and metadata, but the display's HDR mode still follows macOS. Implemented by
+  @danielgpinheiro, from @DoubleDips's idea (GitHub issue #25).
+
+### More about it
+
+- HDR Output uses either a 16-bit-float swapchain in extended linear sRGB (macOS EDR) or a 10-bit
+  swapchain in HDR10/PQ with static metadata; the log says "swapchain: HDR" or
+  "swapchain: HDR10" with the choice. The game renders into its usual 8-bit SDR surfaces first,
+  and the composite expands by Rec.709 luma rather than each channel, so bright colours keep their
+  hue. SDR white is 1.0 in EDR and 100 nits in HDR10; HDR Strength picks the peak that white
+  reaches (2x/200 nits by default, up to 4x/400), and a per-frame average limiter lowers it toward
+  SDR when the scene is mostly white, keeping MaxFALL at 100. EDR's current headroom follows the display every
+  frame. Bug-report screenshots and NFSMW_CHECK_PRESENT_SEC
+  captures stay standard-range; the PPM decodes PQ from BT.2020 back to Rec.709. NFSMW_HDR=1,
+  NFSMW_HDR_FORMAT=auto|edr|hdr10 and NFSMW_HDR_STRENGTH=2x|3x|4x set them for a run; iOS and
+  Linux don't offer them.
+
 ## v0.2.0
 
 ### What's new

@@ -125,6 +125,26 @@ namespace settings
         constexpr bool kLanguageHidden = false;
 #endif
 
+        // HDR Output: macOS only (MoltenVK sets CAMetalLayer EDR on macOS;
+        // iOS needs the layer poked itself, and the issue is a Mac feature).
+#if defined(__APPLE__) && !TARGET_OS_IOS
+        constexpr bool kHdrHidden = false;
+#else
+        constexpr bool kHdrHidden = true;
+#endif
+
+        constexpr EnumEntry kHdrFormatEntries[] = {
+            { 0, "auto", "Auto" },
+            { 1, "edr", "Extended Linear" },
+            { 2, "hdr10", "HDR10 (PQ)" },
+        };
+
+        constexpr EnumEntry kHdrStrengthEntries[] = {
+            { 2, "2x", "2x (200 nits)" },
+            { 3, "3x", "3x (300 nits)" },
+            { 4, "4x", "4x (400 nits)" },
+        };
+
         constexpr EnumEntry kAspectEntries[] = {
             { int32_t(AspectMode::Auto), "auto", "Fill Screen" },
             { int32_t(AspectMode::Widescreen), "16:9", "16:9" },
@@ -271,6 +291,18 @@ namespace settings
               .table = "video", .key = "xbox_display_gamma", .label = "Xbox 360 Display Gamma",
               .description = "The gamma ramp the game itself sets for a real Xbox 360's TV output: a little deeper shadows and brighter mid-tones, as on the console. Off: the flatter picture of SpeedBreaker 0.1.3 and earlier.",
               .env = "NFSMW_DISPLAY_GAMMA", .defaultValue = 1 },
+            { .id = Id::Hdr, .category = Category::Display, .type = Type::Bool, .apply = Apply::Live, .hidden = kHdrHidden,
+              .table = "video", .key = "hdr", .label = "HDR Output",
+              .description = "Brighter highlights on an HDR display (extended dynamic range). The game's own picture, including its front end, follows the highlights; this settings overlay stays at standard brightness. Off: the standard-range picture.",
+              .env = "NFSMW_HDR", .defaultValue = 0 },
+            { .id = Id::HdrFormat, .category = Category::Display, .type = Type::Enum, .apply = Apply::Live, .hidden = kHdrHidden,
+              .table = "video", .key = "hdr_format", .label = "HDR Format",
+              .description = "How HDR is sent. Auto: Extended Linear on a display that reports HDR capability, otherwise standard range. HDR10 (PQ) sends the PQ signal and metadata; the display's HDR mode still follows macOS.",
+              .env = "NFSMW_HDR_FORMAT", .defaultValue = 0, .entries = kHdrFormatEntries },
+            { .id = Id::HdrStrength, .category = Category::Display, .type = Type::Enum, .apply = Apply::Live, .hidden = kHdrHidden,
+              .table = "video", .key = "hdr_strength", .label = "HDR Strength",
+              .description = "How far white and highlights go above SDR white: 2x by default (200 nits in HDR10), 3x, or 4x. A frame that is mostly white is dimmed toward SDR automatically, so a boot flash or a full-screen logo does not become a 4x flash.",
+              .env = "NFSMW_HDR_STRENGTH", .defaultValue = 2, .entries = kHdrStrengthEntries },
             { .id = Id::Sharpening, .category = Category::Graphics, .type = Type::Float, .apply = Apply::Live,
               .table = "video", .key = "sharpening", .label = "Sharpening",
               .description = kFsr1Offered
