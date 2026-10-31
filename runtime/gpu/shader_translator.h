@@ -62,6 +62,10 @@ namespace gpu
     // NFSMW_CP_OPT bit 8 (on by default): translate shaders with packed constants.
     bool PackedConstantsEnabled();
 
+    // NFSMW_CONST_REL_RING (on by default): relative constant reads (constRel)
+    // come from the ring's storage buffer rather than the uniform buffer.
+    bool RelativeConstantsFromRing();
+
     // `ucode` is in host byte order (swap the guest's big-endian words first).
     TranslatedShader TranslateShader(ShaderStage stage, const uint32_t* ucode, size_t dwordCount);
 

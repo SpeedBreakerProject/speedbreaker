@@ -50,10 +50,16 @@ namespace settings
         AspectRatio,
         Brightness,    // the game's picture (video/display_tone.h)
         DisplayGamma,  // the 360's display gamma ramp (video/display_gamma.h)
+        CoolerColors,  // cooler color balance with less yellow (video/display_tone.h)
+        Hdr,           // extended dynamic range output (macOS; video/hdr_output.h)
+        HdrFormat,     // how HDR is encoded: Auto, Extended Linear, HDR10 (PQ)
+        HdrStrength,   // brightest highlight over SDR white: 2x, 3x, or 4x
+        HdrPaperWhite, // HDR10's SDR white in nits: Auto (0), 100, 200, 300, 400
         Sharpening,
         Anisotropy,
         Mipmaps,
         InternalResolution,
+        ShadowResolution,
         WindowWidth,   // hidden: the window's size, remembered between runs
         WindowHeight,  // hidden
         // Audio
@@ -158,6 +164,9 @@ namespace settings
     // are saved, so the numbers are free to change); Auto picks it from the
     // screen area the picture covers (see renderer).
     constexpr int32_t kResolutionAuto = 0;
+    // Shadow Resolution: the independent scale of the 1600x1600 sun shadow map,
+    // in half steps (2: 1x, 3: 1.5x, 4: 2x).
+    constexpr int32_t kShadowResolutionDefault = 2;
     // Auto: a screen of another shape is filled (video/picture_fit), the HUD
     // kept in a centred 16:9 block: a wider one with a wider view (Hor+), a
     // narrower one (16:10: the Steam Deck, 1280x800 Macs; 3:2, 4:3) with a

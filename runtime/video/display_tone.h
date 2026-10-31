@@ -1,11 +1,12 @@
 // SpeedBreaker runtime. GPL-3.0-or-later (see COPYING).
 //
 // The picture's tone curve in the presenter's last pass (video/presenter.cpp):
-// Settings > Display > Brightness, and "Xbox 360 Display Gamma" (on by
-// default: the ramp the game programs into the 360's display output,
-// video/display_gamma.h). Both only touch the game's picture, never the menus
-// drawn over it, and with Brightness 0 and the ramp off nothing is applied at
-// all: the presenter draws with the same pipeline as before (Neutral()).
+// Settings > Display > Brightness, "Xbox 360 Display Gamma" (on by default:
+// the ramp the game programs into the 360's display output,
+// video/display_gamma.h) and "Cooler Colors" (off by default). They only
+// touch the game's picture, never the menus drawn over it, and with
+// Brightness 0, the ramp off and Cooler Colors off nothing is applied at all:
+// the presenter draws with the same pipeline as before (Neutral()).
 //
 // Brightness is a power curve on the picture's values, as a console's
 // brightness option (and the game's own) works: black stays black, white
@@ -56,9 +57,9 @@ namespace video::tone
     }
 
     // Nothing to apply: the presenter keeps its plain pipeline.
-    inline bool Neutral(int32_t brightness, bool useRamp)
+    inline bool Neutral(int32_t brightness, bool useRamp, bool coolerColors = false)
     {
-        return std::clamp(brightness, kBrightnessMin, kBrightnessMax) == 0 && !useRamp;
+        return std::clamp(brightness, kBrightnessMin, kBrightnessMax) == 0 && !useRamp && !coolerColors;
     }
 
     // out[k][c]: what framebuffer value k/255 of channel c (red, green, blue)
@@ -69,15 +70,26 @@ namespace video::tone
     };
 
     // The table for a Brightness step and, when `ramp` is given, the 360's
-    // display ramp before it.
-    inline Lut BuildLut(int32_t brightness, const display_gamma::Table* ramp)
+    // display ramp before it, plus optional cooler color compensation.
+    inline Lut BuildLut(int32_t brightness, const display_gamma::Table* ramp, bool coolerColors = false)
     {
         Lut lut;
         for (uint32_t k = 0; k < 256; k++)
             for (uint32_t c = 0; c < 3; c++)
             {
                 double v = ramp ? ramp->entry[k][c] / 1023.0 : k / 255.0;
-                lut.entry[k][c] = float(ApplyBrightness(v, brightness));
+                v = ApplyBrightness(v, brightness);
+                if (coolerColors)
+                {
+                    // Cooler picture: lower red and green, raise blue.
+                    if (c == 0) // Red
+                        v = std::pow(v, 1.05);
+                    else if (c == 1) // Green
+                        v = std::pow(v, 1.02);
+                    else if (c == 2) // Blue
+                        v = std::pow(v, 0.82);
+                }
+                lut.entry[k][c] = float(v);
             }
         return lut;
     }

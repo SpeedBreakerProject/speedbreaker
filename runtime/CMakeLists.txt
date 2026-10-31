@@ -182,10 +182,11 @@ if(TARGET glslang::SPIRV)
     target_link_libraries(SpeedBreaker PRIVATE glslang::SPIRV)
 endif()
 # platform/apple/*.mm (iOS: linked by scripts/ios/build.sh): Foundation, and
-# on macOS AppKit (file_dialog.mm) and CoreFoundation (install/placement.cpp:
-# is a folder in iCloud Drive).
+# on macOS AppKit (file_dialog.mm), CoreFoundation (install/placement.cpp:
+# is a folder in iCloud Drive) and QuartzCore (macos_window.mm: the Metal
+# layer's EDRMetadata).
 if(APPLE AND NOT IOS)
-    target_link_libraries(SpeedBreaker PRIVATE "-framework Foundation" "-framework AppKit" "-framework CoreFoundation")
+    target_link_libraries(SpeedBreaker PRIVATE "-framework Foundation" "-framework AppKit" "-framework CoreFoundation" "-framework QuartzCore")
 endif()
 target_include_directories(SpeedBreaker SYSTEM PRIVATE ${FFMPEG_INCLUDE_DIR} ${XR}/thirdparty/tomlplusplus/include)
 # Assertions stay on in every build type: ported code marks its unhandled

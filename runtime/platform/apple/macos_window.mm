@@ -8,6 +8,7 @@
 #include <platform/macos_window.h>
 
 #import <AppKit/AppKit.h>
+#import <QuartzCore/CAMetalLayer.h>
 #include <cmath>
 #include <SDL3/SDL.h>
 #include <ui/ui.h>
@@ -184,6 +185,51 @@ namespace platform::macos
         if (number && CGDisplayIsBuiltin(CGDirectDisplayID(number.unsignedIntValue)))
             return false;
         return shortest > 0 && longest > 0 && std::abs(longest - shortest) <= 0.01 * shortest;
+    }
+
+    float DisplayHeadroom(SDL_Window* window)
+    {
+        NSWindow* w = CocoaWindow(window);
+        NSScreen* screen = w ? w.screen : nil;
+        if (!screen)
+            return 1.0f;
+        const CGFloat headroom = screen.maximumExtendedDynamicRangeColorComponentValue;
+        return headroom > 1.0 ? float(headroom) : 1.0f;
+    }
+
+    float DisplayPotentialHeadroom(SDL_Window* window)
+    {
+        NSWindow* w = CocoaWindow(window);
+        NSScreen* screen = w ? w.screen : nil;
+        if (!screen)
+            return 1.0f;
+        const CGFloat headroom = screen.maximumPotentialExtendedDynamicRangeColorComponentValue;
+        return headroom > 1.0 ? float(headroom) : 1.0f;
+    }
+
+    void ClearEdrMetadata(SDL_Window* window)
+    {
+        NSWindow* w = CocoaWindow(window);
+        if (!w || !w.contentView)
+            return;
+        @autoreleasepool
+        {
+            // SDL's Metal view sits under the content view: every Metal layer
+            // there, depth first.
+            NSMutableArray<NSView*>* views = [NSMutableArray arrayWithObject:w.contentView];
+            while (views.count)
+            {
+                NSView* view = views.lastObject;
+                [views removeLastObject];
+                if ([view.layer isKindOfClass:[CAMetalLayer class]])
+                {
+                    CAMetalLayer* layer = (CAMetalLayer*)view.layer;
+                    if (layer.EDRMetadata)
+                        layer.EDRMetadata = nil;
+                }
+                [views addObjectsFromArray:view.subviews];
+            }
+        }
     }
 
     void ForgetWindow(SDL_Window*)

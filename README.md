@@ -78,12 +78,16 @@ and a settings menu you can open mid-race.
 - **Ten languages.** English, French, German, Italian, Spanish, Dutch, Swedish, Danish, Polish
   and Finnish, from the disc's own text (Settings > Game > Language). On the USA disc the movies
   and the speech stay in English; on the PAL disc they're Spanish.
+- **HDR (new).** On an HDR display (a Mac with one, SteamOS and the Steam Deck OLED with HDR on,
+  or a Windows or Linux PC in HDR) the sun, headlights and lit signs go brighter than white,
+  while the rest of the picture stays as it was. Off by default.
 - **The sun glare is back.** The low sun glows in open sky and fades behind buildings, as it did
   on the console.
 - **The original look:** sunlit roads and shadows as on the console, the picture a real Xbox 360
   sends to a TV (the game's own display gamma), correct colours on Apple devices, proper car paint
   and mirror reflections, and distant textures that don't shimmer. Anti-aliasing, sharpening,
-  FSR 1 upscaling, a Brightness setting and up to 16x anisotropic filtering are also available.
+  FSR 1 upscaling, a Brightness setting, up to 16x anisotropic filtering, sun shadows at up to
+  twice the console's resolution and a cooler colour balance are also available.
 - **A guided installer.** It finds your disc image, checks that it is the right game, and
   verifies all 49 files as it copies them. An interrupted install never leaves a broken game.
 - **Your controller, or the keyboard.** Controllers work as an Xbox 360 pad, with hot-plugging
@@ -127,7 +131,7 @@ belongs to its owners.</sub>
 | **Linux** (x86-64) | [Download][dl-steamos-x86_64] the x86-64 SteamOS build, `SpeedBreaker-steamos-x86_64.tar.xz`, or [build from source](#building-from-source) | Tested here on SteamOS. Players reported v0.1.1 working on Fedora 44 (GeForce GTX 1080 Ti) and Ubuntu 24.04 (Intel Arc 140T). Other setups: reports welcome. |
 | **Mac** (Apple silicon) | [Download][dl-macos]<br>`SpeedBreaker-macos.dmg` | MacBook Pro (M1 Pro) on macOS 27 and Mac Studio (M4 Max) on macOS 26; macOS 15.6 (Sequoia) in a virtual machine. There is no Intel Mac build. |
 | **iPhone** and **iPad** | [Sideload the IPA](#iphone-and-ipad) (experimental), `SpeedBreaker-<version>-ios.ipa` on the [release page][releases], or [build it yourself](#iphone-and-ipad) with Xcode | iPhone 15 Pro Max and iPhone 18 Pro Max (iOS 27). iPad Pro 12.9-inch (M2, iPadOS 27) with a Backbone Pro. Not on the App Store. Those were Xcode-signed builds: the IPA itself hasn't been installed on a device yet. |
-| **Windows** (beta) | [Download][all-releases] `SpeedBreaker-0.2.0-windows-x64-beta.zip` from the Releases page; see [Windows (beta)](#windows-beta) | A laptop with Intel UHD Graphics (60 Hz). NVIDIA, AMD and recent Intel Arc graphics and 120/144 Hz monitors haven't been tested yet: [reports welcome](#reporting-a-bug). |
+| **Windows** (beta) | [Download][all-releases] `SpeedBreaker-0.2.1-windows-x64-beta.zip` from the Releases page; see [Windows (beta)](#windows-beta) | A laptop with Intel UHD Graphics (60 Hz). NVIDIA, AMD and recent Intel Arc graphics and 120/144 Hz monitors haven't been tested yet: [reports welcome](#reporting-a-bug). |
 | **Android** | Coming soon | |
 
 Each link downloads the newest release. Every file and its `.sha256` checksum file are on the
@@ -307,7 +311,7 @@ its name>`, e.g. `NFSMW_GPU=intel %command%` in Steam's launch options.
 ### Windows (beta)
 
 The Windows version is a **beta**: so far it has been tested on one laptop with Intel UHD
-Graphics and a 60 Hz screen. Download `SpeedBreaker-0.2.0-windows-x64-beta.zip` from the
+Graphics and a 60 Hz screen. Download `SpeedBreaker-0.2.1-windows-x64-beta.zip` from the
 [Releases page][all-releases], right-click it, choose **Extract All**, and double-click
 `SpeedBreaker.exe` in the extracted folder (not inside the zip). SpeedBreaker isn't signed, so
 Windows may say **"Windows protected your PC"**: click **More info**, then **Run anyway**.
@@ -366,7 +370,7 @@ SpeedBreaker isn't on the App Store. There are two ways to get it onto your iPho
 
 Once SpeedBreaker is on your device:
 
-1. **Get your disc image onto it.** Copy the `.iso` into **Files > On My iPhone (or iPad) >
+1. **Get your disc image onto it** (the USA or the European (PAL) Spanish disc). Copy the `.iso` into **Files > On My iPhone (or iPad) >
    SpeedBreaker**, where it is found by itself. Or tap **Browse** and pick it from anywhere the
    Files app reaches, such as iCloud Drive or a USB drive. A browsed image is read where it is,
    not copied first.
@@ -455,6 +459,11 @@ switcher).
 | Aspect Ratio | Fill Screen / 16:9 | Fill Screen: wider screens get a wider view; 4:3, 3:2 and 16:10 screens (the Steam Deck, many Macs) a taller one. Since v0.1.9 the game renders the screen's own shape: a Steam Deck draws 1280x800 at 1x, a 1920x1200 screen 1920x1200 at 1.5x. 16:9 always shows the classic picture with bars. |
 | Brightness | -5 to +5 | 0, the picture as it is. Each step makes the shadows and mid-tones a little lighter or darker, like a TV's brightness; black and white stay put, and the menus never change. |
 | Xbox 360 Display Gamma | On / Off | On: the gamma ramp the game sets for a real Xbox 360's TV output, with slightly deeper shadows and slightly brighter mid-tones. Off: the flatter picture of v0.1.3 and earlier. |
+| Cooler Colors | On / Off | Off, the game's own colours. On: a cooler picture with less of the game's yellow (blue raised, red and green lowered a little), menus and movies included. |
+| HDR Output | On / Off | Off. On an HDR display, the game's highlights (the sun, headlights, lit signs) go brighter than white; the rest of the picture stays as in standard range, and the settings menu stays at standard brightness. Shown on a Mac, SteamOS, Linux and Windows; it takes effect where the display (or the system, in HDR mode) offers HDR. A mostly white frame, or a large bright area such as tyre smoke, is held near white, so it doesn't flash or glow. Not on iPhone and iPad. |
+| HDR Format | Auto / Extended Linear / HDR10 (PQ) | Auto: Extended Linear (macOS's EDR) on a display that reports HDR. HDR10 sends the PQ signal with its metadata. Mac only; elsewhere HDR is always HDR10. |
+| HDR Strength | 2x / 3x / 4x | 2x: how far the brightest highlights go above white. |
+| HDR Paper White | Auto / 100 / 200 / 300 / 400 | Auto: how bright ordinary white is in HDR10, in nits, matching the system (100 on a Mac, 200 on Windows and Linux, 400 on SteamOS and the Steam Deck). Raise it if HDR looks dimmer than the game without it. |
 
 The game's own Brightness slider, in the pause menu's Options > Video, works too while Xbox 360
 Display Gamma is on (with it off, it does nothing). Its middle is the default look; Y (Defaults),
@@ -470,6 +479,7 @@ then Yes, puts it back.
 | Anisotropic Filtering | Auto / Off / 2x / 4x / 8x / 16x / Original | Auto: 16x on dedicated graphics cards and M-series iPads, 4x elsewhere. Original uses each texture's own setting, as on the 360. |
 | Mipmaps | On / Off | On, so distant textures don't shimmer |
 | Internal Resolution | Auto / 1x / 1.5x / 2x / 3x | Each entry shows the size it renders on your screen (1x (1280x720) on a 16:9 screen, 1x (1280x800) on a Steam Deck with Fill Screen), and Auto the one it picked. Auto: enough to cover your screen, within what the device can afford: the screen's own shape when that fits (a Steam Deck's 1280x800), otherwise whole scales (1x, 2x, 3x, or 3x2 on an ultrawide). On iPhone and iPad, Auto always picks 1x. With Fill Screen, the rows count the screen's shape: 1x on a 16:10 screen is 1280x800. |
+| Shadow Resolution | 1x / 1.5x / 2x | 1x (1600x1600), as on the Xbox 360. 1.5x and 2x draw the sun's shadow map larger for sharper shadow edges, at more GPU time and memory. |
 
 **Game:** Language (English): French, German, Italian, Spanish, Dutch, Swedish, Danish, Polish or
 Finnish switch the menus and the race text (European languages show km/h) the next time the game
@@ -635,7 +645,7 @@ SpeedBreaker folder instead: `data/`, `data/game` and `cache/`.
 2. A notice says where the zip file went: your **Desktop** (on SteamOS, pick it up in Desktop
    Mode, or in the Desktop app on a Steam Frame), the **SpeedBreaker** folder in the Files app on
    iPhone and iPad, or the data folder above when there is no Desktop. Its name says which
-   version you were running, for example `speedbreaker-bug-report-v0.2.0-<date>_<time>.zip`.
+   version you were running, for example `speedbreaker-bug-report-v0.2.1-<date>_<time>.zip`.
 3. Open an [issue][issues], attach the zip, and say what you were doing, what you expected, what
    happened, and roughly how long into the session it happened.
 

@@ -125,6 +125,42 @@ namespace settings
         constexpr bool kLanguageHidden = false;
 #endif
 
+        // HDR Output: on a Mac (EDR, or HDR10) and on Linux, SteamOS and
+        // Windows (HDR10, where the system is in HDR: the presenter offers
+        // it only on a surface that has an HDR10 format). Not on iOS (the
+        // layer would need poking itself) or Android. HDR Format chooses
+        // between EDR and HDR10, so only a Mac shows it.
+#if (defined(__APPLE__) && TARGET_OS_IOS) || defined(__ANDROID__)
+        constexpr bool kHdrHidden = true;
+#else
+        constexpr bool kHdrHidden = false;
+#endif
+#if defined(__APPLE__) && !TARGET_OS_IOS
+        constexpr bool kHdrFormatHidden = false;
+#else
+        constexpr bool kHdrFormatHidden = true;
+#endif
+
+        constexpr EnumEntry kHdrFormatEntries[] = {
+            { 0, "auto", "Auto" },
+            { 1, "edr", "Extended Linear" },
+            { 2, "hdr10", "HDR10 (PQ)" },
+        };
+
+        constexpr EnumEntry kHdrStrengthEntries[] = {
+            { 2, "2x", "2x" },
+            { 3, "3x", "3x" },
+            { 4, "4x", "4x" },
+        };
+
+        constexpr EnumEntry kHdrPaperWhiteEntries[] = {
+            { 0, "auto", "Auto" },
+            { 100, "100", "100 nits" },
+            { 200, "200", "200 nits" },
+            { 300, "300", "300 nits" },
+            { 400, "400", "400 nits" },
+        };
+
         constexpr EnumEntry kAspectEntries[] = {
             { int32_t(AspectMode::Auto), "auto", "Fill Screen" },
             { int32_t(AspectMode::Widescreen), "16:9", "16:9" },
@@ -139,6 +175,12 @@ namespace settings
             { 3, "1.5x", "1.5x (1080p)" },
             { 4, "2x", "2x (1440p)" },
             { 6, "3x", "3x (2160p)" },
+        };
+
+        constexpr EnumEntry kShadowResolutionEntries[] = {
+            { 2, "1x", "1x (1600x1600)" },
+            { 3, "1.5x", "1.5x (2400x2400)" },
+            { 4, "2x", "2x (3200x3200)" },
         };
 
         constexpr EnumEntry kAnisotropyEntries[] = {
@@ -271,6 +313,26 @@ namespace settings
               .table = "video", .key = "xbox_display_gamma", .label = "Xbox 360 Display Gamma",
               .description = "The gamma ramp the game itself sets for a real Xbox 360's TV output: a little deeper shadows and brighter mid-tones, as on the console. Off: the flatter picture of SpeedBreaker 0.1.3 and earlier.",
               .env = "NFSMW_DISPLAY_GAMMA", .defaultValue = 1 },
+            { .id = Id::CoolerColors, .category = Category::Display, .type = Type::Bool, .apply = Apply::Live,
+              .table = "video", .key = "cooler_colors", .label = "Cooler Colors",
+              .description = "A cooler picture with less of the game's yellow: blue raised, red and green lowered a little, over the whole game picture (menus and movies too). Off: the game's own colors, as on the Xbox 360.",
+              .env = "NFSMW_COOLER_COLORS", .defaultValue = 0 },
+            { .id = Id::Hdr, .category = Category::Display, .type = Type::Bool, .apply = Apply::Live, .hidden = kHdrHidden,
+              .table = "video", .key = "hdr", .label = "HDR Output",
+              .description = "Brighter highlights on an HDR display (extended dynamic range). The game's own picture, including its front end, follows the highlights; this settings overlay stays at standard brightness. Off: the standard-range picture.",
+              .env = "NFSMW_HDR", .defaultValue = 0 },
+            { .id = Id::HdrFormat, .category = Category::Display, .type = Type::Enum, .apply = Apply::Live, .hidden = kHdrFormatHidden,
+              .table = "video", .key = "hdr_format", .label = "HDR Format",
+              .description = "How HDR is sent. Auto: Extended Linear on a display that reports HDR capability, otherwise standard range. HDR10 (PQ) sends the PQ signal and metadata; the display's HDR mode still follows macOS.",
+              .env = "NFSMW_HDR_FORMAT", .defaultValue = 0, .entries = kHdrFormatEntries },
+            { .id = Id::HdrStrength, .category = Category::Display, .type = Type::Enum, .apply = Apply::Live, .hidden = kHdrHidden,
+              .table = "video", .key = "hdr_strength", .label = "HDR Strength",
+              .description = "How far white and highlights go above SDR white: 2x by default, 3x, or 4x. A frame that is mostly white is dimmed toward SDR automatically, so a boot flash or a full-screen logo does not become a 4x flash.",
+              .env = "NFSMW_HDR_STRENGTH", .defaultValue = 2, .entries = kHdrStrengthEntries },
+            { .id = Id::HdrPaperWhite, .category = Category::Display, .type = Type::Enum, .apply = Apply::Live, .hidden = kHdrHidden,
+              .table = "video", .key = "hdr_paper_white", .label = "HDR Paper White",
+              .description = "How bright the game's ordinary white is in HDR10, in nits; highlights go HDR Strength times above it. Auto matches the system: 400 on SteamOS and the Steam Deck, 200 on Windows and Linux, 100 on a Mac. Raise it if HDR looks dimmer than the game in SDR.",
+              .env = "NFSMW_HDR_PAPER_WHITE", .defaultValue = 0, .entries = kHdrPaperWhiteEntries },
             { .id = Id::Sharpening, .category = Category::Graphics, .type = Type::Float, .apply = Apply::Live,
               .table = "video", .key = "sharpening", .label = "Sharpening",
               .description = kFsr1Offered
@@ -289,6 +351,10 @@ namespace settings
               .table = "video", .key = "internal_resolution", .label = "Internal Resolution",
               .description = "Render the 3D scene above the 360's 720p. 1.5x is 1080p, a little over half the pixels of 2x. On a screen of another shape filled by Fill Screen, each step renders that shape: 1x on a Steam Deck is its own 1280x800. Auto: from the screen (1440p: 2x; a Steam Deck: its 1280x800).",
               .env = "NFSMW_RESOLUTION", .defaultValue = kResolutionAuto, .entries = kResolutionEntries },
+            { .id = Id::ShadowResolution, .category = Category::Graphics, .type = Type::Enum, .apply = Apply::Live,
+              .table = "video", .key = "shadow_resolution", .label = "Shadow Resolution",
+              .description = "Sharper sun shadows: draw the game's 1600x1600 shadow map at 1.5x or 2x. 1x is as on the Xbox 360. Higher settings use more GPU time and memory.",
+              .env = "NFSMW_SHADOW_RESOLUTION", .defaultValue = kShadowResolutionDefault, .entries = kShadowResolutionEntries },
             { .id = Id::WindowWidth, .category = Category::Display, .type = Type::Int, .apply = Apply::Restart, .hidden = true,
               .table = "video", .key = "window_width", .label = "Window Width",
               .description = "The window's width when the game starts.",

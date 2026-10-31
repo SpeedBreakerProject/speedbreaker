@@ -52,9 +52,17 @@ ninja -C "$BUILD" -j"$JOBS"
 # references by name); the rest as the linker needs them. SDL finds
 # vkGetInstanceProcAddr in the app itself with dlsym, so it must survive
 # dead stripping.
+# The PAL-ES recompiled library is optional: it is added below only if built.
+# (A failing [ -f ] inside the array's $( ) would end the script under set -e.)
 LIBS=(
     -force_load "$BUILD/runtime/libSpeedBreaker.a"
-    "$BUILD/recomp/libNfsmwRecompLib.a" $( [ -f "$BUILD/recomp/libNfsmwRecompPalEsLib.a" ] && echo "$BUILD/recomp/libNfsmwRecompPalEsLib.a" ) "$BUILD/runtime/libXenonUtilsLite.a" "$BUILD/runtime/libo1heap.a"
+    "$BUILD/recomp/libNfsmwRecompLib.a"
+)
+if [ -f "$BUILD/recomp/libNfsmwRecompPalEsLib.a" ]; then
+    LIBS+=("$BUILD/recomp/libNfsmwRecompPalEsLib.a")
+fi
+LIBS+=(
+    "$BUILD/runtime/libXenonUtilsLite.a" "$BUILD/runtime/libo1heap.a"
     "$BUILD/runtime/libimgui.a"
     "$PREFIX/lib/libSDL3.a"
     "$PREFIX/lib/libglslang.a" "$PREFIX/lib/libglslang-default-resource-limits.a"
@@ -64,7 +72,9 @@ LIBS=(
     -lc++
 )
 for lib in SPIRV MachineIndependent GenericCodeGen OSDependent; do
-    [ -f "$PREFIX/lib/lib$lib.a" ] && LIBS+=("$PREFIX/lib/lib$lib.a")
+    if [ -f "$PREFIX/lib/lib$lib.a" ]; then
+        LIBS+=("$PREFIX/lib/lib$lib.a")
+    fi
 done
 for fw in AVFoundation AudioToolbox CoreAudio CoreBluetooth CoreFoundation CoreGraphics CoreMedia CoreMotion \
           CoreVideo Foundation GameController IOSurface Metal OpenGLES QuartzCore UIKit UniformTypeIdentifiers; do

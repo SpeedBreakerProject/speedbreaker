@@ -16,6 +16,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
+#include <initializer_list>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -109,6 +110,36 @@ namespace
         for (uint32_t k = 0; k <= 255; k++)
             CHECK(std::abs(tone::Sample(lut, 0, k / 255.0) - k / 255.0) < 1e-7, "neutral sample at %u", k);
         CHECK(std::abs(tone::Sample(lut, 1, 0.5) - 0.5) < 1e-7, "neutral sample between entries");
+    }
+
+    // Cooler Colors (off by default): off must be the table as before, bit
+    // for bit, at every Brightness step, with and without a ramp; on, black
+    // and white stay put and every channel keeps rising (no clipped blue).
+    void CoolerColors()
+    {
+        CHECK(tone::Neutral(0, false, false), "Cooler Colors off keeps the plain pipeline");
+        CHECK(!tone::Neutral(0, false, true), "Cooler Colors on needs the tone pipeline");
+        dg::Table ramp;
+        for (uint32_t k = 0; k < 256; k++)
+        {
+            uint16_t v = uint16_t(std::lround(std::pow(k / 255.0, 0.86) * 1023.0));
+            ramp.entry[k] = { v, v, v };
+        }
+        for (int32_t b = tone::kBrightnessMin; b <= tone::kBrightnessMax; b++)
+            for (const dg::Table* r : std::initializer_list<const dg::Table*>{ nullptr, &ramp })
+            {
+                tone::Lut off = tone::BuildLut(b, r, false), on = tone::BuildLut(b, r, true);
+                for (uint32_t k = 0; k < 256; k++)
+                    for (uint32_t c = 0; c < 3; c++)
+                    {
+                        double v = r ? r->entry[k][c] / 1023.0 : k / 255.0;
+                        CHECK(off.entry[k][c] == float(tone::ApplyBrightness(v, b)), "off = before, step %d [%u][%u]", b, k, c);
+                        if (k > 0)
+                            CHECK(on.entry[k][c] > on.entry[k - 1][c], "on rises, step %d [%u][%u]", b, k, c);
+                    }
+                for (uint32_t c = 0; c < 3; c++)
+                    CHECK(on.entry[0][c] == 0.0f && on.entry[255][c] == 1.0f, "on keeps black and white, step %d channel %u", b, c);
+            }
     }
 
     void BrightnessSteps()
@@ -354,7 +385,8 @@ namespace
             size_t b = src.find("},", a);
             return src.substr(a, b == std::string::npos ? std::string::npos : b - a);
         };
-        std::string gamma = entry("xbox_display_gamma"), brightness = entry("brightness");
+        std::string gamma = entry("xbox_display_gamma"), brightness = entry("brightness"), cooler = entry("cooler_colors");
+        CHECK(cooler.find(".defaultValue = 0 ") != std::string::npos, "Cooler Colors defaults to off: %s", cooler.c_str());
         CHECK(gamma.find(".defaultValue = 1 ") != std::string::npos, "Xbox 360 Display Gamma defaults to on: %s", gamma.c_str());
         CHECK(brightness.find(".defaultValue = 0,") != std::string::npos, "Brightness defaults to 0: %s", brightness.c_str());
         CHECK(gamma.find("Off: the picture as before") == std::string::npos, "the help text no longer calls Off the default");
@@ -364,6 +396,7 @@ namespace
 int main(int argc, char** argv)
 {
     Neutral();
+    CoolerColors();
     BrightnessSteps();
     HalfTexels();
     D3dModelMatchesTheDump();

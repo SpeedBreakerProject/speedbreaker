@@ -4,6 +4,57 @@ What changed in each SpeedBreaker release, newest first. Each release's notes on
 its entry here, and the game shows the entry once, the first time a new version starts (offline:
 it's built into the game).
 
+## v0.2.1
+
+### What's new
+
+- **HDR output** (Settings > Display > HDR Output, off by default) on a Mac with an HDR display,
+  on SteamOS and the Steam Deck OLED with HDR on, and on Linux and Windows PCs whose system is in
+  HDR: the game's highlights — the sun, headlights, lit signs — reach the display's extended
+  range. This settings overlay stays at standard brightness; the game's own front end and HUD are
+  part of the picture, so their whites follow the highlights too. HDR Strength sets how far
+  highlights go above white: 2x by default, up to 4x. HDR Paper White sets how bright ordinary
+  white is in HDR10; Auto matches the system (400 nits on SteamOS and the Steam Deck, 200 on
+  Windows and Linux, 100 on a Mac). A mostly white frame is dimmed toward SDR, so a boot flash or a
+  full-screen logo doesn't become a 4x flash. On a Mac, HDR Format chooses Auto, Extended Linear,
+  or HDR10 (PQ). Implemented by @danielgpinheiro, from @DoubleDips's idea (GitHub issue #25).
+- **Shadow Resolution** (Settings > Graphics): draws the sun's shadows at 1.5x or 2x for sharper
+  edges, at some GPU time and memory. 1x, the default, is as on the Xbox 360. Thanks to krittinen
+  (pull request #52).
+- **Cooler Colors** (Settings > Display, off by default): a cooler picture with less of the
+  game's yellow, over the whole game picture. Off keeps the game's own colors, as on the Xbox 360.
+  Thanks to Namiidev (pull request #50).
+
+### Fixed
+
+- Distant grass on the roadside verges turned black on AMD Radeon RX 6000 cards under Windows
+  (#67, #54). Shaders that look up their lighting per pixel now read it the way every driver
+  handles; other GPUs show the same picture as before (NFSMW_CONST_REL_RING=0: the old read).
+- Anisotropic Filtering at 8x or 16x drew a light outline round dirt-road decals in shadow (#70):
+  the sun's shadow map keeps the game's own filtering, whatever the setting.
+- iPhone and iPad builds from source: scripts/ios/build.sh no longer stops silently after the
+  compile when the optional PAL (Spanish) code isn't built. Thanks to logicsandbox (pull request
+  #72).
+
+### More about it
+
+- HDR Output uses either a 16-bit-float swapchain in extended linear sRGB (macOS EDR) or a 10-bit
+  swapchain in HDR10/PQ with static metadata (everywhere else, and on a Mac by choice); the log
+  says "swapchain: HDR" or "swapchain: HDR10" with the choice. Outside macOS it's offered where the
+  surface lists an HDR10 format, which a system in HDR (or gamescope with its HDR output on) does;
+  otherwise the picture stays standard range. The game renders into its usual 8-bit SDR surfaces
+  first, and the composite expands by Rec.709 luma rather than each channel, so bright colours
+  keep their hue. White is 1.0 in EDR and HDR Paper White's nits in HDR10; HDR Strength picks the
+  peak above it, and a frame-average limiter, measured on the GPU in the same frame, lowers the
+  peak toward white when the scene is mostly white, keeping MaxFALL at paper white. A local limit
+  does the same for large bright areas (tyre smoke, the sun's halo): each part of the screen adds
+  at most a tenth of white above SDR, so smoke no longer glows as a flat blob while small lights
+  keep the full peak (NFSMW_HDR_LOCAL_BUDGET=0 turns it off). EDR's current headroom follows the
+  display every frame, and the log notes when it changes. Bug-report screenshots and NFSMW_CHECK_PRESENT_SEC
+  captures stay standard-range; the PPM decodes PQ from BT.2020 back to Rec.709. NFSMW_HDR=1,
+  NFSMW_HDR_FORMAT=auto|edr|hdr10, NFSMW_HDR_STRENGTH=2x|3x|4x and
+  NFSMW_HDR_PAPER_WHITE=auto|100|200|300|400 set them for a run; iOS and Android don't offer them.
+
 ## v0.2.0
 
 ### What's new

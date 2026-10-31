@@ -104,6 +104,11 @@ namespace video
     // record; the caller then waits for the GPU (WaitGpuIdle) and destroys it.
     void ReleaseFrontImage(VkImage image);
 
+    // The HDR mode in use, for Settings > Display's help line: "Standard
+    // range", "Extended Linear (EDR), headroom 1.20", or "HDR10 (PQ), 100-400
+    // nits". Main thread.
+    const char* HdrStatus();
+
     // Main thread: handle window events and present the latest front buffer.
     // Returns false when the user closes the window.
     bool RunFrame();

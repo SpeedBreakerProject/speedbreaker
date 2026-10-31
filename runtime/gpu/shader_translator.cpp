@@ -94,6 +94,7 @@ layout(push_constant) uniform DrawConstants
     uint flags;           // bit 0: apply posScale; bits 1-3: vertex W/XY/Z formats
     vec4 posScale;        // NDC = pos.xy * posScale.xy + posScale.zw * pos.w
     uvec4 vfRedirect[4];  // guest start, size, ring byte offset: vertex data snapshots
+    uint constRing;       // ring byte offset of this draw's XenosConstants, see constRel()
 } pc;
 
 // Textures: set 1, one binding per fetch slot the shader uses (declared after
@@ -1068,6 +1069,12 @@ vec3 cubeDirection(vec3 c)
         return enabled;
     }
 
+    bool RelativeConstantsFromRing()
+    {
+        static const bool enabled = [] { const char* v = std::getenv("NFSMW_CONST_REL_RING"); return !(v && v[0] == '0'); }();
+        return enabled;
+    }
+
     TranslatedShader TranslateShader(ShaderStage stage, const uint32_t* ucode, size_t dwordCount)
     {
         Translator t;
@@ -1124,7 +1131,24 @@ vec3 cubeDirection(vec3 c)
         else
             g += "vec4 o_depth = vec4(0.0);\nbool killed = false;\n";
         g += kStateHelpers;
-        g += std::format(R"(
+        // Relative reads come from the same constants through the ring's
+        // storage buffer: AMD's Windows driver reads a dynamically indexed
+        // u.c[] inside per-pixel predicated blocks as if a0 were 0, which
+        // turned Most Wanted's far verge grass black (issue #67).
+        // NFSMW_CONST_REL_RING=0 reads the uniform buffer as before.
+        if (RelativeConstantsFromRing())
+            g += std::format(R"(
+vec4 constRel(int index, int rel)
+{{
+    int i = index + rel;
+    if (i < 0 || i > 255)
+        return vec4(0.0);
+    uint w = (pc.constRing >> 2) + ({} + uint(i)) * 4u;
+    return uintBitsToFloat(uvec4(g_ring[w], g_ring[w + 1u], g_ring[w + 2u], g_ring[w + 3u]));
+}}
+)", stage == ShaderStage::Vertex ? "pc.vsConstBase" : "pc.psConstBase");
+        else
+            g += std::format(R"(
 vec4 constRel(int index, int rel)
 {{
     int i = index + rel;

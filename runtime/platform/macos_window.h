@@ -51,6 +51,23 @@ namespace platform::macos
     // `maxHz`, if given, get the range (for the log). False without a screen.
     bool DisplayRefreshFixed(SDL_Window* window, double* minHz = nullptr, double* maxHz = nullptr);
 
+    // The window's screen's current EDR headroom (the brightest EDR colour
+    // component over SDR white: 1 on a standard-range display, or without a
+    // screen), for HDR Output's highlight range. Main thread.
+    float DisplayHeadroom(SDL_Window* window);
+
+    // The screen's potential EDR headroom: what it can show once an EDR layer
+    // is up, even while the current headroom is still 1. 1 without a screen
+    // or on a standard-range display. Main thread.
+    float DisplayPotentialHeadroom(SDL_Window* window);
+
+    // Drops the HDR10 tone-mapping description (CAEDRMetadata) from the
+    // window's Metal layer. MoltenVK sets it for VK_EXT_hdr_metadata and never
+    // clears it when a later swapchain is extended linear or SDR, so after
+    // HDR Format had been HDR10 once, Extended Linear went through HDR10's
+    // tone mapping and the picture was nearly black. Main thread.
+    void ClearEdrMetadata(SDL_Window* window);
+
     // Before SDL_DestroyWindow: stops watching the window.
     void ForgetWindow(SDL_Window* window);
 }
