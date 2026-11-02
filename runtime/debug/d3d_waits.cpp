@@ -13,33 +13,25 @@
 #include <cpu/backoff.h>
 #include "timeline.h"
 
+//DEBUGGING
+#include <debug/wake_stats.h>
+#include <gpu/wakeup.h>
+
 extern "C" PPC_FUNC(__imp__sub_825A5B20);
 
 namespace
 {
     // On the 360 a spinning hardware thread cost nothing. Here the game's
     // main thread spun a whole core at 100% while it waited for the command
-    // processor, and on the Steam Machine's CPU (two fast cores, four slow
-    // ones: see hostcpu::ReserveFastCore) the scheduler kept the spinning
-    // thread on a fast core. A wait still spins for its first 20 us, so short
-    // waits end on time; after that each poll sleeps 50 us (see backoff.h,
-    // which also covers macOS's stretched timers). NFSMW_GPU_WAIT_BACKOFF=0
-    // spins throughout.
+    // processor. The CP changes the address that is checked for this busy
+    // waiting when calling PM4_EVENT_WRITE_SHD, so we can simply synchronize.
     void BackOff()
     {
-        backoff::CountGpuWaitPoll();
-        if (!backoff::Enabled(backoff::kGpuWait))
-            return;
-        using Clock = std::chrono::steady_clock;
-        thread_local Clock::time_point lastPoll{}, waitStart{};
-        auto now = Clock::now();
-        if (now - lastPoll > std::chrono::microseconds(200))
-            waitStart = now;  // a new wait (one wait's polls are at most ~60 us apart)
-        lastPoll = now;
-        if (now - waitStart < std::chrono::microseconds(20))
-            return;
-        backoff::Sleep(backoff::kGpuWait, std::chrono::microseconds(50));
-        lastPoll = Clock::now();
+        SB_WAKE("BackOff called");
+        thread_local uint32_t seen = gpu::D3DWakeup().Snapshot();
+        const bool woken = gpu::D3DWakeup().Wait(seen, std::chrono::milliseconds(16));
+        if (woken) SB_WAKE("BackOff woken"); else SB_WAKE("BackOff timeout");
+        seen = gpu::D3DWakeup().Snapshot();
     }
 }
 

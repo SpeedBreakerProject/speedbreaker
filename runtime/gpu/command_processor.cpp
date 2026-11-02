@@ -24,6 +24,10 @@
 #include <report/report.h>
 #include <unordered_set>
 
+// DEBUG
+#include <debug/wake_stats.h>
+#include <gpu/wakeup.h>
+
 namespace gpu
 {
     namespace
@@ -742,6 +746,7 @@ namespace gpu
                 bool memory = (info & 0x10) != 0;
                 std::optional<renderer::CpWaitTimer> waitTimer;  // from the first poll after the submit
                 auto waitStart = std::chrono::steady_clock::now();
+                auto pollStart = waitStart;
                 // Suspensions so far: one that begins during the wait, even
                 // one spent parked in the GPU gate inside Submit() (it closes
                 // after the count moves), restarts the wait's clock.
@@ -753,6 +758,7 @@ namespace gpu
                         return true;
                 while (true)
                 {
+                    const uint32_t seen = gpu::VblankWakeup().Snapshot();
                     uint32_t value = memory ? LoadSwapped(poll) : s_regs[poll % REGISTER_COUNT];
                     if (!memory && poll == REG_COHER_STATUS_HOST)
                     {
@@ -823,15 +829,10 @@ namespace gpu
                             memory ? "memory" : "register", poll, info & 7, value, mask, ref);
                         DumpHistory();
                     }
-                    // The guest's wait interval is a hint for hardware polling;
-                    // sleeping whole milliseconds per poll added a millisecond
-                    // or more to every wait. Spin with yields for 2 ms, then
-                    // back off to short sleeps.
+                    // This is called in menus over and over until the next frame.
+                    // We can use synchronization to wait for the next Vblank, with a 17 ms safety net.
                     (void)wait;
-                    if (std::chrono::steady_clock::now() - waitStart < std::chrono::milliseconds(2))
-                        std::this_thread::yield();
-                    else
-                        std::this_thread::sleep_for(std::chrono::microseconds(100));
+                    const bool woken = gpu::VblankWakeup().Wait(seen, std::chrono::milliseconds(17));
                 }
                 return true;
             }
@@ -901,6 +902,9 @@ namespace gpu
                 }
                 WriteRegister(REG_VGT_EVENT_INITIATOR, initiator & 0x3F);
                 QueueStore(address, (initiator >> 31) & 1 ? s_counter.load() : value);
+                uint32_t base_address = address & 0x0FFFFF00;
+                if (base_address == 0x0644A000 || base_address == 0x0A644000)
+                    gpu::D3DWakeup().Wake();
                 return true;
             }
 
@@ -1155,10 +1159,16 @@ namespace gpu
                         lastWork = std::chrono::steady_clock::now();
                         continue;
                     }
-                    if (std::chrono::steady_clock::now() - lastWork < std::chrono::milliseconds(2))
-                        std::this_thread::yield();
+                    if (std::chrono::steady_clock::now() - lastWork < std::chrono::microseconds(1000))
+                        {
+                            std::this_thread::yield();
+                            SB_WAKE("cp-workerloop-yield");
+                        }
                     else
-                        std::this_thread::sleep_for(std::chrono::microseconds(100));
+                        {
+                        std::this_thread::sleep_for(std::chrono::microseconds(1000));
+                        SB_WAKE("cp-workerloop-1000-microseconds");
+                        }
                     continue;
                 }
                 s_regs[REG_CP_RB_WPTR] = writeIndex;
@@ -1280,6 +1290,9 @@ namespace gpu
                 DispatchInterrupt(thread.ppcContext, 0, 2);
                 timing.Add(fired - next, now() - fired);
                 auto status = clock.GetStatus();
+                SB_WAKE("End of VSync!");
+                gpu::VblankWakeup().Wake();
+                gpu::ProgressWakeup().Wake();
                 if (status.locked != locked || status.slips != slips || status.extraChanges != holdChanges || ++count % 3600 == 0)
                 {
                     LogVblank(status, timing, timerName);
