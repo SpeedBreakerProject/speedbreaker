@@ -5981,15 +5981,18 @@ void main()
 
         // ---------------------------------------------------------------
         // Deferred shadow resolves (gpu/shadow_lend.h). NFSMW_SHADOW_DEFER=1
-        // (default on Apple and Android, the tile GPUs; 0 off, alt: in odd
-        // 120-frame [perf] windows only, for A/B in one run) where the device
-        // samples its depth format with linear filtering.
+        // (default on Apple and Android, the tile GPUs, and on Windows, where
+        // an Intel UHD 620 measured 4.4-5 ms less GPU time a frame in menus
+        // and 1.4-2.9 ms in races; 0 off, alt: in odd 120-frame [perf]
+        // windows only, for A/B in one run) where the device samples its
+        // depth format with linear filtering. Elsewhere (Linux, SteamOS)
+        // it stays off until measured there.
         // NFSMW_SHADOW_VERIFY=1: each deferred resolve also runs (so the
         // texture's own image holds the resolve's texels) and a compute pass
         // compares every texel with the lent depth image; the [shadow] line
         // counts texels and those whose stored value isn't exactly the
         // resolve's packing of the lent depth.
-#if defined(__APPLE__) || defined(__ANDROID__)
+#if defined(__APPLE__) || defined(__ANDROID__) || defined(_WIN32)
         constexpr int kShadowDeferDefault = 1;
 #else
         constexpr int kShadowDeferDefault = 0;
