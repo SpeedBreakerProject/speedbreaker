@@ -66,6 +66,16 @@ namespace gpu
     // come from the ring's storage buffer rather than the uniform buffer.
     bool RelativeConstantsFromRing();
 
+    // Registers as separate variables (r0, r1, ...) instead of the array r[]
+    // in shaders without relative register addressing: bit 0 vertex, bit 1
+    // pixel shaders. AMD's Windows driver (RX 6000) picks the wrong lighting
+    // row in Most Wanted's far verge shader with the array (issue #67). The
+    // renderer sets the default from the driver (pixel shaders, 2, on AMD's
+    // proprietary driver: the half the fix needs; off elsewhere);
+    // NFSMW_SCALAR_REGS=0..3 overrides it.
+    void SetScalarRegistersDefault(uint32_t stageMask);
+    uint32_t ScalarRegisters();
+
     // `ucode` is in host byte order (swap the guest's big-endian words first).
     TranslatedShader TranslateShader(ShaderStage stage, const uint32_t* ucode, size_t dwordCount);
 

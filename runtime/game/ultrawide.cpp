@@ -38,6 +38,30 @@
 //     puts it 1.34x past the frame. Narrowed about the screen centre like the
 //     HUD; the directions stay, so the picture keeps its proportions after
 //     the stretch.
+//   - UltrawideShadowFit, before `fdivs f10,f13,f30` at 0x82456240 in the
+//     sun shadow map's fit (sub_82456030, called by sub_82440F98 for views 1
+//     and 2, writing views 15 and 16, the scene's 1600x1600 shadow map). The
+//     fit doesn't read the view's stored projection: it builds the camera's
+//     frustum again from the camera's FOV angle (+196) and the target's
+//     shape, out to 70 (near 0.01), takes its eight corners and fits the
+//     light's projection around them. So the shadow map covered a narrower
+//     frustum than the one drawn and the picture's sides came out unshadowed
+//     (GitHub #81): on an ultrawide screen, because the projection hook widens
+//     only the stored projection, and at 16:9 too, on the 360 as well,
+//     because the view setup widens the player's horizontal FOV by
+//     (1.175 - 0.003 (FOV - 10 deg)) x 1.2586 and the vertical by 1.5022 when
+//     the widescreen flag is set, and the fit uses neither. f30 is tan(half
+//     the horizontal FOV) (the next instruction makes P00 = 1 / f30 of it),
+//     f2 / f1 the vertical one's sine and cosine (`fdivs f10,f2,f1` next).
+//     By default (NFSMW_SHADOW_FIT=view) both come from the view's stored
+//     projection (f30 = 1 / P00, f2 = f1 / |P11|), so the fit covers exactly
+//     the frustum drawn at every shape; the same 1600x1600 map then spreads
+//     over ~1.3x the 360's width and ~1.5x its height at 16:9, so shadows are
+//     a little softer than on the 360 (Shadow Resolution compensates). A/B
+//     overrides: NFSMW_SHADOW_FIT=aspect divides the game's own f30 by scaleX
+//     and f2 by scaleY (the projection hook's factors: the game's fit widened
+//     with the screen, a no-op at 16:9, so 16:9 keeps the 360's gaps), and
+//     NFSMW_SHADOW_FIT=game leaves the fit alone.
 //
 // A ppc/ generated before Vert+ calls the hooks with the x registers only
 // (the overloads below): Hor+ keeps working and TallHooksActive() stays
@@ -234,6 +258,58 @@ void UltrawideMirror(PPCRegister& f1, PPCRegister& f2, PPCRegister& f3, PPCRegis
         ScaleAboutCentre(f2, scale.y);
         ScaleRegister(f4, scale.y);
     }
+}
+
+namespace
+{
+    // NFSMW_SHADOW_FIT: "view" (default) fits the view's stored projection,
+    // the frustum actually drawn (wider than the 360's fit at 16:9 too);
+    // "aspect" widens the game's fit with the screen only (16:9 as on the
+    // 360); "game" leaves the game's fit. A/B overrides, not settings.
+    enum class ShadowFit { Game, Aspect, View };
+    const ShadowFit s_shadowFit = [] {
+        const char* v = std::getenv("NFSMW_SHADOW_FIT");
+        ShadowFit mode = ShadowFit::View;
+        if (v && !strcmp(v, "game"))
+            mode = ShadowFit::Game;
+        else if (v && !strcmp(v, "aspect"))
+            mode = ShadowFit::Aspect;
+        if (v)
+            fprintf(stderr, "[uw] NFSMW_SHADOW_FIT=%s: shadow map fit %s\n", v,
+                mode == ShadowFit::Game ? "as the game's" : mode == ShadowFit::Aspect ? "widened with the screen" : "to the view's projection");
+        return mode;
+    }();
+}
+
+void UltrawideShadowFit(PPCRegister& r29, PPCRegister& f30, PPCRegister& f2, PPCRegister& f1)
+{
+    if (s_shadowFit == ShadowFit::Game || !WidenedView(r29.u32))
+        return;
+    if (s_shadowFit == ShadowFit::View)
+    {
+        // The view's matrices (its first word): the projection at +64, P00
+        // at +64 and P11 (negated, the game's y is flipped) at +84.
+        const uint32_t matrices = ByteSwap(*static_cast<const uint32_t*>(g_memory.Translate(r29.u32)));
+        const auto load = [](uint32_t a) {
+            uint32_t bits = ByteSwap(*static_cast<const uint32_t*>(g_memory.Translate(a)));
+            float f;
+            memcpy(&f, &bits, sizeof(f));
+            return f;
+        };
+        const float p00 = load(matrices + 64), p11 = std::fabs(load(matrices + 84));
+        if (p00 > 0.0f && p11 > 0.0f && std::isfinite(p00) && std::isfinite(p11))
+        {
+            f30.f64 = double(1.0f / p00);
+            f2.f64 = double(float(f1.f64) / p11);
+            return;
+        }
+        // An unusable stored projection: widen with the screen instead.
+    }
+    const Scales scale = s_scales.load(std::memory_order_relaxed);
+    if (scale.x != 1.0f)
+        f30.f64 = double(float(f30.f64) / scale.x);
+    if (scale.y != 1.0f)
+        f2.f64 = double(float(f2.f64) / scale.y);
 }
 
 // The hooks as a ppc/ generated before Vert+ calls them: x only.

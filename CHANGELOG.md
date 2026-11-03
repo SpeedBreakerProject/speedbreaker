@@ -4,6 +4,42 @@ What changed in each SpeedBreaker release, newest first. Each release's notes on
 its entry here, and the game shows the entry once, the first time a new version starts (offline:
 it's built into the game).
 
+## v0.2.2
+
+### Fixed
+
+- Distant grass on the roadside verges still turned black on AMD Radeon RX 6000 cards under
+  Windows (#67, #54): v0.2.1's fix was aimed at the wrong thing. AMD's Windows driver picked the
+  close-up row of lighting values in the shader that draws the far part of the verge, so the far
+  band came out at about a fifth of its brightness. On AMD's own driver, pixel shaders now keep the
+  Xbox 360's registers as separate variables, which it compiles correctly; other GPUs and drivers
+  run the same shaders as before. Reported by siddharthkuradia and agustinlopez9; thanks to
+  siddharthkuradia and ZeroDarlingxx for the RenderDoc captures and for testing the fix.
+- The sun's shadows now reach the left and right edges of the picture at every screen shape,
+  16:9 included. The game fits its shadow map to a narrower view than the one it draws, so the
+  picture's sides came out unshadowed: on an ultrawide screen (Aspect Ratio on Fill Screen) by a
+  wide margin, and at 16:9 near the camera, where the original game on the Xbox 360 also left
+  these gaps. The shadow map now covers the whole view, so its shadows are a little softer than on
+  the 360; Shadow Resolution 1.5x or 2x sharpens them again (GitHub issue #81, reported by
+  Nelson340; krittinen spotted it at 16:9 too).
+- With HDR Output on, the game seen through the settings overlay looks as it does in SDR: it no
+  longer brightens under the panel when HDR comes on, and bright highlights, such as the shine on
+  a car's hood in the menus, no longer show through the window.
+- Windows (beta): the sun's shadows cost the graphics chip less each frame, with the same picture,
+  as in Windows beta 4 (the Mac, iPhone and iPad have done this since v0.2.0).
+
+### More about it
+
+- Shadows: NFSMW_SHADOW_FIT=view (the default) fits the shadow map to the view's own projection;
+  =aspect widens the game's fit with the screen only (a no-op at 16:9), and =game keeps the
+  original fit, for comparison.
+- AMD: the log's "[renderer] shader registers:" line says which shaders use separate variables
+  ("variables in pixel shaders" on AMD's own driver, "array" elsewhere). NFSMW_SCALAR_REGS=0 turns
+  it off, 1 uses them in vertex shaders only, 2 in pixel shaders only (the default there), 3 in
+  both. Testers found that only the pixel shaders matter: 2 and 3 fixed the grass, 0 and 1 didn't.
+- Windows: the log's "[renderer] deferred shadow resolves" line says the shadow map is sampled in
+  place; NFSMW_SHADOW_DEFER=0 turns it off. Linux and SteamOS are unchanged.
+
 ## v0.2.1
 
 ### What's new

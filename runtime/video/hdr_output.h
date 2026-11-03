@@ -102,6 +102,50 @@ namespace video::hdr
         return budget / added;
     }
 
+    // The UI coverage at which the scene under it has no light above SDR
+    // white left (BlendUi): 1/16, 16 levels of ImGui's 8-bit alpha. Every
+    // fill the overlay draws on its own covers far more (the panel 0.95,
+    // popups 0.98, the modal dim 0.55, the performance overlay 0.62), so
+    // everywhere inside a window the scene is SDR; only the outermost
+    // anti-aliased fringe of a window's edge or a glyph, below 1/16, ramps
+    // between the two, so the cut has no hard step (smoothstep: no kink at
+    // either end, and fully transparent pixels keep their highlights).
+    inline constexpr float kUiSdrCoverage = 1.0f / 16.0f;
+
+    // How much of the scene's light above SDR white shows through UI
+    // coverage `uiAlpha`: 1 with no UI, 0 from kUiSdrCoverage up,
+    // 1 - smoothstep(0, kUiSdrCoverage, uiAlpha) between.
+    inline float UiHighlightShare(float uiAlpha)
+    {
+        const float t = std::clamp(uiAlpha / kUiSdrCoverage, 0.0f, 1.0f);
+        return 1.0f - t * t * (3.0f - 2.0f * t);
+    }
+
+    // The settings overlay over the HDR scene, one channel: `scene` in linear
+    // light (1.0 = SDR white, above it the highlights), `ui` and `uiAlpha` as
+    // ImGui leaves them in its 8-bit target (premultiplied, sRGB-encoded).
+    // ImGui blends sRGB-encoded values: in SDR it draws straight onto the
+    // UNORM swapchain. Blended in linear light instead, a dark translucent
+    // panel lets far more of the game through (a 75% black one: a quarter
+    // of the light instead of 5-7%), so the game under the panel brightened
+    // when HDR came on. So it blends as in SDR: the scene up to SDR white
+    // encoded, the UI over it, decoded (the SDR picture's value; the UI's
+    // own white stays SDR white).
+    // The overlay stays at standard brightness, so under it the scene is
+    // SDR: its light above SDR white is removed where the UI covers the
+    // pixel (UiHighlightShare), as SDR clips a highlight at white before the
+    // panel dims it. Dimming it only by (1 - uiAlpha) left a 4x highlight
+    // adding 0.75 of SDR white through a 75% panel: a blown-out patch inside
+    // the window. Where there is no UI the highlight keeps its full strength.
+    inline float BlendUi(float scene, float ui, float uiAlpha)
+    {
+        scene = std::max(scene, 0.0f);
+        uiAlpha = std::clamp(uiAlpha, 0.0f, 1.0f);
+        const float sdr = std::min(scene, 1.0f);
+        const float blended = SrgbToLinear(LinearToSrgb(sdr) * (1.0f - uiAlpha) + ui);
+        return blended + (scene - sdr) * UiHighlightShare(uiAlpha);
+    }
+
     // Rec.709 luma, for expanding light rather than each channel (which would
     // shift the hue of bright colours).
     inline float Luma709(float r, float g, float b)

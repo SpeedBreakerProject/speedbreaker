@@ -155,6 +155,74 @@ int main()
         previousPq = pq;
     }
 
+    // The settings overlay over the HDR scene (BlendUi) is the SDR picture's
+    // blend wherever the scene is within SDR white: ImGui's own SRC_ALPHA
+    // blend of 8-bit sRGB values, decoded. A 75% black panel over mid-grey
+    // keeps about 7% of its light (linear light kept a quarter: the bug).
+    for (int s = 0; s <= 255; s += 15)
+        for (int a : { 0, 64, 128, 191, 255 })
+            for (int u : { 0, 30, 128 })
+            {
+                const float alpha = float(a) / 255.0f, ui = std::min(float(u) / 255.0f, alpha);  // premultiplied
+                const float scene = SrgbToLinear(float(s) / 255.0f);
+                const float sdr = SrgbToLinear(float(s) / 255.0f * (1.0f - alpha) + ui);
+                CHECK(Near(BlendUi(scene, ui, alpha), sdr, 1e-5f), "%d under %d/%d: %.6f vs SDR %.6f", s, u, a,
+                    BlendUi(scene, ui, alpha), sdr);
+            }
+    CHECK(Near(BlendUi(SrgbToLinear(0.5f), 0.0f, 0.75f), SrgbToLinear(0.125f), 1e-6f), "%.6f", BlendUi(SrgbToLinear(0.5f), 0.0f, 0.75f));
+    CHECK(BlendUi(SrgbToLinear(0.5f), 0.0f, 0.75f) < 0.08f * SrgbToLinear(0.5f), "%.6f", BlendUi(SrgbToLinear(0.5f), 0.0f, 0.75f));
+    // No UI: the scene, highlights included. The UI's opaque white is SDR
+    // white over any scene.
+    for (float scene : { 0.0f, 0.2f, 1.0f, 1.5f, 4.0f })
+    {
+        CHECK(Near(BlendUi(scene, 0.0f, 0.0f), scene, 1e-5f), "%.3f -> %.6f", scene, BlendUi(scene, 0.0f, 0.0f));
+        CHECK(Near(BlendUi(scene, 1.0f, 1.0f), 1.0f, 1e-6f), "%.3f -> %.6f", scene, BlendUi(scene, 1.0f, 1.0f));
+    }
+    // Under the UI the scene is SDR: a highlight is clipped at SDR white and
+    // dimmed as SDR's 8-bit blend would (a 4x highlight under a 75% panel
+    // used to add 0.75 of SDR white: the R8's hood through the settings
+    // window), from kUiSdrCoverage up, for every overlay fill and every
+    // 8-bit alpha level from 16/255.
+    for (float scene : { 1.0f, 1.2f, 2.0f, 4.0f, 16.0f })
+        for (int a = 16; a <= 255; a++)
+            for (int u : { 0, 14, 128 })
+            {
+                const float alpha = float(a) / 255.0f, ui = std::min(float(u) / 255.0f, alpha);
+                const float sdr = SrgbToLinear(1.0f * (1.0f - alpha) + ui);
+                CHECK(Near(BlendUi(scene, ui, alpha), sdr, 1e-5f), "%.1f under %d/%d: %.6f vs SDR %.6f", scene, u, a,
+                    BlendUi(scene, ui, alpha), sdr);
+            }
+    for (float alpha : { 0.55f, 0.62f, 0.75f, 0.95f, 0.98f })
+        CHECK(Near(BlendUi(4.0f, 0.0f, alpha), BlendUi(1.0f, 0.0f, alpha), 1e-6f), "%.2f: %.6f vs %.6f", alpha,
+            BlendUi(4.0f, 0.0f, alpha), BlendUi(1.0f, 0.0f, alpha));
+    CHECK(Near(BlendUi(4.0f, 0.0f, 0.75f), SrgbToLinear(0.25f), 1e-6f), "%.6f", BlendUi(4.0f, 0.0f, 0.75f));
+    // Below kUiSdrCoverage (anti-aliased fringes) the highlight's share
+    // ramps: 1 at no coverage, 0 at kUiSdrCoverage, monotonic and without a
+    // step (8-bit alpha levels, and finer).
+    CHECK(UiHighlightShare(0.0f) == 1.0f && UiHighlightShare(kUiSdrCoverage) == 0.0f && UiHighlightShare(1.0f) == 0.0f,
+        "%.6f %.6f %.6f", UiHighlightShare(0.0f), UiHighlightShare(kUiSdrCoverage), UiHighlightShare(1.0f));
+    CHECK(Near(UiHighlightShare(kUiSdrCoverage * 0.5f), 0.5f, 1e-6f), "%.6f", UiHighlightShare(kUiSdrCoverage * 0.5f));
+    CHECK(UiHighlightShare(1.0f / 255.0f) > 0.95f, "one alpha level keeps %.6f", UiHighlightShare(1.0f / 255.0f));
+    for (int i = 0; i < 1000; i++)
+    {
+        const float a = float(i) / 4000.0f, b = float(i + 1) / 4000.0f;
+        CHECK(UiHighlightShare(b) <= UiHighlightShare(a), "%.5f: %.6f after %.6f", b, UiHighlightShare(b), UiHighlightShare(a));
+        CHECK(UiHighlightShare(a) - UiHighlightShare(b) < 0.0065f, "%.5f: step %.6f", b, UiHighlightShare(a) - UiHighlightShare(b));
+        CHECK(BlendUi(4.0f, 0.0f, b) <= BlendUi(4.0f, 0.0f, a), "4x under %.5f: %.6f after %.6f", b, BlendUi(4.0f, 0.0f, b),
+            BlendUi(4.0f, 0.0f, a));
+    }
+    // Continuous across SDR white, and monotonic in the scene.
+    CHECK(Near(BlendUi(1.0001f, 0.2f, 0.5f), BlendUi(1.0f, 0.2f, 0.5f), 1e-4f), "%.6f %.6f", BlendUi(1.0001f, 0.2f, 0.5f),
+        BlendUi(1.0f, 0.2f, 0.5f));
+    CHECK(Near(BlendUi(1.0001f, 0.0f, 0.02f), BlendUi(1.0f, 0.0f, 0.02f), 1e-4f), "%.6f %.6f", BlendUi(1.0001f, 0.0f, 0.02f),
+        BlendUi(1.0f, 0.0f, 0.02f));
+    for (float alpha : { 0.0f, 0.01f, 0.03f, 0.6f })
+        for (int i = 0; i <= 400; i++)
+        {
+            const float a = BlendUi(float(i) / 100.0f, 0.1f * alpha, alpha), b = BlendUi(float(i + 1) / 100.0f, 0.1f * alpha, alpha);
+            CHECK(b >= a, "%.2f, %d: %.6f after %.6f", alpha, i, b, a);
+        }
+
     if (s_failures)
         fprintf(stderr, "%d failure(s)\n", s_failures);
     return s_failures ? 1 : 0;

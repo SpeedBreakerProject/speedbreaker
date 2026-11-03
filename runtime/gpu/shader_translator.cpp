@@ -8,6 +8,8 @@
 
 #include "xenos/ucode.h"
 
+#include <atomic>
+#include <cctype>
 #include <cfloat>
 #include <cmath>
 #include <cstdio>
@@ -1075,6 +1077,62 @@ vec3 cubeDirection(vec3 c)
         return enabled;
     }
 
+    static std::atomic<uint32_t> s_scalarRegistersDefault{ 0 };
+
+    void SetScalarRegistersDefault(uint32_t stageMask)
+    {
+        s_scalarRegistersDefault.store(stageMask & 3u, std::memory_order_relaxed);
+    }
+
+    uint32_t ScalarRegisters()
+    {
+        static const int forced = [] {
+            const char* v = std::getenv("NFSMW_SCALAR_REGS");
+            return v && *v ? int(strtoul(v, nullptr, 0) & 3u) : -1;
+        }();
+        return forced >= 0 ? uint32_t(forced) : s_scalarRegistersDefault.load(std::memory_order_relaxed);
+    }
+
+    // r[N] -> rN (N constant) through the whole shader, with one variable per
+    // register. Empty if anything still indexes r[] another way.
+    static std::string ScalarizeRegisters(const std::string& g, uint32_t regCount)
+    {
+        std::string decl = "vec4 ", zero;
+        for (uint32_t i = 0; i < regCount; i++)
+        {
+            decl += std::format("{}r{}", i ? ", " : "", i);
+            zero += std::format("r{} = vec4(0.0); ", i);
+        }
+        decl += ";";
+        std::string s = g;
+        auto replaceAll = [&](const std::string& from, const std::string& to) {
+            for (size_t at = s.find(from); at != std::string::npos; at = s.find(from, at + to.size()))
+                s.replace(at, from.size(), to);
+        };
+        replaceAll("vec4 r[R_COUNT];", decl);
+        replaceAll("for (int i = 0; i < R_COUNT; i++) r[i] = vec4(0.0);", zero);
+        std::string out;
+        out.reserve(s.size());
+        auto ident = [](char c) { return std::isalnum(static_cast<unsigned char>(c)) || c == '_'; };
+        for (size_t i = 0; i < s.size(); i++)
+        {
+            if (s[i] == 'r' && i + 1 < s.size() && s[i + 1] == '[' && (i == 0 || !ident(s[i - 1])))
+            {
+                size_t j = i + 2;
+                while (j < s.size() && std::isdigit(static_cast<unsigned char>(s[j])))
+                    j++;
+                if (j == i + 2 || j >= s.size() || s[j] != ']')
+                    return {};  // r[<expression>]: keep the array
+                out += 'r';
+                out.append(s, i + 2, j - i - 2);
+                i = j;
+                continue;
+            }
+            out += s[i];
+        }
+        return out;
+    }
+
     TranslatedShader TranslateShader(ShaderStage stage, const uint32_t* ucode, size_t dwordCount)
     {
         Translator t;
@@ -1293,6 +1351,10 @@ void main()
             size_t at = g.find("@@VS_OUTPUTS@@");
             g.replace(at, strlen("@@VS_OUTPUTS@@"), outs);
         }
+        // Issue #67: one variable per register (see ScalarRegisters()).
+        if (!t.usesRelativeRegisters && (ScalarRegisters() >> uint32_t(stage) & 1u))
+            if (std::string s = ScalarizeRegisters(g, regCount); !s.empty())
+                g = std::move(s);
         // Absolute constant reads: packed slot numbers (the count of used
         // constants below), unless the shader also addresses them relatively.
         result.constPacked = PackedConstantsEnabled() && !result.constRelative;

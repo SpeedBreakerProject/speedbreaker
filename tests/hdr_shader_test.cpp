@@ -79,7 +79,12 @@ int main(int argc, char** argv)
     CHECK(Has(composite, "pow(l, 8.0)"), "composite uses the v^8 curve");
     CHECK(Has(composite, "rec709ToRec2020"), "composite converts to Rec.2020 before PQ");
     CHECK(Has(composite, "nitsToPq"), "composite encodes PQ");
-    CHECK(Has(composite, "uiLinear"), "composite blends the UI over the scene");
+    CHECK(Has(composite, "linearToSrgb(sdr) * (1.0 - ui.a) + ui.rgb"),
+        "composite blends the UI over the scene in sRGB-encoded values, as SDR does (hdr::BlendUi)");
+    CHECK(Has(composite, "(scene - sdr) * (1.0 - smoothstep(0.0, 0.0625, ui.a))"),
+        "composite removes the light above SDR white under the UI from coverage 1/16 (hdr::BlendUi, hdr::kUiSdrCoverage)");
+    CHECK(!Has(composite, "(scene - sdr) * (1.0 - ui.a)"), "composite no longer lets highlights through the UI");
+    CHECK(!Has(composite, "uiLinear"), "composite no longer blends the UI in linear light");
     CHECK(Has(composite, "p.peak"), "composite reads the peak push constant");
     CHECK(Has(composite, "framePeak(p.peak, st.smoothed)"), "composite limits the peak by this frame's average");
     CHECK(Has(composite, "min(base, 1.0 / average)"), "composite's framePeak is hdr::FramePeak");

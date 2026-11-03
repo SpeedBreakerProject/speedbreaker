@@ -5981,15 +5981,18 @@ void main()
 
         // ---------------------------------------------------------------
         // Deferred shadow resolves (gpu/shadow_lend.h). NFSMW_SHADOW_DEFER=1
-        // (default on Apple and Android, the tile GPUs; 0 off, alt: in odd
-        // 120-frame [perf] windows only, for A/B in one run) where the device
-        // samples its depth format with linear filtering.
+        // (default on Apple and Android, the tile GPUs, and on Windows, where
+        // an Intel UHD 620 measured 4.4-5 ms less GPU time a frame in menus
+        // and 1.4-2.9 ms in races; 0 off, alt: in odd 120-frame [perf]
+        // windows only, for A/B in one run) where the device samples its
+        // depth format with linear filtering. Elsewhere (Linux, SteamOS)
+        // it stays off until measured there.
         // NFSMW_SHADOW_VERIFY=1: each deferred resolve also runs (so the
         // texture's own image holds the resolve's texels) and a compute pass
         // compares every texel with the lent depth image; the [shadow] line
         // counts texels and those whose stored value isn't exactly the
         // resolve's packing of the lent depth.
-#if defined(__APPLE__) || defined(__ANDROID__)
+#if defined(__APPLE__) || defined(__ANDROID__) || defined(_WIN32)
         constexpr int kShadowDeferDefault = 1;
 #else
         constexpr int kShadowDeferDefault = 0;
@@ -8200,6 +8203,15 @@ void main()
             }
             in.importable = s_vk->getMemoryHostPointerProperties != nullptr;
             in.importRefusal = memplan::ImportRefusal(DriverId(props));
+            // Issue #67: pixel shaders keep registers in separate variables on
+            // AMD's own driver (2 = bit 1 only; NFSMW_SCALAR_REGS=0..3 overrides;
+            // see ScalarRegisters()). Testers on RX 6750 XT: 3 and 2 fixed the
+            // far verge grass, 0 and 1 (vertex shaders only) left it black, so
+            // vertex shaders keep the array everywhere.
+            gpu::SetScalarRegistersDefault(DriverId(props) == VK_DRIVER_ID_AMD_PROPRIETARY ? 2u : 0u);
+            fprintf(stderr, "[renderer] shader registers: %s\n",
+                gpu::ScalarRegisters() == 3u ? "variables" : gpu::ScalarRegisters() == 0u ? "array"
+                : gpu::ScalarRegisters() == 1u ? "variables in vertex shaders" : "variables in pixel shaders");
             in.overrides = memplan::ParseOverrides(std::getenv("NFSMW_SHARED_MEMORY"), std::getenv("NFSMW_SHADOW_MEMORY"),
                 std::getenv("NFSMW_RING_MEMORY"));
             VkMemoryRequirements req;
