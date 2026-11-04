@@ -319,6 +319,21 @@ if(Python3_Interpreter_FOUND)
     else()
         add_test(NAME region_addresses_check COMMAND Python3::Interpreter -I ${CMAKE_CURRENT_SOURCE_DIR}/region_addresses_check.py ${ROOT})
     endif()
+    # The same for the German disc's tables, once survey/region_map.py has
+    # written them from the player's own discs (docs/REGION_PAL_DE.md;
+    # skipped, passing, until then): with mw_de/ (image.bin, xexsurvey.txt,
+    # funcmap.tsv) beside mw_usa/ in SB_REGION_SURVEY, the bytes too.
+    if(SB_REGION_SURVEY AND EXISTS ${SB_REGION_SURVEY}/mw_de/funcmap.tsv)
+        add_test(NAME region_addresses_check_pal_de COMMAND Python3::Interpreter -I ${CMAKE_CURRENT_SOURCE_DIR}/region_addresses_check.py
+            ${ROOT} ${SB_REGION_SURVEY}/mw_usa ${SB_REGION_SURVEY}/mw_de ${SB_REGION_SURVEY}/mw_de/funcmap.tsv --region pal-de)
+    else()
+        add_test(NAME region_addresses_check_pal_de COMMAND Python3::Interpreter -I ${CMAKE_CURRENT_SOURCE_DIR}/region_addresses_check.py
+            ${ROOT} --region pal-de)
+    endif()
+    # survey/func_map.py (the function map region_map.py takes) and
+    # region_map.py's search for jump tables only another build has, on two
+    # made-up images.
+    add_test(NAME func_map_test COMMAND Python3::Interpreter -I ${CMAKE_CURRENT_SOURCE_DIR}/func_map_test.py ${ROOT})
     # scripts/region_ppc.py on both forms of XenonRecomp's output (a Mac's
     # wrapper form; Linux's and clang-cl's alias form, with LF or CRLF): the
     # same namespaced files from each.

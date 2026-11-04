@@ -4,6 +4,21 @@ What changed in each SpeedBreaker release, newest first. Each release's notes on
 its entry here, and the game shows the entry once, the first time a new version starts (offline:
 it's built into the game).
 
+## Unreleased
+
+### What's new
+
+- **The German (PAL) disc is supported.** It plays like the Spanish one: its own code, German
+  movies and police radio, and German as the Language row's default. It installs beside a USA or
+  Spanish install, with its saves in their own folder (save-pal-de/).
+
+### More about it
+
+- The installer tells three discs apart. A default.xex of a size two regions share would be told
+  apart by the install's marker or its hash (none does today).
+- For builders: ppc-pal-de/ from config/pal-de/ (README step 2; -DSB_PAL_DE=OFF leaves it out).
+  survey/func_map.py and survey/region_map.py --region pal-de made its tables, and do the same for
+  another region (docs/REGION_PAL_DE.md).
 ## v0.2.2
 
 ### Fixed

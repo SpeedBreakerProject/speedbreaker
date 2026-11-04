@@ -61,6 +61,9 @@ LIBS=(
 if [ -f "$BUILD/recomp/libNfsmwRecompPalEsLib.a" ]; then
     LIBS+=("$BUILD/recomp/libNfsmwRecompPalEsLib.a")
 fi
+if [ -f "$BUILD/recomp/libNfsmwRecompPalDeLib.a" ]; then
+    LIBS+=("$BUILD/recomp/libNfsmwRecompPalDeLib.a")
+fi
 LIBS+=(
     "$BUILD/runtime/libXenonUtilsLite.a" "$BUILD/runtime/libo1heap.a"
     "$BUILD/runtime/libimgui.a"

@@ -27,8 +27,10 @@
 // language (English included), and a language whose movies or speech the
 // disc lacks, with no English ones to fall back to, gets the disc's own
 // (Spanish): its movie name's language and its speech record are redirected
-// (Files::movieRedirect, speechRedirect). None of this applies to the USA
-// disc, which always has English's.
+// (Files::movieRedirect, speechRedirect). The European (PAL, German) disc's
+// executable is taken the same way, with German (2) as the disc's own
+// language (DiscLanguage): its boot passes 2, and its disc holds German
+// movies and speech (copspeech_ge). None of this applies to the USA disc, which always has English's.
 // Files says what the installed files have for a language (the text pack
 // and the speech bank in NFS/ZDIR.BIN, its movies in Movies/), and Note /
 // LogLine say it in words. Measured with the USA disc's files in Spanish and
@@ -76,7 +78,16 @@ namespace game::language
         { 13, "finnish", "Finnish", "FINNISH", "en" },
     };
     constexpr int32_t kEnglish = 0;
+    constexpr int32_t kGerman = 2;   // the European (PAL, German) disc's own
     constexpr int32_t kSpanish = 4;  // the European (PAL, Spanish) disc's own: its boot passes 4
+
+    // The language a release's disc is made for, by its manifest region id
+    // (install/manifest.h): the Language row's default for that disc
+    // (main.cpp). -1 for the USA disc, whose default stays English.
+    constexpr int32_t DiscLanguage(std::string_view region)
+    {
+        return region == "pal-es" ? kSpanish : region == "pal-de" ? kGerman : -1;
+    }
 
     constexpr const Language* Find(int32_t id)
     {
@@ -109,8 +120,8 @@ namespace game::language
         return lr == kBootCall && chosen != kEnglish ? chosen : r3;
     }
 
-    // The same for the running release: the PAL (Spanish) executable boots in
-    // Spanish, so there the chosen language applies whichever it is.
+    // The same for the running release: a PAL executable boots in its disc's
+    // language, so there the chosen language applies whichever it is.
     constexpr int32_t BootLanguageFor(uint32_t lr, int32_t r3, int32_t chosen, bool palBuild)
     {
         return palBuild ? (lr == kBootCall ? chosen : r3) : BootLanguage(lr, r3, chosen);
@@ -186,14 +197,14 @@ namespace game::language
         bool speech = false;         // the bank the game asks for, in the archive index
         bool englishSpeech = false;  // English's
         bool speechToEnglish = false;  // the fallback: its own bank is missing, English's is there
-        // The PAL build's disc only (Scan's palBuild): neither its own nor
+        // A PAL build's disc only (Scan's palBuild): neither its own nor
         // English's movies / speech, so the disc's own language's instead.
         const Language* movieRedirect = nullptr;
         const Language* speechRedirect = nullptr;
     };
 
-    // `palBuild`: the PAL (Spanish) executable runs, which asks for "_pal"
-    // movies itself.
+    // `palBuild`: a PAL executable runs (Spanish or German), which asks for
+    // "_pal" movies itself.
     inline Files Scan(const Language& l, const std::vector<std::string>& movies, const std::vector<uint8_t>& zdir,
         bool palBuild = false)
     {
@@ -254,8 +265,8 @@ namespace game::language
     std::string MenuNote(int32_t id);
 
     // This run's language instead of the setting's (main.cpp: the first run
-    // of a PAL (Spanish) install made by the installer, whose settings were
-    // loaded before the disc was known). Before the game boots.
+    // of a PAL install made by the installer, whose settings were loaded
+    // before the disc was known). Before the game boots.
     void SetLaunchLanguage(int32_t id);
 
     // The log's line, once at boot.

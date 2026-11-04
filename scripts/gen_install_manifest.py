@@ -3,7 +3,9 @@ user's disc against (relative path, size, SHA-256 of every file).
 
     python3 scripts/gen_install_manifest.py game/files
     python3 scripts/gen_install_manifest.py --tsv files.tsv --xex default.xex \
-        --config config/nfsmw-pal-es.toml -o runtime/install/manifest_pal_es.inc
+        --config config/pal-es/nfsmw.toml -o runtime/install/manifest_pal_es.inc
+    python3 scripts/gen_install_manifest.py game/files-pal-de \
+        --config config/pal-de/nfsmw.toml -o runtime/install/manifest_pal_de.inc
 
 Run it over a known-good extracted dump (extract-xiso output), or over a list
 of the disc's files (--tsv: path, size, SHA-256 per line, tab-separated, as a

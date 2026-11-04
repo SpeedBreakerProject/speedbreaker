@@ -33,7 +33,7 @@ namespace install
         std::filesystem::path xex;
         InstallOrigin origin = InstallOrigin::User;
         bool marker = false;            // holds Install's marker for the current manifest
-        const Manifest* manifest = nullptr;  // the region it is (for a compiled-in manifest, the one whose default.xex size it has)
+        const Manifest* manifest = nullptr;  // the region it is (for a compiled-in manifest, the one whose default.xex size it has; its marker or hash when two share it)
     };
 
     // The first usable game directory of:
@@ -49,8 +49,16 @@ namespace install
     // (RecoverInterruptedInstall).
     // A compiled-in manifest (the default) finds any region's install: the
     // first location with one is used, and `manifest` says which it is.
-    // Cheap: a few stat calls and one small read; no hashing.
+    // Cheap: a few stat calls and one small read; no hashing, unless two
+    // regions' default.xex have the install's size and no marker says which
+    // (ManifestForXexFile).
     std::optional<GameInstall> FindGameInstall(const Manifest& manifest = GameManifest());
+
+    // The compiled-in manifest whose default.xex the file `xex` is: by its
+    // size, or, when two regions' executables have that size
+    // (ManifestsWithXexSize), by its SHA-256 (reads the few MB). nullptr:
+    // none, or unreadable.
+    const Manifest* ManifestForXexFile(const std::filesystem::path& xex);
 
     // The region of the installer's own install in `dir`: its marker (any
     // manifest version, current or not) beside a default.xex of a

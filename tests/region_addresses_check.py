@@ -1,13 +1,18 @@
 #!/usr/bin/env python3
-"""The PAL (Spanish) release's addresses for the runtime's hooks
-(runtime/region/region.h):
+"""A PAL release's addresses for the runtime's hooks (runtime/region/region.h):
+the Spanish one's (pal-es, the default) or the German one's (pal-de):
 
-    python3 tests/region_addresses_check.py <repo> [<usa dir> <pal dir> <funcmap.tsv>]
+    python3 tests/region_addresses_check.py <repo> [<usa dir> <pal dir> <funcmap.tsv>] [--region pal-de]
+
+The German tables (runtime/region/pal_de_addresses.inc, pal_de_names.h) are
+generated from the player's own discs (docs/REGION_PAL_DE.md): without them,
+--region pal-de passes with a line saying it was skipped.
 
 Without the images (the default; no game data needed):
   - every guest address the runtime's sources name (runtime/region/
-    hook_addresses.py) has a PAL address in runtime/region/pal_es_addresses.inc,
-    and every function they name a PAL name in pal_es_names.h;
+    hook_addresses.py) has a PAL address in runtime/region/pal_es_addresses.inc
+    (pal_de_addresses.inc), and every function they name a PAL name in
+    pal_es_names.h (pal_de_names.h);
   - every hook is an SB_HOOK (a plain PPC_FUNC(sub_...) override would leave
     the PAL code unhooked) and every SB_ORIGINAL names a hooked function;
   - every code or .rdata constant the runtime's .cpp files use is used through
@@ -18,7 +23,7 @@ With the two decrypted images (survey/region_map.py's inputs: <dir>/image.bin
 and xexsurvey.txt) and the function map, also: the bytes at each USA address
 and its PAL one match (instructions with branch displacements and address
 halves masked; data exactly), and the committed table, names and config/pal-es/
-are what survey/region_map.py writes from them.
+(config/pal-de/) are what survey/region_map.py writes from them.
 """
 import pathlib
 import re
@@ -27,25 +32,40 @@ import sys
 
 
 def main():
-    if len(sys.argv) not in (2, 5):
+    args = sys.argv[1:]
+    region = 'pal-es'
+    if '--region' in args:
+        i = args.index('--region')
+        if i + 1 >= len(args) or args[i + 1] not in ('pal-es', 'pal-de'):
+            sys.exit(__doc__)
+        region = args[i + 1]
+        del args[i:i + 2]
+    if len(args) not in (1, 4):
         sys.exit(__doc__)
-    root = pathlib.Path(sys.argv[1]).resolve()
+    root = pathlib.Path(args[0]).resolve()
     sys.path.insert(0, str(root / 'runtime/region'))
     import hook_addresses as ha
+    stem = region.replace('-', '_')
+    macro = 'SB_' + stem.upper()
+    table_file, names_file = root / f'runtime/region/{stem}_addresses.inc', root / f'runtime/region/{stem}_names.h'
+    if region != 'pal-es' and not table_file.exists():
+        print(f'region_addresses_check: skipped for {region} (no {table_file.relative_to(root)}: '
+              'generated from the player\'s own discs, docs/REGION_PAL_DE.md)')
+        sys.exit(0)
 
     fails = []
     table = {}
     hows = {}
-    for line in (root / 'runtime/region/pal_es_addresses.inc').read_text().splitlines():
-        m = re.match(r'SB_PAL_ES_ADDRESS\((0x[0-9A-F]{8}), (0x[0-9A-F]{8})\)\s*// ([^;]*);', line)
+    for line in table_file.read_text().splitlines():
+        m = re.match(macro + r'_ADDRESS\((0x[0-9A-F]{8}), (0x[0-9A-F]{8})\)\s*// ([^;]*);', line)
         if m:
             usa, pal = int(m.group(1), 16), int(m.group(2), 16)
             if usa in table:
                 fails.append(f'{usa:#010x} twice in the table')
             table[usa], hows[usa] = pal, m.group(3)
     names = {}
-    for line in (root / 'runtime/region/pal_es_names.h').read_text().splitlines():
-        m = re.match(r'#define SB_PAL_ES_sub_([0-9A-F]{8}) sub_([0-9A-F]{8})$', line)
+    for line in names_file.read_text().splitlines():
+        m = re.match('#define ' + macro + r'_sub_([0-9A-F]{8}) sub_([0-9A-F]{8})$', line)
         if m:
             names[int(m.group(1), 16)] = int(m.group(2), 16)
 
@@ -53,19 +73,19 @@ def main():
     for addr, refs in sorted(found.items()):
         where = ', '.join(sorted(refs)[:3])
         if addr not in table:
-            fails.append(f'{addr:#010x} ({where}): no PAL address; rerun survey/region_map.py table')
+            fails.append(f'{addr:#010x} ({where}): no {region} address; rerun survey/region_map.py table --region {region}')
             continue
         if ha.kind_of(addr, refs) == 'code' and names.get(addr) != table[addr]:
-            fails.append(f'sub_{addr:08X} ({where}): not in pal_es_names.h (or another address)')
+            fails.append(f'sub_{addr:08X} ({where}): not in {names_file.name} (or another address)')
         if 'changed' in hows[addr]:
             fails.append(f'{addr:#010x} ({where}): in a function the PAL build changed ({hows[addr]}): review it')
     for addr in table:
         if addr not in found:
-            fails.append(f'{addr:#010x}: in the table but no longer in the sources (rerun survey/region_map.py table)')
+            fails.append(f'{addr:#010x}: in the table but no longer in the sources (rerun survey/region_map.py table --region {region})')
 
     rt = root / 'runtime'
     hooks = ha.hooked_functions(root)
-    print(f'{len(found)} guest addresses named by the runtime, {len(table)} in the PAL table, {len(hooks)} hooked functions, '
+    print(f'{region}: {len(found)} guest addresses named by the runtime, {len(table)} in the PAL table, {len(hooks)} hooked functions, '
           f'{sum(1 for a in table if table[a] != a)} at another PAL address')
     originals = set()
     plain = re.compile(r'^\s*PPC_FUNC\(sub_82[0-9A-F]{6}\)\s*(\{.*)?$')
@@ -106,8 +126,8 @@ def main():
             elif not re.search(r'region::Addr\(0x' + f'{addr:08X}', line, re.I):
                 fails.append(f'{ref}: {addr:#010x} ({how}) used without region::Addr')
 
-    if len(sys.argv) == 5:
-        usa_dir, pal_dir, funcmap = sys.argv[2:5]
+    if len(args) == 4:
+        usa_dir, pal_dir, funcmap = args[1:4]
         sys.path.insert(0, str(root / 'survey'))
         import region_map as rm
         m = rm.RegionMap(usa_dir, pal_dir, funcmap)
@@ -122,8 +142,8 @@ def main():
                     fails.append(f'{usa:#010x} -> {pal:#010x}: the code differs')
             elif m.usa.bytes(usa, 4) != m.pal.bytes(pal, 4) and not hows[usa].endswith('initial bytes differ'):
                 fails.append(f'{usa:#010x} -> {pal:#010x}: the data differs')
-        r = subprocess.run([sys.executable, '-I', str(root / 'survey/region_map.py'), 'check', usa_dir, pal_dir, funcmap],
-                           capture_output=True, text=True)
+        r = subprocess.run([sys.executable, '-I', str(root / 'survey/region_map.py'), 'check', usa_dir, pal_dir, funcmap,
+                            '--region', region], capture_output=True, text=True)
         print(r.stdout.strip())
         if r.returncode:
             fails.append('survey/region_map.py check: ' + (r.stdout + r.stderr).strip().replace('\n', '; '))
