@@ -5,10 +5,14 @@
 #include <stdafx.h>
 #include "dispatcher.h"
 #include "function.h"
+#include <region/region.h>
 #include <cpu/guest_thread.h>
 #include <cpu/guest_time.h>
 #include <cpu/backoff.h>
 #include <cpu/host_cpu.h>
+
+//DEBUG
+#include <debug/wake_stats.h>
 
 using namespace dispatcher;
 
@@ -287,6 +291,59 @@ uint32_t NtYieldExecution()
     backoff::CountYield();
     std::this_thread::yield();
     return STATUS_SUCCESS;
+}
+
+// Hook into yield functions to establish synchronization instead of busy waiting.
+static std::mutex g_frameMtx;
+static std::condition_variable g_frameCv;
+static bool g_shutdown = false;   // guarded by g_frameMtx
+
+static inline uint32_t LoadFlag(uint8_t* base, uint32_t ea)
+{
+    return __atomic_load_n(reinterpret_cast<uint32_t*>(base + ea), __ATOMIC_ACQUIRE);
+}
+
+void FrameSyncShutdown()
+{
+    { std::lock_guard<std::mutex> lk(g_frameMtx); g_shutdown = true; }
+    g_frameCv.notify_all();
+}
+
+SB_HOOK(sub_8262D790)
+{
+    if (std::getenv("NFSMW_SYNCHRONIZE_GUEST_YIELDS")){
+        if (ctx.lr == 0x82441BBC) {                       // worker: wait for flag != 0
+            const uint32_t ea = ctx.r27.u32 - 12480;
+            {
+                std::unique_lock<std::mutex> lock(g_frameMtx);
+                g_frameCv.notify_all();                   // worker is idle: wake main
+                g_frameCv.wait(lock, [&] { return g_shutdown || LoadFlag(base, ea) != 0; });
+            }
+            SB_WAKE("WORKER THREAD WOKEN");
+            return;
+        }
+
+        if (ctx.lr == 0x82441E4C) {                       // main: wait for flag == 0
+            const uint32_t ea = ctx.r31.u32 - 12480;
+            {
+                std::unique_lock<std::mutex> lock(g_frameMtx);
+                g_frameCv.wait(lock, [&] { return g_shutdown || LoadFlag(base, ea) == 0; });
+            }
+            SB_WAKE("MAIN THREAD WOKEN");
+            return;
+        }
+    }
+    SB_ORIGINAL(sub_8262D790)(ctx, base);
+}
+
+// Function where game sets ea to 1.
+SB_HOOK(sub_82441EF0)
+{
+    SB_ORIGINAL(sub_82441EF0)(ctx, base);
+    if (std::getenv("NFSMW_SYNCHRONIZE_GUEST_YIELDS")){
+        { std::lock_guard<std::mutex> lk(g_frameMtx); }
+        g_frameCv.notify_all();
+    }
 }
 
 GUEST_FUNCTION_HOOK(__imp__NtCreateEvent, NtCreateEvent);
