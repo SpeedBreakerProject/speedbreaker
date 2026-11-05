@@ -130,7 +130,7 @@ belongs to its owners.</sub>
 | **Steam Deck** and **Steam Machine** (SteamOS) | [Download][dl-steamos-x86_64]<br>`SpeedBreaker-steamos-x86_64.tar.xz` | Steam Deck OLED (SteamOS 3.9.2). Steam Machine (SteamOS 3.8) on a 3440x1440 ultrawide. The Steam Deck LCD hasn't been tested yet. |
 | **Steam Frame** (SteamOS, arm64) | [Download][dl-steamos-arm64]<br>`SpeedBreaker-steamos-arm64.tar.xz` | Steam Frame (SteamOS 0.3.0). It plays as a big flat screen in the headset; it is not a VR mode. |
 | **Linux** (x86-64) | [Download][dl-steamos-x86_64] the x86-64 SteamOS build, `SpeedBreaker-steamos-x86_64.tar.xz`, or [build from source](#building-from-source) | Tested here on SteamOS. Players reported v0.1.1 working on Fedora 44 (GeForce GTX 1080 Ti) and Ubuntu 24.04 (Intel Arc 140T). Other setups: reports welcome. |
-| **Mac** (Apple silicon) | [Download][dl-macos]<br>`SpeedBreaker-macos.dmg` | MacBook Pro (M1 Pro) on macOS 27 and Mac Studio (M4 Max) on macOS 26; macOS 15.6 (Sequoia) in a virtual machine. There is no Intel Mac build. |
+| **Mac** (Apple silicon) | [Download][dl-macos]<br>`SpeedBreaker-macos.dmg` | MacBook Pro (M1 Pro) on macOS 27 and Mac Studio (M4 Max) on macOS 26; macOS 15.6 (Sequoia) in a virtual machine. There is no Intel Mac download; an Intel Mac can [build from source](#building-from-source) (tested: Core i7-9700K and Radeon RX 6600 XT, macOS 15.4). |
 | **iPhone** and **iPad** | [Sideload the IPA](#iphone-and-ipad) (experimental), `SpeedBreaker-<version>-ios.ipa` on the [release page][releases], or [build it yourself](#iphone-and-ipad) with Xcode | iPhone 15 Pro Max and iPhone 18 Pro Max (iOS 27). iPad Pro 12.9-inch (M2, iPadOS 27) with a Backbone Pro. Not on the App Store. Those were Xcode-signed builds: the IPA itself hasn't been installed on a device yet. |
 | **Windows** (beta) | [Download][all-releases] `SpeedBreaker-0.2.2-windows-x64-beta.zip` from the Releases page; see [Windows (beta)](#windows-beta) | Here: a laptop with Intel UHD Graphics (60 Hz). Players have reported it running on NVIDIA GeForce (GTX 1070, RTX 4090, RTX 5070 Ti) and AMD Radeon (RX 6700 XT, RX 6750 XT) graphics. Intel Arc graphics and 120/144 Hz monitors haven't been tested yet: [reports welcome](#reporting-a-bug). |
 | **Android** | Coming soon | |
@@ -164,7 +164,10 @@ should say OK. What changed in each release is in [CHANGELOG.md](CHANGELOG.md).
 - **Windows (beta):** Windows 10 or 11, 64-bit; a CPU with AVX2 (Intel Haswell from 2013 or
   newer, or any AMD Ryzen); a Vulkan 1.2 graphics card with a current driver.
 - **Mac:** Apple silicon and **macOS 15** (Sequoia) or later. The app won't open on older
-  versions of macOS, and there is no Intel Mac build.
+  versions of macOS. There is no Intel Mac download, but an Intel Mac with macOS 15 or later, a CPU with
+  AVX2 (Haswell or newer) and MoltenVK 1.4.2 or newer can [build it from
+  source](#building-from-source). It has been tested on one, with an AMD Radeon RX 6600 XT; Intel
+  graphics haven't been tested.
 - **iPhone and iPad:** iOS or iPadOS 17 or later, on an A15-class chip or newer (iPhone 13 and
   later, M-series iPads), and a controller or keyboard. Devices with less memory than the tested
   ones are untested.
@@ -744,6 +747,11 @@ The supported executable is 3,936,256 bytes, with SHA-256
   `scripts/macos/build_deps.sh`, for macOS 15 like the release (step 3). Homebrew's bottles of
   them (`brew install sdl3 vulkan-loader vulkan-headers glslang spirv-tools`) also work, for an
   app that runs only on the macOS you build on (step 3).
+- **Intel Mac:** `build_deps.sh` builds for Apple silicon only, so use Homebrew's libraries
+  (Homebrew is in `/usr/local` here): `brew install llvm lld cmake ninja nasm molten-vk sdl3
+  vulkan-loader vulkan-headers glslang spirv-tools`. MoltenVK must be 1.4.2 or newer (`brew info
+  molten-vk`): with 1.2.x the movies play solid green. In step 2, run
+  `LLVM=/usr/local/opt/llvm/bin scripts/setup_tools.sh`.
 - **SteamOS:** build inside an Arch Linux distrobox (podman and distrobox ship with SteamOS). The
   development launcher, `scripts/steamos/speedbreaker.sh`, expects the container to be called
   `nfsmw-build`:
@@ -810,6 +818,13 @@ cmake -S . -B build/main -G Ninja -DCMAKE_BUILD_TYPE=Release \
 # (or, with Homebrew's libraries instead of build_deps.sh, an app for your own macOS only: the
 #  same cmake line with -DCMAKE_OSX_DEPLOYMENT_TARGET=<your macOS, e.g. 26.0> instead of the last
 #  two options; make_app.py names the version if it's wrong)
+
+# Intel Mac (Homebrew's LLVM and libraries in /usr/local; on a macOS newer than 15, add
+# -DCMAKE_OSX_DEPLOYMENT_TARGET=<your macOS>)
+cmake -S . -B build/main -G Ninja -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_C_COMPILER=/usr/local/opt/llvm/bin/clang \
+  -DCMAKE_CXX_COMPILER=/usr/local/opt/llvm/bin/clang++ \
+  -DCMAKE_PREFIX_PATH=/usr/local -DSB_MOLTENVK=/usr/local/opt/molten-vk/lib/libMoltenVK.dylib
 
 ninja -C build/main SpeedBreaker
 ```
