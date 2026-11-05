@@ -57,6 +57,15 @@ namespace gpu
         uint64_t constUsed[4] = {};
         bool constRelative = false;
         bool constPacked = false;
+        uint32_t sharpFetches = 0;       // PS, TranslateOptions::sharpFetch2D: 2D fetches through sharpTex2D
+    };
+
+    struct TranslateOptions
+    {
+        // Settings > Graphics > Sharper UI's variant of a pixel shader
+        // (gpu/sharp_ui.h): its 2D fetches through sharpTex2D. Off (the
+        // default): the GLSL is exactly the plain translation's.
+        bool sharpFetch2D = false;
     };
 
     // NFSMW_CP_OPT bit 8 (on by default): translate shaders with packed constants.
@@ -78,6 +87,7 @@ namespace gpu
 
     // `ucode` is in host byte order (swap the guest's big-endian words first).
     TranslatedShader TranslateShader(ShaderStage stage, const uint32_t* ucode, size_t dwordCount);
+    TranslatedShader TranslateShader(ShaderStage stage, const uint32_t* ucode, size_t dwordCount, const TranslateOptions& options);
 
     // The GLSL declarations every translated shader starts with (also used by
     // the host to lay out its buffers).

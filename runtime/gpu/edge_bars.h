@@ -176,7 +176,9 @@ namespace gpu::bars
     // +-0.970, y +-0.920, FE000000 (the intro's start, ~57 s); x +-0.976, y
     // +-0.985, FB000000 then FF000000 (the Blacklist bio's panel, its fade in
     // from 11000000 short of minAlpha: the border shows for those ~15 frames,
-    // as before). The nearest draws it must not take: the fades and dims
+    // as before). The Rap Sheet's panel (RapSheetMain.fng: x -0.983..0.957,
+    // y +-0.985, FF000000, GitHub #87) sits 0.013 left of centre: centreMax
+    // 0.02 (it was 0.01, and its border showed the scene all round it). The nearest draws it must not take: the fades and dims
     // (+-1.29: past the band, the widen, stretch and cover rules' own), the
     // title key art (x +-1.104, y +-0.981, grey), the overlay at ~57 s (x
     // +-1.104, B8 alpha), the vid cam's noise and dark overlays (x +-0.70; 3C
@@ -184,7 +186,7 @@ namespace gpu::bars
     // cover rule's).
     struct BlackoutRule
     {
-        float centreMax = 0.01f;                     // |the box's centre|, each axis
+        float centreMax = 0.02f;                     // |the box's centre|, each axis (the Rap Sheet's: -0.013 in x)
         float extentMin = 0.90f, extentMax = 0.99f;  // half its width and half its height
         uint32_t minAlpha = 0xF0;                    // vertex alpha, all four the same
         float cornerTolerance = 1e-3f;               // clip units, as Rule's
@@ -511,22 +513,26 @@ namespace gpu::bars
         Rect scissor{};               // the draw's scissor (host pixels)
     };
 
-    enum class Fill : uint8_t { None, LeftBar, RightBar, Blackout, Backdrop, Vignette, Layer };
+    enum class Fill : uint8_t { None, LeftBar, RightBar, Blackout, Backdrop, Vignette, Layer, EdgePiece, Raise };
 
     // What to draw after the draw: for a bar or a black frame, `rectCount`
     // more copies of it (none for a bar that reaches the screen edge), with
     // `posScale` and each rectangle as the scissor; for a backdrop, each
     // rectangle cleared to opaque black (its picture must not be copied);
     // for a vignette or a layer, nothing after it: the draw itself is drawn
-    // with `posScale` instead of its own (no rectangles).
+    // with `posScale` instead of its own (no rectangles); for an edge piece,
+    // the draw itself within `own` (its scissor narrowed to stop at the
+    // band's edge), then one copy as for a bar.
     struct Plan
     {
         Fill fill = Fill::None;
         Box box{};          // the quad's, clip space
         uint32_t argb = 0;  // its colour
         uint32_t rectCount = 0;
-        Rect rects[8]{};    // a bar's 2, a black frame's 4, a backdrop's 8
+        Rect rects[8]{};    // a bar's 2, a black frame's 4, a backdrop's 8, an edge piece's 1
         float posScale[4]{};
+        bool clipOwn = false;  // an edge piece: the draw's own scissor becomes `own`
+        Rect own{};
     };
 
     // The register checks, before any vertex is read: one quad of the
@@ -780,13 +786,18 @@ namespace gpu::bars
             return false;
         const float midX = (b.x0 + b.x1) * 0.5f / scaleX, midY = (b.y0 + b.y1) * 0.5f / scaleY;
         const float halfX = (b.x1 - b.x0) * 0.5f / scaleX, halfY = (b.y1 - b.y0) * 0.5f / scaleY;
-        if (!(std::fabs(midX) <= rule.centreMax && std::fabs(midY) <= rule.centreMax))
-            return false;
-        if (!(halfX >= rule.extentMin && halfY >= rule.extentMin))
-            return false;
         // Its nearer reach in each axis against the screen's edge (clip 1 =
         // 1/scale band units).
         const float reachX = std::min(-b.x0, b.x1), reachY = std::min(-b.y0, b.y1);
+        // Centred in each axis it is short of the screen's edges in; an axis
+        // already past both of them can be off-centre (the dialogs' dim, x
+        // -1.307..1.280 of the band, y -0.999..0.995: GitHub #87), nothing
+        // there moves into view.
+        const bool pastX = reachX >= 1.0f, pastY = reachY >= 1.0f;
+        if (!((pastX || std::fabs(midX) <= rule.centreMax) && (pastY || std::fabs(midY) <= rule.centreMax)))
+            return false;
+        if (!(halfX >= rule.extentMin && halfY >= rule.extentMin))
+            return false;
         if (!(reachX < 1.0f - rule.shortMin * scaleX || reachY < 1.0f - rule.shortMin * scaleY))
             return false;
         if (box)
@@ -868,6 +879,322 @@ namespace gpu::bars
         p.box = box;
         p.argb = v[0].argb;
         CoverFrame(box, d.posScale, p.posScale);
+        return p;
+    }
+
+    // An edge piece (GitHub #87): menu art authored a little past the 16:9
+    // frame's top or bottom edge so that it bleeds off a 16:9 screen, ending
+    // short of a taller screen's. The Options screens' black graffiti header
+    // (Options.fng, t0 15299000 512x128) is one front-end quad at band y
+    // 0.508..1.027 once it has slid in: on a 16:9 screen (and a 360's) its own
+    // top edge lies off the screen, but under Vert+ the screen goes on to
+    // 1/sv (1.117 of the band on a 16:10 MacBook) and the edge showed as a
+    // straight cut with the 3D scene above it. Such a quad (an axis-aligned
+    // rectangle of the front-end shader the other rules left alone, crossing
+    // one band edge by
+    // pastMin..pastMax, its other edge inside the band, short of the screen's
+    // edge) is drawn as two parts that meet on one pixel edge (Edge): the draw
+    // itself, scissored to stop at a pivot row, and one copy of it over the
+    // rows from there to the screen's edge, stretched in y about the pivot so
+    // that the quad's own edge reaches kFillEdge. The pivot lies sliceFrac of
+    // the quad's height inside its edge (never past the band edge), so the
+    // stretch is gentle: 1.86x for the header (stretching only its 0.027 past
+    // the band, 4.4x, drew its ragged top as vertical streaks). Under Vert+
+    // only; at 16:9 nothing changes. Thresholds in band units. The nearest
+    // draws it must not take: the vid-cam bars (the bar rule's: past both
+    // edges), the fades and dims (past both edges), the parked white box and
+    // triangle (wholly outside the band: clipped, never left alone), a text
+    // batch (more than one quad), the Options hub's graffiti tags (the
+    // raise's, asked first: mid-reveal their quads cross the band edge too).
+    struct EdgePieceRule
+    {
+        float pastMin = 0.01f;   // past the band's edge by at least this
+        float pastMax = 0.20f;   // and at most this (graffiti wipes reach 1.23..3.3: past the screen anyway)
+        float shortMin = 1e-3f;  // clip units short of the screen's edge that count
+        float cornerTolerance = 1e-3f;
+    };
+    constexpr float kEdgeSliceFrac = 0.25f;  // the pivot: this share of the quad's height inside its edge
+
+    // Which band edge a quad's box crosses: +1 (clip +y), -1, or 0.
+    inline int MatchEdgePiece(const Vertex v[4], float scaleX, float scaleY, const EdgePieceRule& rule = {}, Box* box = nullptr)
+    {
+        if (!(scaleX > 0.0f && scaleY > 0.0f && scaleY < 1.0f))
+            return 0;
+        Box b;
+        if (!RectangleBox(v, rule.cornerTolerance, b))
+            return 0;
+        const float lo = b.y0 / scaleY, hi = b.y1 / scaleY;
+        const bool up = hi >= 1.0f + rule.pastMin && hi <= 1.0f + rule.pastMax && b.y1 < 1.0f - rule.shortMin && lo > -1.0f && lo < 1.0f;
+        const bool down = -lo >= 1.0f + rule.pastMin && -lo <= 1.0f + rule.pastMax && b.y0 > -1.0f + rule.shortMin && hi < 1.0f && hi > -1.0f;
+        if (up == down)
+            return 0;
+        if (box)
+            *box = b;
+        return up ? 1 : -1;
+    }
+
+    // The register checks for an edge piece: Candidate's, over any t0 (a
+    // picture or the white texture), under Vert+ only.
+    inline bool EdgePieceCandidate(const Draw& d)
+    {
+        const float* c = d.c;
+        const bool yScale = d.frontEndY > 0.0f && std::fabs(std::fabs(c[5]) - d.frontEndY) <= d.frontEndY * 1e-5f;
+        return d.scaleY < 1.0f && !d.occlusion && d.prim == 13 && d.count == 4 && d.frontEndShader && d.leftAlone && c[3] == 0.0f &&
+            c[4] == 0.0f && c[6] == 0.0f && c[7] == 0.0f && yScale && (d.vte & 0xF) == 0xF &&
+            (d.blend0 == 0x07060706u || d.blend0 == 0x00010001u);
+    }
+
+    // The pivot of an edge piece, clip y: sliceFrac of its height inside its
+    // edge on `side`, and never past the band edge (+-scaleY).
+    inline float EdgePiecePivot(int side, const Box& b, float scaleY, float sliceFrac = kEdgeSliceFrac)
+    {
+        const float h = b.y1 - b.y0;
+        return side > 0 ? std::min(b.y1 - sliceFrac * h, scaleY) : std::max(b.y0 + sliceFrac * h, -scaleY);
+    }
+
+    // The plan for an edge piece: the copy's posScale (y' = q + (y - q) k
+    // about the pivot q, k taking the quad's edge to +-kFillEdge, folded in as
+    // CoverFrame's), its rectangle (the rows from the pivot to the screen's
+    // edge, inside the draw's scissor) and the draw's own scissor (the rest).
+    inline bool EdgePieceRects(int side, const Box& b, const float ps[4], float hostW, float hostH, const Rect& scissor, float scaleY,
+        Plan& p, float sliceFrac = kEdgeSliceFrac)
+    {
+        const float e = kFillEdge, q = EdgePiecePivot(side, b, scaleY, sliceFrac), end = side > 0 ? b.y1 : b.y0;
+        const float k = (side > 0 ? e - q : -e - q) / (end - q);
+        if (!(k > 1.0f) || !std::isfinite(k))
+            return false;
+        p.posScale[0] = ps[0];
+        p.posScale[1] = k * ps[1];
+        p.posScale[2] = ps[2];
+        p.posScale[3] = ps[3] + ps[1] * q * (1.0f - k);
+        const Rect past = Intersect(side > 0 ? ClipToHost(-e, e, q, e, ps, hostW, hostH) : ClipToHost(-e, e, -e, q, ps, hostW, hostH), scissor);
+        const Rect own = Intersect(side > 0 ? ClipToHost(-e, e, -e, q, ps, hostW, hostH) : ClipToHost(-e, e, q, e, ps, hostW, hostH), scissor);
+        if (Empty(past))
+            return false;
+        p.rects[0] = past;
+        p.rectCount = 1;
+        p.clipOwn = true;
+        p.own = own;
+        return true;
+    }
+
+    template <class ReadWord>
+    Plan PlanEdgePiece(const Draw& d, ReadWord&& read, const EdgePieceRule& rule = {})
+    {
+        Plan p;
+        if (!EdgePieceCandidate(d))
+            return p;
+        const float* c = d.c;
+        Vertex v[4];
+        for (uint32_t k = 0; k < 4; k++)
+        {
+            uint32_t w[4];
+            for (uint32_t j = 0; j < 4; j++)
+                if (!read(k, j, w[j]))
+                    return p;
+            float q[3];
+            std::memcpy(q, w, sizeof(q));
+            v[k] = { q[0] * c[0] + q[1] * c[1] + q[2] * c[2] + c[3], q[0] * c[4] + q[1] * c[5] + q[2] * c[6] + c[7], w[3] };
+        }
+        Box box{};
+        const int side = MatchEdgePiece(v, d.scaleX, d.scaleY, rule, &box);
+        if (!side || !EdgePieceRects(side, box, d.posScale, d.hostW, d.hostH, d.scissor, d.scaleY, p))
+            return Plan{};
+        p.fill = Fill::EdgePiece;
+        p.box = box;
+        p.argb = v[0].argb;
+        return p;
+    }
+
+    // A raise (GitHub #87): the Options hub's two graffiti tags (t0 1470B000,
+    // 128x128 k_8_8_8_8, x -0.658..-0.437 and 0.322..0.653) are pictures the
+    // game reveals in place, like paint dripping: each frame the quad's
+    // bottom edge moves down and its texture coordinates move with it, so the
+    // texture's top row (v = 0) stays at band y 0.974 (left) and 0.950
+    // (right), and above it the quad draws nothing (v < 0); at rest the quad
+    // is the picture (v 0.004..0.996). On a 16:9 screen the tags' tops sit 9
+    // and 18 rows below the top of 720 (the 360's own picture); under Vert+
+    // the screen goes on to 1/sv of the band and the gap above them was a
+    // band of 3D scene (0.143 and 0.167 of the band on a 16:10 MacBook). Such
+    // a quad (one axis-aligned rectangle of the front-end shader the other
+    // rules left alone, opaque (every vertex alpha >= minAlpha), over a
+    // 32-bit picture of at least minTexels a side, its u spanning the
+    // picture's width, v rising downward across it with v = 0 (the art's top)
+    // at artTopMin..1 of the band and v = 1 inside it, at least minArtHeight
+    // tall), once seen mid-reveal (the quad's top edge past the art's top) and
+    // from then on while it is drawn, is moved up, nothing else, by exactly
+    // what puts that top on the
+    // screen's top edge (clip 1): the same amount every frame of the reveal
+    // and at rest, so the game's reveal starts at the screen's top and its
+    // front moves down as before. Under Vert+ only (16:9: nothing). The
+    // bottom edge mirrored. Thresholds in band units. The nearest draws it
+    // must not take: the header (its art past the band: the edge piece's),
+    // the Rap Sheet's and the bio's panels (the black frame rule's, never
+    // left alone), the dialogs' boxes (the white 32x32 texture), the HUD's
+    // pieces (too small), a translucent glow (alpha), text (several quads).
+    struct RaiseRule
+    {
+        float artTopMin = 0.88f;     // the art's top (v = 0) at or past this, and inside the band
+        float minArtHeight = 0.30f;  // v 0..1 at least this tall
+        uint32_t minAlpha = 0xF0;
+        uint32_t minTexels = 64;
+        float minUSpan = 0.95f;      // u across the quad: (nearly) the picture's whole width
+        float revealMin = 0.02f;     // the quad's edge past the art's top by this: a reveal under way
+        uint32_t inkAlpha = 0x40;    // a texel at least this opaque is ink (the art's visible top: FirstInkRow)
+        float cornerTolerance = 1e-3f;
+    };
+
+    // One ePoly corner for the raise: clip x and y, colour, texture u and v.
+    struct UvVertex
+    {
+        float x, y;
+        uint32_t argb;
+        float u, v;
+    };
+
+    // The band y of v = 0 (the art's top) and of v = 1, for a quad whose v
+    // changes along y only; false if it doesn't (or isn't a rectangle).
+    inline bool ArtSpan(const UvVertex q[4], float scaleY, int& side, float& top, float& bottom, const RaiseRule& rule = {}, float inkV = 0.0f)
+    {
+        Vertex v[4];
+        for (int i = 0; i < 4; i++)
+            v[i] = { q[i].x, q[i].y, q[i].argb };
+        Box b;
+        if (!RectangleBox(v, rule.cornerTolerance, b) || b.y1 - b.y0 <= 0.0f)
+            return false;
+        // v and u at the box's top (y1) and bottom (y0) rows, the same along each row.
+        float vTop = 0, vBottom = 0, uLo = 1e30f, uHi = -1e30f;
+        int nTop = 0, nBottom = 0;
+        for (int i = 0; i < 4; i++)
+        {
+            uLo = std::min(uLo, q[i].u);
+            uHi = std::max(uHi, q[i].u);
+            if (std::fabs(q[i].y - b.y1) <= rule.cornerTolerance)
+            {
+                if (nTop++ && std::fabs(q[i].v - vTop) > 1e-4f)
+                    return false;
+                vTop = q[i].v;
+            }
+            else
+            {
+                if (nBottom++ && std::fabs(q[i].v - vBottom) > 1e-4f)
+                    return false;
+                vBottom = q[i].v;
+            }
+        }
+        if (nTop != 2 || nBottom != 2 || uHi - uLo < rule.minUSpan || vTop == vBottom)
+            return false;
+        // y as a function of v (linear across the quad).
+        auto yAt = [&](float vv) { return b.y1 + (vv - vTop) * (b.y0 - b.y1) / (vBottom - vTop); };
+        const float yv0 = yAt(inkV) / scaleY, yv1 = yAt(1.0f) / scaleY;
+        side = yv0 > yv1 ? 1 : -1;  // the art's top toward clip +y: the screen's top edge (either way up on screen)
+        top = yv0;
+        bottom = yv1;
+        return true;
+    }
+
+    // The raise for a quad: its clip y shift (0: none). revealing: the art's
+    // top lies inside the quad, below its top edge (v < 0 above it): a reveal
+    // under way, which tells these tags from a still picture of the same
+    // shape (the title's logo, 1ACA4000, has its top at 0.897 of the band
+    // too). gpu/renderer.cpp raises a quad only once it has been seen
+    // revealing, and from then on while it is drawn.
+    // inkV: the v of the art's visible top (FirstInkV; 0: the picture's top row).
+    inline float MatchRaise(const UvVertex q[4], float scaleX, float scaleY, const RaiseRule& rule = {}, bool* revealing = nullptr, float inkV = 0.0f)
+    {
+        if (!(scaleX > 0.0f && scaleY > 0.0f && scaleY < 1.0f))
+            return 0.0f;
+        for (int i = 0; i < 4; i++)
+            if ((q[i].argb >> 24) < rule.minAlpha)
+                return 0.0f;
+        int side = 0;
+        float top = 0, bottom = 0;
+        if (!ArtSpan(q, scaleY, side, top, bottom, rule, inkV))
+            return 0.0f;
+        const float t = side * top, bt = side * bottom;  // measured outward
+        if (!(t >= rule.artTopMin && t < 1.0f && bt > -1.0f && t - bt >= rule.minArtHeight))
+            return 0.0f;
+        if (revealing)
+        {
+            float edge = side > 0 ? -1e30f : 1e30f;
+            for (int i = 0; i < 4; i++)
+                edge = side > 0 ? std::max(edge, q[i].y) : std::min(edge, q[i].y);
+            *revealing = side * edge / scaleY > t + rule.revealMin;
+        }
+        return side * (1.0f - t * scaleY);  // clip units: the art's top to clip +-1
+    }
+
+    // The register checks for a raise: Candidate's, over a 32-bit picture.
+    inline bool RaiseCandidate(const Draw& d, const RaiseRule& rule = {})
+    {
+        const float* c = d.c;
+        const bool yScale = d.frontEndY > 0.0f && std::fabs(std::fabs(c[5]) - d.frontEndY) <= d.frontEndY * 1e-5f;
+        return d.scaleY < 1.0f && !d.occlusion && d.prim == 13 && d.count == 4 && d.frontEndShader && d.leftAlone && c[3] == 0.0f &&
+            c[4] == 0.0f && c[6] == 0.0f && c[7] == 0.0f && yScale && (d.vte & 0xF) == 0xF &&
+            (d.blend0 == 0x07060706u || d.blend0 == 0x00010001u) && d.t0Sampled && d.t0Format == 6 && d.t0Width >= rule.minTexels &&
+            d.t0Height >= rule.minTexels;
+    }
+
+    // The plan for a raise: the draw's posScale with its y offset moved by the
+    // shift (NDC y = (y + shift) ps1 + ps3), no rectangles. read: as PlanFill's
+    // (words 4 and 5 of an ePoly are its first u and v).
+    // The first row of a 32-bit picture, from its top (v = 0), with a texel
+    // at least inkAlpha opaque (alpha: the word's top byte, ARGB as the
+    // renderer reads it); -1 if none or unreadable. The tags' picture has
+    // clear rows above its ink: raising v = 0 to the screen's top left a
+    // few rows of sky above the tag (seen in a test build's screenshot).
+    template <class ReadTexel>
+    int FirstInkRow(ReadTexel&& texel, uint32_t width, uint32_t height, const RaiseRule& rule = {})
+    {
+        for (uint32_t y = 0; y < height; y++)
+            for (uint32_t x = 0; x < width; x++)
+            {
+                uint32_t w = 0;
+                if (!texel(x, y, w))
+                    return -1;
+                if ((w >> 24) >= rule.inkAlpha)
+                    return int(y);
+            }
+        return -1;
+    }
+
+    // The v the raise puts on the screen's top edge: the first ink row's
+    // centre (with bilinear filtering its top half blends with the clear row
+    // above it, so its centre is the first row drawn at full ink).
+    inline float FirstInkV(int row, uint32_t height)
+    {
+        return row > 0 && height ? (float(row) + 0.5f) / float(height) : 0.0f;
+    }
+
+    // admit(revealing): whether to raise it (gpu/renderer.cpp: seen revealing).
+    // inkV: FirstInkV of its picture.
+    template <class ReadWord, class Admit>
+    Plan PlanRaise(const Draw& d, ReadWord&& read, Admit&& admit, float inkV, const RaiseRule& rule = {})
+    {
+        Plan p;
+        if (!RaiseCandidate(d, rule))
+            return p;
+        const float* c = d.c;
+        UvVertex q[4];
+        for (uint32_t k = 0; k < 4; k++)
+        {
+            uint32_t w[6];
+            for (uint32_t j = 0; j < 6; j++)
+                if (!read(k, j, w[j]))
+                    return p;
+            float f[6];
+            std::memcpy(f, w, sizeof(f));
+            q[k] = { f[0] * c[0] + f[1] * c[1] + f[2] * c[2] + c[3], f[0] * c[4] + f[1] * c[5] + f[2] * c[6] + c[7], w[3], f[4], f[5] };
+        }
+        bool revealing = false;
+        const float shift = MatchRaise(q, d.scaleX, d.scaleY, rule, &revealing, inkV);
+        if (shift == 0.0f || !admit(revealing))
+            return p;
+        p.fill = Fill::Raise;
+        p.argb = q[0].argb;
+        p.box = { std::min(q[0].x, q[2].x), std::max(q[0].x, q[2].x), std::min(q[0].y, q[2].y), std::max(q[0].y, q[2].y) };
+        std::memcpy(p.posScale, d.posScale, sizeof(p.posScale));
+        p.posScale[3] += d.posScale[1] * shift;
         return p;
     }
 }

@@ -5,6 +5,7 @@
 // (BSD license); comments name the rule where it isn't obvious.
 #include "shader_translator.h"
 #include "shared_memory_glsl.h"
+#include "sharp_ui.h"
 
 #include "xenos/ucode.h"
 
@@ -172,6 +173,7 @@ float xmul(float a, float b)
             ShaderStage stage;
             const uint32_t* ucode;
             size_t dwords;
+            TranslateOptions options;
             TranslatedShader out;
             std::string body;
             int indent = 1;
@@ -737,7 +739,16 @@ float xmul(float a, float b)
                             : std::format("({}) / vec2(textureSize(t2d_{}, 0))", uv, slot);
                     if (op.offset_x() != 0.0f || op.offset_y() != 0.0f)
                         uv = std::format("({} + vec2({}, {}) / vec2(textureSize(t2d_{}, 0)))", uv, op.offset_x(), op.offset_y(), slot);
-                    value = sample(std::format("t2d_{}", slot), uv);
+                    // Sharper UI's variant (gpu/sharp_ui.h): a pixel
+                    // shader's 2D fetch through sharpTex2D, which keeps
+                    // this very fetch where it doesn't magnify.
+                    if (options.sharpFetch2D && stage == ShaderStage::Pixel && op.dimension() == xenos::FetchOpDimension::k2D)
+                    {
+                        out.sharpFetches++;
+                        value = std::format("sharpTex2D(t2d_{}, {}, {}u, {}, {})", slot, uv, slot, computedLod ? "true" : "false", lod);
+                    }
+                    else
+                        value = sample(std::format("t2d_{}", slot), uv);
                     break;
                 }
                 case xenos::FetchOpDimension::k3DOrStacked:
@@ -1135,8 +1146,14 @@ vec3 cubeDirection(vec3 c)
 
     TranslatedShader TranslateShader(ShaderStage stage, const uint32_t* ucode, size_t dwordCount)
     {
+        return TranslateShader(stage, ucode, dwordCount, TranslateOptions{});
+    }
+
+    TranslatedShader TranslateShader(ShaderStage stage, const uint32_t* ucode, size_t dwordCount, const TranslateOptions& options)
+    {
         Translator t;
         t.stage = stage;
+        t.options = options;
         t.ucode = ucode;
         t.dwords = dwordCount;
         t.Translate();
@@ -1159,6 +1176,10 @@ vec3 cubeDirection(vec3 c)
             if (result.textureCubeMask & (1u << n))
                 g += std::format("layout(set = 1, binding = {}) uniform samplerCube tcube_{};\n", 64 + n, n);
         }
+        if (result.sharpFetches)
+            g += gpu::sharp_ui::kSharpTex2DGlsl;
+        if (options.sharpFetch2D && stage == ShaderStage::Pixel)
+            g += gpu::sharp_ui::kUiMaskDeclGlsl;
         if (stage == ShaderStage::Vertex)
         {
             // Only the interpolators this shader writes are outputs: each
@@ -1327,7 +1348,7 @@ void main()
         (af == 6u && a >= pc.alphaRef);
     if (!pass) discard;
 #endif
-#ifdef OUT0
+@@UI_MASK@@#ifdef OUT0
     o_c0 = o_color[0];
 #endif
 #ifdef OUT1
@@ -1342,6 +1363,8 @@ void main()
 }
 )";
         }
+        if (size_t at = g.find("@@UI_MASK@@"); at != std::string::npos)
+            g.replace(at, strlen("@@UI_MASK@@"), options.sharpFetch2D ? gpu::sharp_ui::kUiMaskStoreGlsl : "");
         if (stage == ShaderStage::Vertex)
         {
             std::string outs;

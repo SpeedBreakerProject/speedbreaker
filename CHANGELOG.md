@@ -4,6 +4,55 @@ What changed in each SpeedBreaker release, newest first. Each release's notes on
 its entry here, and the game shows the entry once, the first time a new version starts (offline:
 it's built into the game).
 
+## v0.2.3
+
+### What's new
+
+- **Sharper UI** (Settings > Graphics, on by default): above 1x Internal Resolution, the menus'
+  and the HUD's text, icons and panels are enlarged with a sharper filter instead of a blur, so
+  they look crisper on 1440p and 4K screens. Where the finished picture is then enlarged to the
+  screen by an uneven factor (for example 1440p to 4K), the UI's pixels also take FSR 1's
+  edge-aware upscale instead of the bicubic one and skip the anti-aliasing pass, which had
+  softened and dimmed them, at every screen shape (16:10 and ultrawide included). The art,
+  layout and colors are the game's own; only the enlarging changes. Off is exactly as before
+  (GitHub issue #85, suggested by The-RiVaL).
+- **Movie Upscaling** (Settings > Graphics, Sharper by default): the game's 720p movies (the
+  intro and the cutscenes) are enlarged with a sharper, edge-aware filter: FSR 1's upscale where
+  the movie reaches the screen at 1x, the same filter as Sharper UI above 1x, and a Lanczos
+  filter on iPhone and iPad at 1x. Colors and brightness are unchanged. Original keeps the
+  movies as before.
+- Anisotropic Filtering's Auto is 16x on a Mac rendering at 1x Internal Resolution (was 4x on
+  Macs with integrated graphics): roads and lane markings ahead stay sharper, at no measurable
+  cost. Above 1x, and on other devices, Auto is unchanged.
+- Mac: the game uses a little less CPU in races and in the menus, with the same frame rate: the
+  part that stands in for the Xbox 360's graphics command processor goes to sleep sooner while it
+  has no work.
+
+### Fixed
+
+- Menu edges on screens taller than 16:9 (a 16:10 MacBook, the Steam Deck, an iPad) with Aspect
+  Ratio on Fill Screen (GitHub issue #87, reported by DoubleDips): the black graffiti header of the
+  Options screens no longer ends in a straight cut with the 3D scene showing above it (the game
+  draws it a little past the top of a 16:9 picture; on a taller screen its top part is now drawn a
+  little taller so it reaches the screen's edge), and the graffiti tags that drip into view on the
+  Options menu now start at the top of the screen instead of a little below it. 16:9 pictures are
+  unchanged. The dim behind a dialog ("Loading a new alias", "No aliases were found") now reaches
+  the top row of the screen.
+- The Rap Sheet's black page now fills the whole screen at every screen shape, 16:9 included,
+  instead of leaving a thin frame of the scene behind it (as the Blacklist bios already do since
+  v0.1.6). The dialog dim's top rows are dimmed at 16:9 too.
+
+### More about it
+
+- NFSMW_SHARP_UI=0/1 and NFSMW_MOVIE_UPSCALE=original/sharper override the two settings.
+  NFSMW_UI_MASK=0 keeps Sharper UI but turns off the UI's FSR 1 pass at the screen (it never
+  runs with HDR Output on, at 1x, or when the picture is enlarged by a whole number).
+- Mac: NFSMW_CP_IDLE_SPIN_US sets how long the command processor waits for new work before it
+  sleeps, in microseconds: 500 on a Mac now; 2000, as before, on iPhone, iPad, Linux, SteamOS
+  and Windows.
+- NFSMW_EDGE_PIECES=0 turns off the taller-screen fixes for the Options screens' graffiti header
+  and tags above, for comparing with the earlier picture.
+
 ## v0.2.2
 
 ### Fixed

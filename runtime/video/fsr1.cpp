@@ -168,6 +168,72 @@ void main()
         return con;
     }
 
+    // UI-C's pass (video/presenter.cpp): a fragment shader over the
+    // picture's place, drawn after the scale pass with blending: where the
+    // UI mask (the renderer's front-end coverage, R8, read bilinear at this
+    // pixel's place in the frame) is 0 it discards (that pixel stays the
+    // scale pass's, exactly); elsewhere EASU from the frame before
+    // anti-aliasing (src), with the mask as its alpha. NFSMW_UI_MASK_SHOW
+    // (UI_MASK_SHOW): red, at half the mask.
+    std::string UiEasuGlsl()
+    {
+        static const char* kHead = R"(
+layout(location = 0) in vec2 uv;
+layout(location = 0) out vec4 color;
+layout(set = 0, binding = 0) uniform sampler2D src;
+layout(set = 0, binding = 2) uniform sampler2D uiMask;
+// band: under Hor+ and Vert+ (bandOn), the 16:9 band's columns x..y and rows
+// z..w in texels (video::BandOf): each tap is kept in this pixel's span of
+// the band's three along each axis, as the EASU pass's (kEasuHead), so the
+// band's edge stays a filtering boundary and shows no seam.
+layout(push_constant) uniform P { uvec4 con0, con1, con2, con3; ivec4 band; ivec2 origin; ivec2 outSize; ivec2 srcSize; uint show; uint bandOn; } p;
+ivec2 spanLo = ivec2(0), spanHi = ivec2(0);
+ivec2 spanOf(float t, int lo, int hi, int size)
+{
+    return t < float(lo) ? ivec2(0, lo) : t < float(hi) ? ivec2(lo, hi) : ivec2(hi, size);
+}
+vec3 texelIn(ivec2 t)
+{
+    return texelFetch(src, clamp(t, spanLo, spanHi), 0).rgb;
+}
+vec4 quadIn(vec2 q, int c)
+{
+    ivec2 t = ivec2(floor(q * vec2(p.srcSize) - 0.5));
+    return vec4(texelIn(t + ivec2(0, 1))[c], texelIn(t + ivec2(1, 1))[c], texelIn(t + ivec2(1, 0))[c], texelIn(t)[c]);
+}
+AF4 FsrEasuRF(AF2 q) { return p.bandOn == 0u ? textureGather(src, q, 0) : quadIn(q, 0); }
+AF4 FsrEasuGF(AF2 q) { return p.bandOn == 0u ? textureGather(src, q, 1) : quadIn(q, 1); }
+AF4 FsrEasuBF(AF2 q) { return p.bandOn == 0u ? textureGather(src, q, 2) : quadIn(q, 2); }
+#define FSR_EASU_F 1
+)";
+        static const char* kMain = R"(
+void main()
+{
+    ivec2 ip = ivec2(gl_FragCoord.xy) - p.origin;
+    vec2 at = (vec2(ip) + 0.5) / vec2(p.outSize);
+    float w = textureLod(uiMask, at, 0.0).r;
+    if (w <= 0.0)
+        discard;
+    if (p.show != 0u)
+    {
+        color = vec4(1.0, 0.0, 0.0, 0.5 * w);
+        return;
+    }
+    if (p.bandOn != 0u)
+    {
+        vec2 pos = at * vec2(p.srcSize);
+        ivec2 sx = spanOf(pos.x, p.band.x, p.band.y, p.srcSize.x), sy = spanOf(pos.y, p.band.z, p.band.w, p.srcSize.y);
+        spanLo = ivec2(sx.x, sy.x);
+        spanHi = ivec2(sx.y, sy.y) - 1;
+    }
+    AF3 c;
+    FsrEasuF(c, uvec2(ip), p.con0, p.con1, p.con2, p.con3);
+    color = vec4(c, w);
+}
+)";
+        return kPrelude + Text(k_ffx_a) + kHead + Text(k_ffx_fsr1) + kMain;
+    }
+
     std::string EasuGlsl()
     {
         return kPrelude + Text(k_ffx_a) + kEasuHead + Text(k_ffx_fsr1) + kEasuMain;

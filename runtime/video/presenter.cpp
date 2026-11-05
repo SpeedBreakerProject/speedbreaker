@@ -177,7 +177,7 @@ namespace video
         // each pass's post-processing GPU time per frame (anti-aliasing and
         // the UI included, as in [perf]): the same scenes, the same clocks.
         const bool s_upscaleAb = [] { const char* v = std::getenv("NFSMW_UPSCALE_AB"); return v && v[0] == '1'; }();
-        uint64_t s_abFrames[3]{}, s_abNs[3]{}, s_abAaNs[3]{};  // by upscale::Pass; main thread
+        uint64_t s_abFrames[upscale::kPassCount]{}, s_abNs[upscale::kPassCount]{}, s_abAaNs[upscale::kPassCount]{};  // by upscale::Pass; main thread
         std::vector<VkSemaphore> s_renderDone;  // one per swapchain image
         std::mutex s_queueMutex;
         VulkanContext s_context{};
@@ -225,6 +225,7 @@ namespace video
         // vblank it was handed over in: with the real picture of its step
         // handed over in the same vblank, that would be after it.
         uint64_t s_submitSeq = 0, s_pendingSeq = 0, s_betweenSeq = 0;
+        uint64_t s_lastSeq = 0;  // the shown image's s_submitSeq (NFSMW_SHARP_UI_AB's capture lines)
 #if !defined(__APPLE__)
         int64_t s_lastRealAt = 0;
 #endif
@@ -1574,6 +1575,45 @@ void setSpan()
     spanHi = (vec2(sx.y, sy.y) - 0.5) / p.size;
 }
 
+// Movie Upscaling's Lanczos pass (bicubic == 2, video/upscale.h): Lanczos-2
+// over the 4x4 texels around the sample, clamped to the 2x2 it falls
+// between (no ringing), without sharpening.
+float lanczos2(float x)
+{
+    x = abs(x);
+    if (x < 1e-4)
+        return 1.0;
+    if (x >= 2.0)
+        return 0.0;
+    float px = 3.14159265 * x;
+    return 2.0 * sin(px) * sin(px * 0.5) / (px * px);
+}
+vec3 lanczos(vec2 t, vec2 texel)
+{
+    vec2 pos = t * p.size;
+    vec2 c = floor(pos - 0.5) + 0.5;
+    vec2 f = pos - c;
+    vec3 sum = vec3(0.0), lo = vec3(1e30), hi = vec3(-1e30);
+    float total = 0.0;
+    for (int j = -1; j <= 2; j++)
+    {
+        float wy = lanczos2(float(j) - f.y);
+        for (int i = -1; i <= 2; i++)
+        {
+            float wt = lanczos2(float(i) - f.x) * wy;
+            vec3 s = at((c + vec2(float(i), float(j))) * texel);
+            sum += s * wt;
+            total += wt;
+            if (i >= 0 && i <= 1 && j >= 0 && j <= 1)
+            {
+                lo = min(lo, s);
+                hi = max(hi, s);
+            }
+        }
+    }
+    return clamp(sum / total, lo, hi);
+}
+
 // Catmull-Rom bicubic from 9 bilinear taps: the middle two weights of each
 // axis are folded into one bilinear fetch.
 vec3 catmullRom(vec2 t, vec2 texel)
@@ -1595,6 +1635,11 @@ vec3 catmullRom(vec2 t, vec2 texel)
 void main()
 {
     setSpan();
+    if (p.bicubic == 2u)
+    {
+        color = vec4(lanczos(uv, 1.0 / p.size), 1.0);
+        return;
+    }
     if (p.bicubic == 0u)
     {
         color = vec4(at(uv), 1.0);
@@ -1641,6 +1686,45 @@ vec2 spanOf(float t, float lo, float hi, float size)
     return t < lo ? vec2(0.0, lo) : t < hi ? vec2(lo, hi) : vec2(hi, size);
 }
 
+// Movie Upscaling's Lanczos pass (bicubic == 2, video/upscale.h): Lanczos-2
+// over the 4x4 texels around the sample, clamped to the 2x2 it falls
+// between (no ringing), without sharpening.
+float lanczos2(float x)
+{
+    x = abs(x);
+    if (x < 1e-4)
+        return 1.0;
+    if (x >= 2.0)
+        return 0.0;
+    float px = 3.14159265 * x;
+    return 2.0 * sin(px) * sin(px * 0.5) / (px * px);
+}
+vec3 lanczos(vec2 t, vec2 texel)
+{
+    vec2 pos = t * p.size;
+    vec2 c = floor(pos - 0.5) + 0.5;
+    vec2 f = pos - c;
+    vec3 sum = vec3(0.0), lo = vec3(1e30), hi = vec3(-1e30);
+    float total = 0.0;
+    for (int j = -1; j <= 2; j++)
+    {
+        float wy = lanczos2(float(j) - f.y);
+        for (int i = -1; i <= 2; i++)
+        {
+            float wt = lanczos2(float(i) - f.x) * wy;
+            vec3 s = at((c + vec2(float(i), float(j))) * texel);
+            sum += s * wt;
+            total += wt;
+            if (i >= 0 && i <= 1 && j >= 0 && j <= 1)
+            {
+                lo = min(lo, s);
+                hi = max(hi, s);
+            }
+        }
+    }
+    return clamp(sum / total, lo, hi);
+}
+
 void main()
 {
     vec2 sx = vec2(0.0), sy = vec2(0.0);
@@ -1651,6 +1735,11 @@ void main()
         sy = spanOf(pos.y, p.band.z, p.band.w, p.size.y);
         spanLo = (vec2(sx.x, sy.x) + 0.5) / p.size;
         spanHi = (vec2(sx.y, sy.y) - 0.5) / p.size;
+    }
+    if (p.bicubic == 2u)
+    {
+        color = vec4(lanczos(uv, 1.0 / p.size), 1.0);
+        return;
     }
     if (p.bicubic == 0u)
     {
@@ -2410,7 +2499,7 @@ void main()
 
         // A scale pipeline (the plain one or the tone variant) for the
         // swapchain's format; VK_NULL_HANDLE if it can't be made.
-        VkPipeline MakeScalePipeline(VkShaderModule fs, VkPipelineLayout layout)
+        VkPipeline MakeScalePipeline(VkShaderModule fs, VkPipelineLayout layout, bool blend = false)
         {
             VkPipelineShaderStageCreateInfo stages[2] = {
                 { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_VERTEX_BIT, s_post.vs, "main", nullptr },
@@ -2430,6 +2519,16 @@ void main()
             ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
             VkPipelineColorBlendAttachmentState att{};
             att.colorWriteMask = 0xF;
+            if (blend)  // UI-C's pass: over the scale pass's picture by its alpha (the UI mask), the target's alpha kept
+            {
+                att.blendEnable = VK_TRUE;
+                att.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+                att.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+                att.colorBlendOp = VK_BLEND_OP_ADD;
+                att.srcAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
+                att.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+                att.alphaBlendOp = VK_BLEND_OP_ADD;
+            }
             VkPipelineColorBlendStateCreateInfo cb{ VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO };
             cb.attachmentCount = 1;
             cb.pAttachments = &att;
@@ -2973,7 +3072,7 @@ void main()
                     uint32_t bicubic;
                     float band[4];
                     uint32_t bandOn;
-                } pc = { float(w), float(h), sharpen, pass == upscale::Pass::Bicubic ? 1u : 0u,
+                } pc = { float(w), float(h), sharpen, pass == upscale::Pass::Bicubic ? 1u : pass == upscale::Pass::Lanczos ? 2u : 0u,
                     { float(band.x0), float(band.x1), float(band.y0), float(band.y1) }, bandOn ? 1u : 0u };
                 static_assert(sizeof(pc) == 36);
                 vkCmdPushConstants(cmd, layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(pc), &pc);
@@ -2984,14 +3083,178 @@ void main()
         // The pass a frame takes (video/upscale.h), FSR 1 only where its
         // pipelines are ready (made here the first time); a line in the log
         // when the pass or the sizes change.
-        upscale::Pass ChoosePass(bool tone, uint32_t w, uint32_t h, int32_t dw, int32_t dh, VkPipeline& rcas)
+        // UI-C (Sharper UI's presenter pass): the renderer's UI mask for the
+        // picture being shown (gpu/renderer.cpp, R8 at the frame's size; null:
+        // none), and the pass that draws EASU over the scale pass's picture
+        // where it is set (video/fsr1.cpp UiEasuGlsl). It applies with
+        // Sharper UI on (NFSMW_UI_MASK=0: off), to a picture the bicubic pass
+        // enlarges by a non-integer factor (2x2's 2560x1440 at 4K: x1.5),
+        // without HDR; under Hor+/Vert+ its EASU keeps each tap in the pixel's
+        // span of the band's three, as the scale pass does (no seam at the
+        // band's edge). Elsewhere the picture is as before.
+        // NFSMW_UI_MASK_SHOW=1 paints the mask red instead.
+        VkImageView s_pendingUiMask = VK_NULL_HANDLE, s_frameUiMask = VK_NULL_HANDLE;
+        uint64_t s_pendingUiMaskSeq = 0;
+        struct UiPassState
+        {
+            bool tried = false, ready = false;
+            VkDescriptorSetLayout set = VK_NULL_HANDLE;
+            VkPipelineLayout layout = VK_NULL_HANDLE;
+            VkShaderModule fs = VK_NULL_HANDLE, toneFs = VK_NULL_HANDLE;
+            VkPipeline plain = VK_NULL_HANDLE, tone = VK_NULL_HANDLE;
+            VkFormat format = VK_FORMAT_UNDEFINED;
+        } s_ui;
+        struct UiPush
+        {
+            uint32_t con[16];
+            int32_t band[4];
+            int32_t origin[2], outSize[2], srcSize[2];
+            uint32_t show, bandOn;
+        };
+        static_assert(sizeof(UiPush) == 112);
+
+        bool UiMaskOn()
+        {
+            static const bool env = [] { const char* v = std::getenv("NFSMW_UI_MASK"); return !(v && v[0] == '0'); }();
+            return env && settings::GetBool(settings::Id::SharpUi);
+        }
+
+        // The pass's pipeline (plain, or through the tone table), made the first time.
+        VkPipeline UiPassPipeline(bool tone)
+        {
+            if (!s_ui.tried)
+            {
+                s_ui.tried = true;
+                VkDescriptorSetLayoutBinding bindings[3] = {
+                    { 0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr },
+                    { 1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr },
+                    { 2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr },
+                };
+                VkDescriptorSetLayoutCreateInfo dslci{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
+                dslci.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR;
+                dslci.bindingCount = 3;
+                dslci.pBindings = bindings;
+                VkPushConstantRange range{ VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(UiPush) };
+                VkPipelineLayoutCreateInfo plci{ VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
+                plci.setLayoutCount = 1;
+                plci.pSetLayouts = &s_ui.set;
+                plci.pushConstantRangeCount = 1;
+                plci.pPushConstantRanges = &range;
+                const std::string glsl = fsr1::UiEasuGlsl();
+                const std::string toneGlsl = ToneVariant(glsl.c_str());
+                s_ui.ready = Check(vkCreateDescriptorSetLayout(s_device, &dslci, nullptr, &s_ui.set), "UI pass set layout") &&
+                    Check(vkCreatePipelineLayout(s_device, &plci, nullptr, &s_ui.layout), "UI pass layout") &&
+                    (s_ui.fs = PostModule(glsl.c_str(), 1)) && !toneGlsl.empty() && (s_ui.toneFs = PostModule(toneGlsl.c_str(), 1));
+                fprintf(stderr, "[video] UI pass (Sharper UI, EASU over the UI mask): %s\n", s_ui.ready ? "ready" : "unavailable");
+            }
+            if (!s_ui.ready)
+                return VK_NULL_HANDLE;
+            if (s_ui.format != TargetFormat())
+            {
+                // (A new format: the old pipelines may be in flight; kept. Rare.)
+                s_ui.format = TargetFormat();
+                s_ui.plain = MakeScalePipeline(s_ui.fs, s_ui.layout, true);
+                s_ui.tone = MakeScalePipeline(s_ui.toneFs, s_ui.layout, true);
+            }
+            return tone ? s_ui.tone : s_ui.plain;
+        }
+
+        // Whether the pass applies to this picture.
+        bool UiPassApplies(VkImageView mask, upscale::Pass pass, bool /*bandOn: followed (the pass keeps its spans)*/, uint32_t w, uint32_t h,
+            int32_t dw, int32_t dh)
+        {
+            if (!mask || !UiMaskOn() || pass != upscale::Pass::Bicubic || s_swapHdr || !upscale::Enlarged(w, h, dw, dh))
+                return false;
+            return uint32_t(dw) % w != 0 || uint32_t(dh) % h != 0;  // an integer enlargement keeps texels whole: as before
+        }
+
+        // Inside the picture's rendering pass, after DrawPicture.
+        void DrawUiPass(VkCommandBuffer cmd, bool tone, VkImageView src, VkImageView mask, uint32_t w, uint32_t h, int32_t dx, int32_t dy,
+            int32_t dw, int32_t dh, const video::FrameBand& band, bool bandOn)
+        {
+            VkPipeline pipeline = UiPassPipeline(tone);
+            if (!pipeline)
+                return;
+            VkViewport viewport{ float(dx), float(dy), float(dw), float(dh), 0.0f, 1.0f };
+            VkRect2D scissor{ { dx, dy }, { uint32_t(dw), uint32_t(dh) } };
+            vkCmdSetViewport(cmd, 0, 1, &viewport);
+            vkCmdSetScissor(cmd, 0, 1, &scissor);
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+            VkDescriptorImageInfo in{ s_post.sampler, src, VK_IMAGE_LAYOUT_GENERAL };
+            VkDescriptorImageInfo table{ s_post.sampler, tone ? s_tone.view : src, tone ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_GENERAL };
+            VkDescriptorImageInfo weights{ s_post.sampler, mask, VK_IMAGE_LAYOUT_GENERAL };
+            VkWriteDescriptorSet writes[3] = {
+                { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, VK_NULL_HANDLE, 0, 0, 1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &in, nullptr, nullptr },
+                { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, VK_NULL_HANDLE, 1, 0, 1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &table, nullptr, nullptr },
+                { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, VK_NULL_HANDLE, 2, 0, 1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &weights, nullptr, nullptr },
+            };
+            s_post.pushDescriptorSet(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, s_ui.layout, 0, 3, writes);
+            static const bool show = [] { const char* v = std::getenv("NFSMW_UI_MASK_SHOW"); return v && v[0] == '1'; }();
+            UiPush pc{};
+            const std::array<uint32_t, 16> con = fsr1::EasuConstants(w, h, uint32_t(dw), uint32_t(dh));
+            std::copy(con.begin(), con.end(), pc.con);
+            pc.origin[0] = dx;
+            pc.origin[1] = dy;
+            pc.outSize[0] = dw;
+            pc.outSize[1] = dh;
+            pc.srcSize[0] = int32_t(w);
+            pc.srcSize[1] = int32_t(h);
+            pc.show = show ? 1u : 0u;
+            pc.band[0] = band.x0;
+            pc.band[1] = band.x1;
+            pc.band[2] = band.y0;
+            pc.band[3] = band.y1;
+            // NFSMW_UI_BAND_SPANS=0 (a diagnostic, the banded pass's cost): its
+            // taps ignore the band (gathers only; band-edge pixels then differ).
+            static const bool spans = [] { const char* v = std::getenv("NFSMW_UI_BAND_SPANS"); return !(v && v[0] == '0'); }();
+            pc.bandOn = bandOn && spans ? 1u : 0u;
+            vkCmdPushConstants(cmd, s_ui.layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(pc), &pc);
+            vkCmdDraw(cmd, 3, 1, 0, 0);
+        }
+
+        // Movie Upscaling (video/upscale.h ChooseWithMovie): while a movie
+        // plays at 1x, its Sharper pass, with `sharpen` its RCAS strength
+        // (kMovieRcas); otherwise Sharpening.
+        upscale::Pass ChoosePass(bool tone, uint32_t w, uint32_t h, int32_t dw, int32_t dh, VkPipeline& rcas, uint32_t aspectW,
+            uint32_t aspectH, float& sharpen)
         {
             rcas = VK_NULL_HANDLE;
-            upscale::Pass pass = upscale::Choose(settings::GetInt(settings::Id::Scaling), w, h, dw, dh);
+            sharpen = Sharpen();
+            const int32_t movieMode = settings::GetInt(settings::Id::MovieUpscaling);
+            const bool movie = upscale::MoviePlaying(game::LastMovieFrameNs(), NowNs());
+            const upscale::Pass plain = upscale::Choose(settings::GetInt(settings::Id::Scaling), w, h, dw, dh);
+            upscale::Pass pass = upscale::ChooseWithMovie(settings::GetInt(settings::Id::Scaling), movieMode, movie,
+                upscale::AtOneX(w, h, aspectW, aspectH), upscale::kFsr1Offered, w, h, dw, dh);
+            const bool moviePass = pass != plain;
+            if (moviePass && pass == upscale::Pass::Fsr1)
+                sharpen = upscale::kMovieRcas;
             if (pass == upscale::Pass::Fsr1 && EnsureFsr())
                 rcas = RcasPipeline(tone);
             if (pass == upscale::Pass::Fsr1 && !rcas)
-                pass = upscale::Pass::Bicubic;
+                pass = moviePass ? upscale::Pass::Lanczos : upscale::Pass::Bicubic;
+            static int whyLines = 0;
+            if (movie && !moviePass && movieMode == int32_t(upscale::MovieMode::Sharper) && whyLines < 8)
+            {
+                static std::string lastWhy;
+                const std::string why = std::format("a movie frame {}x{} (frame {}x{}) shown at {}x{}: {}", w, h, aspectW, aspectH, dw, dh,
+                    !upscale::AtOneX(w, h, aspectW, aspectH) ? "not at 1x" : !upscale::Enlarged(w, h, dw, dh) ? "not enlarged" : "?");
+                if (why != lastWhy)
+                {
+                    whyLines++;
+                    lastWhy = why;
+                    fprintf(stderr, "[video] movie upscaling: %s; the Upscaling setting's pass\n", why.c_str());
+                }
+            }
+            static bool lastMovie = false;
+            if (moviePass != lastMovie)
+            {
+                lastMovie = moviePass;
+                static int movieLines = 0;
+                if (movieLines++ < 64)
+                    fprintf(stderr, "[video] movie upscaling: %s\n", moviePass ? std::format("{} ({}x{} -> {}x{}{})", upscale::PassName(pass), w, h,
+                        dw, dh, pass == upscale::Pass::Fsr1 ? std::format(", RCAS at {:.2f}", sharpen) : std::string()).c_str()
+                        : "the movie ended or isn't enlarged at 1x: the Upscaling setting's pass");
+            }
             static upscale::Pass lastPass = upscale::Pass::Linear;
             static uint32_t lastW = 0, lastH = 0;
             static int32_t lastDw = 0, lastDh = 0;
@@ -3001,7 +3264,7 @@ void main()
                 lines++;
                 const bool fsrChosen = settings::GetInt(settings::Id::Scaling) == int32_t(settings::ScalingMode::Fsr1);
                 fprintf(stderr, "[video] upscaling: %s, %ux%u -> %dx%d%s\n", upscale::PassName(pass), w, h, dw, dh,
-                    pass == upscale::Pass::Fsr1 ? std::format(" (RCAS at {:.2f} of its strength)", upscale::RcasAmount(Sharpen())).c_str()
+                    pass == upscale::Pass::Fsr1 ? std::format(" (RCAS at {:.2f} of its strength)", upscale::RcasAmount(sharpen)).c_str()
                     : !fsrChosen ? ""
                     : upscale::Enlarged(w, h, dw, dh) ? " (FSR 1 unavailable)" : " (FSR 1 only enlarges)");
             }
@@ -3019,7 +3282,9 @@ void main()
         // format, without the UI), saved as
         // build/present_check_<k>_<name>.ppm: side-by-sides of one frame.
         // Passes: bicubic, linear, fsr1, each at Sharpening or with
-        // :<sharpening> (fsr1:0 is EASU alone). fsr1 where the frame isn't
+        // :<sharpening> (fsr1:0 is EASU alone), and lanczos (Movie
+        // Upscaling's pass where FSR 1 isn't offered; bicubic where the frame
+        // isn't enlarged), uic (bicubic, then UI-C's pass where it applies). fsr1 where the frame isn't
         // enlarged draws bicubic, as the setting does. "source": the frame
         // the passes start from (after the anti-aliasing), at its own size
         // (through the tone table when that is in use).
@@ -3029,6 +3294,9 @@ void main()
             int32_t mode;
             float sharpen;  // < 0: Sharpening's
             bool source = false;
+            bool lanczos = false;  // Movie Upscaling's Lanczos pass (enlarging; else bicubic)
+            bool ui = false;       // "uic": bicubic, then UI-C's pass where it applies (the frame's UI mask)
+            bool uiAfterAa = false;  // "uica" (a diagnostic): the same, its EASU from the anti-aliased frame instead
         };
         const std::vector<CompareEntry>& CompareList()
         {
@@ -3044,15 +3312,15 @@ void main()
                     std::string kind = item.substr(0, item.find(':'));
                     float sharpen = item.find(':') == std::string::npos ? -1.0f : std::strtof(item.c_str() + item.find(':') + 1, nullptr);
                     int32_t mode = kind == "fsr1" ? int32_t(upscale::Mode::Fsr1) : kind == "linear" || kind == "source" ? int32_t(upscale::Mode::Linear)
-                        : kind == "bicubic" ? int32_t(upscale::Mode::Bicubic) : -1;
+                        : kind == "bicubic" || kind == "lanczos" || kind == "uic" || kind == "uica" ? int32_t(upscale::Mode::Bicubic) : -1;
                     if (mode < 0)
                     {
-                        fprintf(stderr, "[video] NFSMW_UPSCALE_COMPARE: \"%s\" isn't bicubic, linear, fsr1[:<sharpening>] or source\n", item.c_str());
+                        fprintf(stderr, "[video] NFSMW_UPSCALE_COMPARE: \"%s\" isn't bicubic, linear, lanczos, fsr1[:<sharpening>] or source\n", item.c_str());
                         continue;
                     }
                     std::string name = item;
                     std::replace(name.begin(), name.end(), ':', '-');
-                    entries.push_back({ name, mode, sharpen, kind == "source" });
+                    entries.push_back({ name, mode, sharpen, kind == "source", kind == "lanczos", kind == "uic" || kind == "uica", kind == "uica" });
                 }
                 return entries;
             }();
@@ -3073,7 +3341,7 @@ void main()
         // Records each listed pass's picture of this frame and its copy to
         // the host. Outside a rendering pass.
         std::vector<CompareShot> RecordCompare(VkCommandBuffer cmd, bool tone, VkImageView scaleInput, uint32_t w, uint32_t h,
-            const video::FrameBand& band, bool bandOn, int32_t dx, int32_t dy, int32_t dw, int32_t dh)
+            const video::FrameBand& band, bool bandOn, int32_t dx, int32_t dy, int32_t dw, int32_t dh, VkImageView preAa = VK_NULL_HANDLE)
         {
             std::vector<CompareShot> shots;
             for (const CompareEntry& entry : CompareList())
@@ -3122,6 +3390,8 @@ void main()
 
                 VkPipeline rcas = VK_NULL_HANDLE;
                 upscale::Pass pass = upscale::Choose(entry.mode, w, h, width, height);
+                if (entry.lanczos && upscale::Enlarged(w, h, width, height))
+                    pass = upscale::Pass::Lanczos;
                 if (pass == upscale::Pass::Fsr1 && EnsureFsr())
                     rcas = RcasPipeline(tone);
                 if (pass == upscale::Pass::Fsr1 && !rcas)
@@ -3143,6 +3413,8 @@ void main()
                 s_context.cmdBeginRendering(cmd, &ri);
                 DrawPicture(cmd, pass, rcas, tone, scaleInput, w, h, band, bandOn, x, y, width, height,
                     entry.sharpen >= 0.0f ? std::min(entry.sharpen, 1.0f) : Sharpen());
+                if (entry.ui && preAa && UiPassApplies(s_frameUiMask, pass, bandOn, w, h, width, height))
+                    DrawUiPass(cmd, tone, entry.uiAfterAa ? scaleInput : preAa, s_frameUiMask, w, h, x, y, width, height, band, bandOn);
                 s_context.cmdEndRendering(cmd);
                 Barrier(cmd, shot.image, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                     VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
@@ -4886,6 +5158,8 @@ void main()
                 h = s_betweenHeight;
                 aspectW = s_betweenAspectW;
                 aspectH = s_betweenAspectH;
+                s_lastSeq = s_betweenSeq;
+                s_frameUiMask = VK_NULL_HANDLE;  // (an in-between picture: no UI mask)
                 s_betweenNew = false;
                 frameVblank = s_betweenVblank;
                 frameBetween = s_betweenT;
@@ -4900,6 +5174,8 @@ void main()
                 h = s_pendingHeight;
                 aspectW = s_pendingAspectW;
                 aspectH = s_pendingAspectH;
+                s_lastSeq = s_pendingSeq;
+                s_frameUiMask = s_pendingUiMaskSeq == s_pendingSeq ? s_pendingUiMask : VK_NULL_HANDLE;  // (UI-C)
                 s_pendingNew = false;
                 frameVblank = s_pendingVblank;
                 frameShift = s_pendingShift;
@@ -5022,10 +5298,10 @@ void main()
                     s_abFrames[k]++;
                     s_abNs[k] += uint64_t(double(ts[2] - ts[0]) * s_timestampPeriod);
                     s_abAaNs[k] += uint64_t(double(ts[1] - ts[0]) * s_timestampPeriod);
-                    if ((s_abFrames[0] + s_abFrames[1] + s_abFrames[2]) % 600 == 0)
+                    if ((s_abFrames[0] + s_abFrames[1] + s_abFrames[2] + s_abFrames[3]) % 600 == 0)
                     {
                         std::string text;
-                        for (upscale::Pass pass : { upscale::Pass::Bicubic, upscale::Pass::Fsr1, upscale::Pass::Linear })
+                        for (upscale::Pass pass : { upscale::Pass::Bicubic, upscale::Pass::Fsr1, upscale::Pass::Lanczos, upscale::Pass::Linear })
                         {
                             const int i = int(pass);
                             if (s_abFrames[i])
@@ -5242,10 +5518,14 @@ void main()
             // The pass that draws the picture (video/upscale.h): FSR 1's
             // EASU first, outside the swapchain image's pass.
             VkPipeline rcas = VK_NULL_HANDLE;
-            upscale::Pass pass = scaleInput ? ChoosePass(tone, w, h, dw, dh, rcas) : upscale::Pass::Bicubic;
+            float passSharpen = Sharpen();
+            upscale::Pass pass = scaleInput ? ChoosePass(tone, w, h, dw, dh, rcas, aspectW, aspectH, passSharpen) : upscale::Pass::Bicubic;
             static uint64_t abCount = 0;
-            if (s_upscaleAb && pass == upscale::Pass::Fsr1 && (abCount++ & 1))
+            if (s_upscaleAb && (pass == upscale::Pass::Fsr1 || pass == upscale::Pass::Lanczos) && (abCount++ & 1))
+            {
                 pass = upscale::Pass::Bicubic;
+                passSharpen = Sharpen();
+            }
             f.pass = pass;
             if (scaleInput && pass == upscale::Pass::Fsr1)
                 RecordEasu(cmd, scaleInput, w, h, dw, dh, band, bandOn);
@@ -5267,7 +5547,9 @@ void main()
             bool scenePassOpen = true;
             if (scaleInput)
             {
-                DrawPicture(cmd, pass, rcas, tone, scaleInput, w, h, band, bandOn, dx, dy, dw, dh, Sharpen());
+                DrawPicture(cmd, pass, rcas, tone, scaleInput, w, h, band, bandOn, dx, dy, dw, dh, passSharpen);
+                if (UiPassApplies(s_frameUiMask, pass, bandOn, w, h, dw, dh))
+                    DrawUiPass(cmd, tone, f.sourceView, s_frameUiMask, w, h, dx, dy, dw, dh, band, bandOn);
                 if (!captures.empty() && pictureRect.extent.width)
                 {
                     // The game's picture alone: pause the pass, copy it out,
@@ -5374,8 +5656,29 @@ void main()
                 return !v ? 0 : std::strcmp(v, "between") == 0 ? 1 : std::strcmp(v, "real") == 0 ? 2 : 0;
             }();
             const bool kindOk = checkKind == 0 || (checkKind == 1 ? frameBetween != 0.0f : frameBetween == 0.0f && s_lastFreshImage);
-            bool check = kindOk && (checkTimes.size() == 1 ? taken < 3 && presents % 30 == 0 && sinceLaunch >= checkTimes[0]
-                                                           : size_t(taken) < checkTimes.size() && sinceLaunch >= checkTimes[taken]);
+            // NFSMW_CHECK_MOVIE_FRAMES=<n,...> (instead of the times): the
+            // first fresh picture once the XMV player has rendered n frames,
+            // so two runs capture the same movie frame (Movie Upscaling's A/B).
+            static const std::vector<uint64_t> checkMovie = [] {
+                std::vector<uint64_t> frames;
+                if (const char* v = std::getenv("NFSMW_CHECK_MOVIE_FRAMES"))
+                    for (const char* p = v; *p;)
+                    {
+                        frames.push_back(std::strtoull(p, nullptr, 10));
+                        p = strchr(p, ',');
+                        if (!p)
+                            break;
+                        p++;
+                    }
+                return frames;
+            }();
+            bool check = !checkMovie.empty()
+                ? s_lastFreshImage && size_t(taken) < checkMovie.size() && game::MovieFramesRendered() >= checkMovie[taken]
+                : kindOk && (checkTimes.size() == 1 ? taken < 3 && presents % 30 == 0 && sinceLaunch >= checkTimes[0]
+                                                    : size_t(taken) < checkTimes.size() && sinceLaunch >= checkTimes[taken]);
+            if (check && !checkMovie.empty())
+                fprintf(stderr, "[video] NFSMW_CHECK_MOVIE_FRAMES: capture %d at movie frame %llu\n", taken,
+                    (unsigned long long)game::MovieFramesRendered());
             // NFSMW_UI_KEYS "Shot": this frame, named apart from the timed ones
             // (taken even when it can't be saved: the keys after it wait for it).
             bool shot = !check && ui::TakeShot();
@@ -5422,7 +5725,7 @@ void main()
                 Barrier(cmd, dst, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
                     VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, 0, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
             if (captureIndex >= 0 && scaleInput)
-                compareShots = RecordCompare(cmd, tone, scaleInput, w, h, band, bandOn, dx, dy, dw, dh);
+                compareShots = RecordCompare(cmd, tone, scaleInput, w, h, band, bandOn, dx, dy, dw, dh, f.sourceView);
             if (post && !gpuImage)
                 Barrier(cmd, s_source, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_SHADER_READ_BIT,
                     VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
@@ -5809,6 +6112,16 @@ void main()
                     frameBetween != 0.0f ? std::format(" (an in-between picture at {:.3f})", frameBetween).c_str()
                                          : std::format(" (a game frame{})", frameShift != 0.0f ? std::format(", shift {:.3f}", frameShift) : std::string()).c_str());
                 gpu::renderer::LogOcclusionCounts(path.c_str());  // NFSMW_OCCLUSION=1: the counts behind it
+                static const bool sharpAb = [] { const char* v = std::getenv("NFSMW_SHARP_UI_AB"); return v && v[0] == '1'; }();
+                if (sharpAb)
+                {
+                    uint64_t seq;
+                    {
+                        std::lock_guard lock(s_pendingMutex);
+                        seq = s_lastSeq;
+                    }
+                    fprintf(stderr, "[sharp-ui-ab] %s: image %llu, Sharper UI %s\n", path.c_str(), (unsigned long long)seq, (seq >> 2) & 1 ? "on" : "off");
+                }
             }
             else
                 fprintf(stderr, "[video] can't save a presented frame to %s: %s\n", path.c_str(), strerror(errno));
@@ -5826,6 +6139,19 @@ void main()
             s_swapPolicy.Reported(present == VK_ERROR_OUT_OF_DATE_KHR ? SurfaceResult::OutOfDate : SurfaceResult::Suboptimal);
         s_frameIndex = (s_frameIndex + 1) % FRAMES_IN_FLIGHT;
         return true;
+    }
+
+    void SubmitUiMask(VkImageView mask)
+    {
+        std::lock_guard lock(s_pendingMutex);
+        s_pendingUiMask = mask;
+        s_pendingUiMaskSeq = s_submitSeq + 1;  // the image submitted next
+    }
+
+    uint64_t SubmittedImages()
+    {
+        std::lock_guard lock(s_pendingMutex);
+        return s_submitSeq;
     }
 
     void SubmitFrontImage(VkImage image, uint32_t width, uint32_t height, uint32_t aspectWidth, uint32_t aspectHeight, float between,

@@ -124,6 +124,8 @@ static int VignetteCases(const VignetteRule& rule)
         Match("cam dialog box", at(-0.578f, 0.586f, -0.167f, 0.569f, 0xFD000000), s.sx, s.sy, false, rule);
         Match("vignette off-centre by 0.03 in x", at(-kVigX + 0.03f, kVigX + 0.03f, -kVigY, kVigY, kVigColour), s.sx, s.sy, false, rule);
         Match("vignette off-centre by 0.03 in y", at(-kVigX, kVigX, -kVigY + 0.03f, kVigY + 0.03f, kVigColour), s.sx, s.sy, false, rule);
+        Match("vignette off-centre by 0.015 in x (the black frame rule allows 0.02, this one 0.01)",
+            at(-kVigX + 0.015f, kVigX + 0.015f, -kVigY, kVigY, kVigColour), s.sx, s.sy, false, rule);
         Quad grad = at(-kVigX, kVigX, -kVigY, kVigY, kVigColour);
         grad.v[1].argb = grad.v[2].argb = 0x007F7F7F;  // a gradient, not one colour
         Match("a gradient of the vignette's shape", grad, s.sx, s.sy, false, rule);
@@ -727,6 +729,7 @@ int main(int argc, char** argv)
     printf("\nplanted, shape (each must fail a case):\n");
     auto plant = [](const char* what, auto set) { VignetteRule r; set(r); Planted(what, r); };
     plant("centreMax 0.05", [](VignetteRule& r) { r.centreMax = 0.05f; });
+    plant("centreMax 0.02", [](VignetteRule& r) { r.centreMax = 0.02f; });
     plant("extentMin 0.96", [](VignetteRule& r) { r.extentMin = 0.96f; });
     plant("extentMin 0.85", [](VignetteRule& r) { r.extentMin = 0.85f; });
     plant("extentMax 0.96", [](VignetteRule& r) { r.extentMax = 0.96f; });

@@ -8,4 +8,7 @@ namespace game
     // clock; 0: none yet). A movie (the boot logos, the intro, a cutscene)
     // plays while these keep coming.
     int64_t LastMovieFrameNs();
+
+    // Any thread: XMV frames rendered so far (NFSMW_CHECK_MOVIE_FRAMES captures by it).
+    uint64_t MovieFramesRendered();
 }

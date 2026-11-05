@@ -30,4 +30,5 @@ namespace video::fsr1
     // single main(), so the tone variant can wrap it).
     std::string EasuGlsl();
     std::string RcasGlsl();
+    std::string UiEasuGlsl();  // UI-C's pass (presenter.cpp, UiPass): EASU where the UI mask is set
 }

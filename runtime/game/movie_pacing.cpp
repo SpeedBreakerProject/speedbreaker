@@ -115,6 +115,11 @@ SB_HOOK(sub_826E8CF8)
     s_lastMovieFrame.store(NowNs(), std::memory_order_relaxed);
 }
 
+uint64_t game::MovieFramesRendered()
+{
+    return s_movieRenders.load(std::memory_order_acquire);
+}
+
 int64_t game::LastMovieFrameNs()
 {
     return s_lastMovieFrame.load(std::memory_order_relaxed);

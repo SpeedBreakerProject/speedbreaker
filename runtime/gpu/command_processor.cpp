@@ -53,6 +53,30 @@ namespace gpu
             PM4_SET_BIN_MASK_LO = 0x60, PM4_SET_BIN_MASK_HI = 0x61, PM4_SET_BIN_SELECT_LO = 0x62, PM4_SET_BIN_SELECT_HI = 0x63,
         };
 
+        // How long this thread polls with yields, after its last work or from
+        // the start of a WAIT_REG_MEM, before it backs off to 100 us sleeps.
+        // Every yield is a wake-up, so on an idle core the window is spent
+        // spinning. 2 ms; on macOS 0.5 ms, where its 100 us sleeps are exact
+        // (this thread is QoS user-interactive): M1 Pro, 1x, two interleaved
+        // rounds, 1.50-1.60 -> 1.41-1.49 cores in races and 0.53 -> 0.43-0.47
+        // in the menus, the same fps and no more late frames. (Linux, the
+        // Steam Machine's CP-bound free roam, and Windows, whose 100 us sleep
+        // takes 1-2 ms, keep 2 ms until measured.) NFSMW_CP_IDLE_SPIN_US
+        // (microseconds) overrides.
+        std::chrono::microseconds IdleSpin()
+        {
+            static const std::chrono::microseconds spin = [] {
+#if defined(__APPLE__) && !TARGET_OS_IOS
+                constexpr int kDefault = 500;
+#else
+                constexpr int kDefault = 2000;
+#endif
+                const char* v = std::getenv("NFSMW_CP_IDLE_SPIN_US");
+                return std::chrono::microseconds(v && *v ? std::max(0, std::atoi(v)) : kDefault);
+            }();
+            return spin;
+        }
+
         // Page-aligned, as is s_history: where the hot arrays fall within a
         // 4 KB page otherwise depends on every global linked before them, and
         // loads that share their low 12 address bits with a recent store wait
@@ -825,10 +849,10 @@ namespace gpu
                     }
                     // The guest's wait interval is a hint for hardware polling;
                     // sleeping whole milliseconds per poll added a millisecond
-                    // or more to every wait. Spin with yields for 2 ms, then
-                    // back off to short sleeps.
+                    // or more to every wait. Spin with yields for IdleSpin()
+                    // (2 ms; macOS 0.5 ms), then back off to short sleeps.
                     (void)wait;
-                    if (std::chrono::steady_clock::now() - waitStart < std::chrono::milliseconds(2))
+                    if (std::chrono::steady_clock::now() - waitStart < IdleSpin())
                         std::this_thread::yield();
                     else
                         std::this_thread::sleep_for(std::chrono::microseconds(100));
@@ -1140,8 +1164,9 @@ namespace gpu
                 if (primary == 0 || writeIndex == s_readIndex || writeIndex * 4 >= s_primarySize)
                 {
                     // Kicks come in bursts and the game often waits on their
-                    // results: poll with yields for 2 ms after the last work,
-                    // then back off to short sleeps.
+                    // results: poll with yields for IdleSpin() (2 ms; macOS
+                    // 0.5 ms) after the last work, then back off to short
+                    // sleeps.
                     // No new commands: whatever is recorded goes out now (the
                     // game may be waiting on a fence in it).
                     if (writewatch::g_submitRequested.exchange(false))
@@ -1155,7 +1180,7 @@ namespace gpu
                         lastWork = std::chrono::steady_clock::now();
                         continue;
                     }
-                    if (std::chrono::steady_clock::now() - lastWork < std::chrono::milliseconds(2))
+                    if (std::chrono::steady_clock::now() - lastWork < IdleSpin())
                         std::this_thread::yield();
                     else
                         std::this_thread::sleep_for(std::chrono::microseconds(100));

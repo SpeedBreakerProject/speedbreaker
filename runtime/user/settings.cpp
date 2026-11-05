@@ -183,6 +183,11 @@ namespace settings
             { 4, "2x", "2x (3200x3200)" },
         };
 
+        constexpr EnumEntry kMovieUpscalingEntries[] = {
+            { int32_t(MovieUpscalingMode::Original), "original", "Original" },
+            { int32_t(MovieUpscalingMode::Sharper), "sharper", "Sharper" },
+        };
+
         constexpr EnumEntry kAnisotropyEntries[] = {
             { kAnisotropyAuto, "auto", "Auto" },
             { 1, "off", "Off" },
@@ -355,6 +360,18 @@ namespace settings
               .table = "video", .key = "shadow_resolution", .label = "Shadow Resolution",
               .description = "Sharper sun shadows: draw the game's 1600x1600 shadow map at 1.5x or 2x. 1x is the 360's map, spread over the whole picture so shadows reach its sides, which makes them a little softer than on the 360. Higher settings use more GPU time and memory.",
               .env = "NFSMW_SHADOW_RESOLUTION", .defaultValue = kShadowResolutionDefault, .entries = kShadowResolutionEntries },
+            // Sharper UI (gpu/sharp_ui.h): front-end draws only, above 1x.
+            { .id = Id::SharpUi, .category = Category::Graphics, .type = Type::Bool, .apply = Apply::Live,
+              .table = "video", .key = "sharper_ui", .label = "Sharper UI",
+              .description = "Crisper menu and HUD text and icons above 1x Internal Resolution: the game's small UI art is enlarged with a sharper filter instead of a blur. Layout and colors are unchanged. Off: as before.",
+              .env = "NFSMW_SHARP_UI", .defaultValue = 1 },
+            // Movie Upscaling (video/upscale.h MoviePass): while a movie plays at 1x.
+            { .id = Id::MovieUpscaling, .category = Category::Graphics, .type = Type::Enum, .apply = Apply::Live,
+              .table = "video", .key = "movie_upscaling", .label = "Movie Upscaling",
+              .description = kFsr1Offered
+                  ? "How the game's 720p movies are enlarged. Sharper: a sharper filter where the movie is drawn into a higher Internal Resolution, FSR 1's edge-aware upscale where it reaches the screen at 1x, for cleaner edges and text. Original: as before."
+                  : "How the game's 720p movies are enlarged. Sharper: a sharper filter where the movie is drawn into a higher Internal Resolution, a Lanczos filter where it reaches the screen at 1x. Original: as before.",
+              .env = "NFSMW_MOVIE_UPSCALE", .defaultValue = double(MovieUpscalingMode::Sharper), .entries = kMovieUpscalingEntries },
             { .id = Id::WindowWidth, .category = Category::Display, .type = Type::Int, .apply = Apply::Restart, .hidden = true,
               .table = "video", .key = "window_width", .label = "Window Width",
               .description = "The window's width when the game starts.",

@@ -41,6 +41,16 @@ namespace video
     void SubmitFrontImage(VkImage image, uint32_t width, uint32_t height, uint32_t aspectWidth = 0, uint32_t aspectHeight = 0,
         float between = 0.0f, float shift = 0.0f, int64_t target = 0);
 
+    // The renderer, just before SubmitFrontImage: the UI mask for that image
+    // (UI-C: R8, the image's size, VK_IMAGE_LAYOUT_GENERAL; null: none).
+    void SubmitUiMask(VkImageView mask);
+
+    // Any thread: how many images (front buffers and images, in-between
+    // pictures included) have been submitted so far. NFSMW_SHARP_UI_AB (a
+    // diagnostic, gpu/renderer.cpp) turns Sharper UI on and off by turns
+    // every 4 images; each capture's line names its image's number.
+    uint64_t SubmittedImages();
+
     // Any thread: a display at a rate that isn't a whole multiple of 60 Hz
     // (90, 144, 165) whose presents land on a fixed refresh grid (the refresh
     // notice's grid check: video/refresh_notice.h), where HFR draws a picture

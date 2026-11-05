@@ -412,6 +412,9 @@ static int BlackoutCases(const BlackoutRule& rule)
         MatchFrame("black frame", at(-kFrameX, kFrameX, -kFrameY, kFrameY, kFrameColour), s.sx, s.sy, true, rule);
         MatchFrame("black frame FD", at(-kFrameX, kFrameX, -kFrameY, kFrameY, kBar), s.sx, s.sy, true, rule);
         MatchFrame("black frame at ~57 s", at(-kFrameX, kFrameX, -kFrameY57, kFrameY57, 0xFE000000), s.sx, s.sy, true, rule);
+        // GitHub #87: the Rap Sheet's panel (RapSheetMain.fng, NFSMW_LOG_FRONTEND
+        // 2026-11-04: x -0.983..0.957, y +-0.985, FF000000), 0.013 left of centre.
+        MatchFrame("Rap Sheet panel", at(-0.983f, 0.957f, -0.985f, 0.985f, 0xFF000000), s.sx, s.sy, true, rule);
         // The overlay drawn with it there (B8 alpha, past the band in x).
         MatchFrame("~57 s overlay", at(-1.104f, 1.104f, -0.978f, 0.985f, 0xB8000000), s.sx, s.sy, false, rule);
         MatchFrame("~57 s overlay shape, opaque", at(-1.104f, 1.104f, -0.978f, 0.985f, 0xFF000000), s.sx, s.sy, false, rule);
@@ -442,12 +445,12 @@ static int BlackoutCases(const BlackoutRule& rule)
         auto frame = [&](float dx, float dy, float hx, float hy, uint32_t argb = kFrameColour) {
             return Rectangle(dx - hx, dx + hx, dy - hy, dy + hy, s.sx, s.sy, argb);
         };
-        MatchFrame("centre x +0.009", frame(0.009f, 0.0f, kFrameX, kFrameY), s.sx, s.sy, true, rule);
-        MatchFrame("centre x +0.011", frame(0.011f, 0.0f, kFrameX, kFrameY), s.sx, s.sy, false, rule);
-        MatchFrame("centre x -0.011", frame(-0.011f, 0.0f, kFrameX, kFrameY), s.sx, s.sy, false, rule);
-        MatchFrame("centre y -0.009", frame(0.0f, -0.009f, kFrameX, kFrameY), s.sx, s.sy, true, rule);
-        MatchFrame("centre y -0.011", frame(0.0f, -0.011f, kFrameX, kFrameY), s.sx, s.sy, false, rule);
-        MatchFrame("centre y +0.011", frame(0.0f, 0.011f, kFrameX, kFrameY), s.sx, s.sy, false, rule);
+        MatchFrame("centre x +0.019", frame(0.019f, 0.0f, kFrameX, kFrameY), s.sx, s.sy, true, rule);
+        MatchFrame("centre x +0.021", frame(0.021f, 0.0f, kFrameX, kFrameY), s.sx, s.sy, false, rule);
+        MatchFrame("centre x -0.021", frame(-0.021f, 0.0f, kFrameX, kFrameY), s.sx, s.sy, false, rule);
+        MatchFrame("centre y -0.019", frame(0.0f, -0.019f, kFrameX, kFrameY), s.sx, s.sy, true, rule);
+        MatchFrame("centre y -0.021", frame(0.0f, -0.021f, kFrameX, kFrameY), s.sx, s.sy, false, rule);
+        MatchFrame("centre y +0.021", frame(0.0f, 0.021f, kFrameX, kFrameY), s.sx, s.sy, false, rule);
         MatchFrame("half width 0.895", frame(0.0f, 0.0f, 0.895f, kFrameY), s.sx, s.sy, false, rule);
         MatchFrame("half width 0.905", frame(0.0f, 0.0f, 0.905f, kFrameY), s.sx, s.sy, true, rule);
         MatchFrame("half width 0.985", frame(0.0f, 0.0f, 0.985f, kFrameY), s.sx, s.sy, true, rule);
@@ -1134,6 +1137,218 @@ static void BackdropTests()
     }
 }
 
+// ---- Edge pieces (GitHub #87) ----
+// The Options screens' black graffiti header (one quad, its top edge 1.027 of
+// the band past the band's top at rest: the report's screenshot and
+// NFSMW_LOG_FRONTEND): under Vert+ drawn to its pivot (a quarter of its height
+// inside its edge) and a copy stretched from there reaches the screen's edge;
+// at 16:9 nothing. The Options hub's two graffiti tags (t0 1470B000, at rest
+// band y 0.582..0.974 and 0.361..0.950, a test-only per-draw log of the hub)
+// are no edge pieces: the game draws them as it does at 16:9.
+static void EdgePieceTests()
+{
+    printf("\nedge pieces:\n");
+    const float shapes[] = { 0.9f, 0.896207f, 0.8952f, 0.866667f, 0.84375f, 0.75f };
+    for (const float sy : shapes)
+    {
+        auto side = [&](float y0, float y1, const EdgePieceRule& r = {}) {
+            return MatchEdgePiece(Rectangle(0.25f, 1.0f, y0, y1, 1.0f, sy, 0xFF7F7F7F).v, 1.0f, sy, r);
+        };
+        CHECK(side(0.508f, 1.027f) == 1, "the Options header at sy %.4f", sy);
+        CHECK(side(-1.027f, -0.30f) == -1, "a bottom piece at sy %.4f", sy);
+        CHECK(side(1.027f, 0.30f) == 1, "the header, vertices the other way at sy %.4f", sy);
+        CHECK(side(0.582f, 0.974f) == 0, "the left tag at rest (inside the band) at sy %.4f", sy);
+        CHECK(side(0.361f, 0.950f) == 0, "the right tag at rest at sy %.4f", sy);
+        CHECK(side(0.30f, 1.005f) == 0, "a piece only 0.005 past at sy %.4f", sy);
+        CHECK(side(0.30f, 1.0f) == 0, "a piece ending at the band edge at sy %.4f", sy);
+        if (1.25f * sy < 1.0f - 1e-3f)
+            CHECK(side(0.30f, 1.25f) == 0, "a wipe 1.25 past (past pastMax) at sy %.4f", sy);
+        CHECK(side(-1.05f, 1.05f) == 0, "past both edges at sy %.4f", sy);
+        CHECK(side(1.01f, 1.10f) == 0, "wholly outside the band (parked) at sy %.4f", sy);
+        CHECK(side(0.30f, 0.999f / sy) == 0, "reaching the screen edge already at sy %.4f", sy);
+        Quad bent = Rectangle(0.25f, 1.0f, 0.30f, 1.027f, 1.0f, sy, 0xFF7F7F7F);
+        bent.v[2].x -= 0.05f;
+        CHECK(MatchEdgePiece(bent.v, 1.0f, sy) == 0, "a bent quad at sy %.4f", sy);
+    }
+    CHECK(MatchEdgePiece(Rectangle(0.25f, 1.0f, 0.30f, 1.027f, 1.0f, 1.0f, 0xFF7F7F7F).v, 1.0f, 1.0f) == 0, "16:9: none");
+    CHECK(MatchEdgePiece(Rectangle(0.25f, 1.0f, 0.30f, 1.027f, 0.75f, 1.0f, 0xFF7F7F7F).v, 0.75f, 1.0f) == 0, "Hor+: none");
+    {
+        EdgePieceRule r;
+        r.pastMin = 0.03f;
+        CHECK(MatchEdgePiece(Rectangle(0.25f, 1.0f, 0.508f, 1.027f, 1.0f, 0.9f, 0).v, 1.0f, 0.9f, r) == 0, "planted pastMin 0.03 still takes the header");
+        r = {};
+        r.pastMax = 0.3f;
+        CHECK(MatchEdgePiece(Rectangle(0.25f, 1.0f, 0.30f, 1.25f, 1.0f, 0.75f, 0).v, 1.0f, 0.75f, r) == 1, "planted pastMax 0.3 leaves the 4:3 wipe");
+    }
+    // The pivot: a quarter of the height inside the edge, never past the band edge.
+    {
+        const float sy = 0.8952f;
+        const Box header{ 0.0f, 1.0f, 0.508f * sy, 1.027f * sy }, sliver{ 0.0f, 1.0f, 0.99f * sy, 1.05f * sy };
+        CHECK(std::fabs(EdgePiecePivot(1, header, sy) / sy - 0.89725f) < 1e-4f, "header pivot %f", EdgePiecePivot(1, header, sy) / sy);
+        CHECK(EdgePiecePivot(1, sliver, sy) == sy, "a thin piece past the edge pivots at the band edge");
+        const Box low{ 0.0f, 1.0f, -1.027f * sy, -0.508f * sy };
+        CHECK(std::fabs(EdgePiecePivot(-1, low, sy) / sy + 0.89725f) < 1e-4f, "bottom pivot %f", EdgePiecePivot(-1, low, sy) / sy);
+    }
+    // The rectangles and the copy, at 1x and 2x with half-pixel centres, y
+    // flipped: the draw's own rows and the copy's meet on one pixel edge (the
+    // pivot's), the copy maps the pivot to itself and the quad's edge past the
+    // screen.
+    for (const int scale : { 1, 2 })
+        for (const bool flip : { false, true })
+            for (const float sy : { 0.9f, 0.896207f, 0.75f })
+                for (const int sideWant : { 1, -1 })
+                    for (const float top : { 1.027f, 1.15f })
+                    {
+                        if (top * sy >= 1.0f)
+                            continue;
+                        float ps[4];
+                        const float hostW = 1280.0f * scale, hostH = 2048.0f * scale;
+                        ps[0] = 1.0f;
+                        ps[1] = 2.0f * (flip ? 360.0f : -360.0f) * scale / hostH;
+                        ps[2] = 2.0f * (640.0f + (scale > 1 ? 0.5f : 0.0f)) * scale / hostW - 1.0f;
+                        ps[3] = 2.0f * (360.0f + (scale > 1 ? 0.5f : 0.0f)) * scale / hostH - 1.0f;
+                        const Rect frame{ 0, 0, 1280 * scale, 720 * scale };
+                        const float y1 = top * sy, y0 = 0.508f * sy;
+                        const Box b = sideWant > 0 ? Box{ 0.25f, 1.0f, y0, y1 } : Box{ 0.25f, 1.0f, -y1, -y0 };
+                        Plan p;
+                        const bool ok = EdgePieceRects(sideWant, b, ps, hostW, hostH, frame, sy, p);
+                        CHECK(ok && p.rectCount == 1 && p.clipOwn, "rects %dx flip %d sy %.3f side %d top %.3f", scale, flip, sy, sideWant, top);
+                        if (!ok)
+                            continue;
+                        const Rect& past = p.rects[0];
+                        const float q = EdgePiecePivot(sideWant, b, sy);
+                        const Rows pivot = BandRows(q, q, ps[1], ps[3], hostH);  // the pivot's pixel edge
+                        const int32_t H = 720 * scale;
+                        const bool pastTop = past.y0 == 0 && past.y1 == pivot.top && p.own.y0 == pivot.top && p.own.y1 == H;
+                        const bool pastBottom = past.y0 == pivot.top && past.y1 == H && p.own.y0 == 0 && p.own.y1 == pivot.top;
+                        CHECK(pastTop != pastBottom && pivot.top > 0 && pivot.top < H, "rows %dx flip %d sy %.3f side %d top %.3f: past [%d,%d) own [%d,%d) pivot %d",
+                            scale, flip, sy, sideWant, top, past.y0, past.y1, p.own.y0, p.own.y1, pivot.top);
+                        CHECK(pastTop == ((sideWant > 0) != flip), "side %d flip %d lands at the %s", sideWant, flip, pastTop ? "top" : "bottom");
+                        const float end = sideWant > 0 ? b.y1 : b.y0;
+                        const float ndcQ = q * ps[1] + ps[3], ndcQCopy = q * p.posScale[1] + p.posScale[3];
+                        const float ndcEnd = end * p.posScale[1] + p.posScale[3], ndcScreen = (sideWant > 0 ? kFillEdge : -kFillEdge) * ps[1] + ps[3];
+                        CHECK(std::fabs(ndcQ - ndcQCopy) < 1e-5f && std::fabs(ndcEnd - ndcScreen) < 1e-5f,
+                            "copy %dx flip %d sy %.3f side %d top %.3f: pivot %f/%f end %f/%f", scale, flip, sy, sideWant, top, ndcQ, ndcQCopy, ndcEnd, ndcScreen);
+                        CHECK(p.posScale[0] == ps[0] && p.posScale[2] == ps[2], "copy's x unchanged");
+                    }
+}
+
+// ---- Raises (GitHub #87) ----
+// The Options hub's graffiti tags as logged (test-only per-draw log with
+// texture coordinates, 1800x1131, view scale y 0.8952): the left tag's first
+// reveal frame (band y 0.950..1.342, v -0.933 at the top, 0.059 at the
+// bottom: v = 0, the art's top, at 0.973) and at rest (0.582..0.974, v
+// 0.004..0.996); the right tag at rest (0.361..0.950). Each must be moved so
+// the art's top lands on clip 1 (the screen's top edge), the same amount at
+// every frame of the reveal; nothing at 16:9.
+static Quad UvRect(float x0, float x1, float y0, float y1, float sy, uint32_t argb, float vTop, float vBottom, UvVertex out[4])
+{
+    const float Y0 = y0 * sy, Y1 = y1 * sy;
+    out[0] = { x0, Y1, argb, 0.004f, vTop };
+    out[1] = { x1, Y1, argb, 0.996f, vTop };
+    out[2] = { x1, Y0, argb, 0.996f, vBottom };
+    out[3] = { x0, Y0, argb, 0.004f, vBottom };
+    return {};
+}
+static void RaiseTests()
+{
+    printf("\nraises:\n");
+    const float shapes[] = { 0.9f, 0.896207f, 0.8952f, 0.866667f, 0.84375f, 0.75f };
+    for (const float sy : shapes)
+    {
+        UvVertex q[4];
+        auto raised = [&](float shift, float artTop) { return artTop * sy + shift; };  // the art's top, clip y, after the shift
+        // The left tag over its reveal: the quad's bottom moves down, v moves
+        // with it, v = 0 stays where it is at rest (0.9756).
+        float firstShift = 0.0f;
+        for (int f = 0; f <= 12; f++)
+        {
+            const float bottom = 0.950f - 0.0264f * f, h = 0.392f;
+            const float artTop = 0.974f + 0.004f / 0.992f * 0.392f, artH = 0.392f / 0.992f;  // the rest frame's v = 0
+            const float vB = (artTop - bottom) / artH, vT = (artTop - (bottom + h)) / artH;
+            UvRect(-0.658f, -0.437f, bottom, bottom + h, sy, 0xFD7E7E7E, vT, vB, q);
+            bool revealing = false;
+            const float shift = MatchRaise(q, 1.0f, sy, {}, &revealing);
+            CHECK(shift > 0.0f && std::fabs(raised(shift, artTop) - 1.0f) < 1e-4f, "left tag reveal frame %d at sy %.4f: art top at clip %f", f,
+                sy, raised(shift, artTop));
+            CHECK(revealing, "left tag frame %d at sy %.4f: revealing %d", f, sy, int(revealing));
+            if (f == 0)
+                firstShift = shift;
+            CHECK(std::fabs(shift - firstShift) < 1e-4f, "left tag frame %d at sy %.4f: shift %f vs %f (must not change)", f, sy, shift, firstShift);
+        }
+        UvRect(-0.658f, -0.437f, 0.582f, 0.974f, sy, 0xFD7E7E7E, 0.004f, 0.996f, q);
+        bool restRevealing = true;
+        float shift = MatchRaise(q, 1.0f, sy, {}, &restRevealing);
+        CHECK(!restRevealing, "the left tag at rest is no reveal (a still picture there is raised only after one) at sy %.4f", sy);
+        const float artTopRest = 0.974f + 0.004f / 0.992f * 0.392f;
+        CHECK(std::fabs(raised(shift, artTopRest) - 1.0f) < 1e-4f && std::fabs(shift - firstShift) < 1e-4f,
+            "left tag at rest at sy %.4f: art top %f, shift %f vs the reveal's %f", sy, raised(shift, artTopRest), shift, firstShift);
+        UvRect(0.322f, 0.653f, 0.361f, 0.950f, sy, 0xFD7E7E7E, 0.004f, 0.996f, q);
+        shift = MatchRaise(q, 1.0f, sy);
+        CHECK(std::fabs(raised(shift, 0.950f + 0.004f / 0.992f * 0.589f) - 1.0f) < 1e-4f, "right tag at rest at sy %.4f", sy);
+        // Left alone.
+        UvRect(0.322f, 0.653f, 0.361f, 0.950f, sy, 0x387E7E7E, 0.004f, 0.996f, q);
+        CHECK(MatchRaise(q, 1.0f, sy) == 0.0f, "a translucent glow at sy %.4f", sy);
+        UvRect(0.322f, 0.653f, 0.30f, 0.80f, sy, 0xFD7E7E7E, 0.004f, 0.996f, q);
+        CHECK(MatchRaise(q, 1.0f, sy) == 0.0f, "art ending at 0.80 (before artTopMin) at sy %.4f", sy);
+        UvRect(0.322f, 0.653f, 0.508f, 1.027f, sy, 0xFF000000, 0.004f, 0.996f, q);
+        CHECK(MatchRaise(q, 1.0f, sy) == 0.0f, "the header (art past the band: the edge piece's) at sy %.4f", sy);
+        UvRect(0.322f, 0.653f, 0.80f, 0.97f, sy, 0xFD7E7E7E, 0.004f, 0.996f, q);
+        CHECK(MatchRaise(q, 1.0f, sy) == 0.0f, "a HUD-sized piece at sy %.4f", sy);
+        UvRect(0.322f, 0.653f, 0.361f, 0.950f, sy, 0xFD7E7E7E, 0.996f, 0.004f, q);
+        CHECK(MatchRaise(q, 1.0f, sy) == 0.0f, "art upside down (its top at the bottom: none there) at sy %.4f", sy);
+        UvRect(0.322f, 0.653f, 0.361f, 0.950f, sy, 0xFD7E7E7E, 0.004f, 0.996f, q);
+        for (auto& v : q)
+            v.u = 0.25f + v.u * 0.5f;
+        CHECK(MatchRaise(q, 1.0f, sy) == 0.0f, "a part of a picture (u spans half) at sy %.4f", sy);
+        // The bottom edge, mirrored: art whose v = 0 is at band -0.95 (its top toward clip -y).
+        UvRect(0.322f, 0.653f, -0.950f, -0.361f, sy, 0xFD7E7E7E, 0.996f, 0.004f, q);
+        shift = MatchRaise(q, 1.0f, sy);
+        CHECK(shift < 0.0f && std::fabs((-0.950f - 0.004f / 0.992f * 0.589f) * sy + shift + 1.0f) < 1e-4f, "bottom mirror at sy %.4f", sy);
+    }
+    // The art's visible top: the picture's first ink row (alpha in the top
+    // byte), its centre with bilinear filtering.
+    {
+        auto pic = [](uint32_t clearRows, uint32_t inkAlpha) {
+            return [=](uint32_t x, uint32_t y, uint32_t& w) {
+                w = y < clearRows ? 0x00FFFFFFu : (x == 37 ? (inkAlpha << 24) : 0x00000000u);
+                return true;
+            };
+        };
+        CHECK(FirstInkRow(pic(4, 0xFF), 128, 128) == 4, "4 clear rows: first ink row 4");
+        CHECK(FirstInkRow(pic(0, 0xFF), 128, 128) == 0, "ink in the top row: 0");
+        CHECK(FirstInkRow(pic(4, 0x20), 128, 128) == -1, "alpha 20 is no ink (white RGB in clear texels neither)");
+        CHECK(FirstInkRow([](uint32_t, uint32_t, uint32_t&) { return false; }, 128, 128) == -1, "unreadable: -1");
+        CHECK(FirstInkV(4, 128) == 4.5f / 128.0f && FirstInkV(0, 128) == 0.0f && FirstInkV(-1, 128) == 0.0f, "FirstInkV");
+        // With the ink 4.5 texels down the picture, that row lands on clip 1.
+        const float sy = 0.8952f, inkV = FirstInkV(4, 128);
+        UvVertex q[4];
+        UvRect(0.322f, 0.653f, 0.361f, 0.950f, sy, 0xFD7E7E7E, 0.004f, 0.996f, q);
+        const float shift = MatchRaise(q, 1.0f, sy, {}, nullptr, inkV);
+        const float yInk = 0.950f + (inkV - 0.004f) / (0.996f - 0.004f) * (0.361f - 0.950f);  // band y of v = inkV
+        CHECK(std::fabs(yInk * sy + shift - 1.0f) < 1e-4f, "the first ink row's centre on clip 1 (%f)", yInk * sy + shift);
+    }
+    {
+        UvVertex q[4];
+        UvRect(-0.658f, -0.437f, 0.582f, 0.974f, 1.0f, 0xFD7E7E7E, 0.004f, 0.996f, q);
+        CHECK(MatchRaise(q, 1.0f, 1.0f) == 0.0f, "16:9: no raise");
+        UvRect(-0.658f, -0.437f, 0.582f, 0.974f, 1.0f, 0xFD7E7E7E, 0.004f, 0.996f, q);
+        CHECK(MatchRaise(q, 0.75f, 1.0f) == 0.0f, "Hor+: no raise");
+        RaiseRule r;
+        r.artTopMin = 0.98f;
+        UvRect(0.322f, 0.653f, 0.361f, 0.950f, 0.8952f, 0xFD7E7E7E, 0.004f, 0.996f, q);
+        CHECK(MatchRaise(q, 1.0f, 0.8952f, r) == 0.0f, "planted artTopMin 0.98 still takes the right tag");
+        r = {};
+        r.artTopMin = 0.78f;
+        UvRect(0.322f, 0.653f, 0.30f, 0.80f, 0.8952f, 0xFD7E7E7E, 0.004f, 0.996f, q);
+        CHECK(MatchRaise(q, 1.0f, 0.8952f, r) != 0.0f, "planted artTopMin 0.78 leaves the 0.80 piece");
+        r = {};
+        r.minAlpha = 0x30;
+        UvRect(0.322f, 0.653f, 0.361f, 0.950f, 0.8952f, 0x387E7E7E, 0.004f, 0.996f, q);
+        CHECK(MatchRaise(q, 1.0f, 0.8952f, r) != 0.0f, "planted minAlpha 0x30 leaves the glow");
+    }
+}
+
 int main()
 {
     printf("match:\n");
@@ -1333,7 +1548,8 @@ int main()
     printf("\nplanted, black frame (each must fail a case):\n");
     auto plantFrame = [](const char* what, auto set) { BlackoutRule r; set(r); PlantedBlackout(what, r); };
     plantFrame("centreMax 0", [](BlackoutRule& r) { r.centreMax = 0.0f; });
-    plantFrame("centreMax 0.02", [](BlackoutRule& r) { r.centreMax = 0.02f; });
+    plantFrame("centreMax 0.01", [](BlackoutRule& r) { r.centreMax = 0.01f; });  // the Rap Sheet's panel
+    plantFrame("centreMax 0.03", [](BlackoutRule& r) { r.centreMax = 0.03f; });
     plantFrame("extentMin 0.89", [](BlackoutRule& r) { r.extentMin = 0.89f; });
     plantFrame("extentMin 0.91", [](BlackoutRule& r) { r.extentMin = 0.91f; });
     plantFrame("extentMax 0.98", [](BlackoutRule& r) { r.extentMax = 0.98f; });
@@ -1545,6 +1761,8 @@ int main()
     }
 
     BackdropTests();
+    EdgePieceTests();
+    RaiseTests();
 
     printf("\n%s (%d failure%s)\n", g_failures ? "FAILED" : "all passed", g_failures, g_failures == 1 ? "" : "s");
     return g_failures ? 1 : 0;

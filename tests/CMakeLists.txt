@@ -119,6 +119,22 @@ if(SB_GLSLANG_VALIDATOR)
         set_tests_properties(fsr1_glsl_check_${shader} PROPERTIES DEPENDS fsr1_test)
     endforeach()
 endif()
+# Settings > Graphics > Sharper UI (gpu/sharp_ui.h: the draws it takes, its
+# rule, a CPU model of its filter, the translator's and renderer's use of
+# it) and Movie Upscaling (video/upscale.h, the presenter's use, the scale
+# shaders' Lanczos). It writes sharpTex2D as two fragment shaders to
+# sharp_ui_glsl for the check after it.
+sb_test(sharp_ui_test SOURCES ${RT}/video/fsr1.cpp ARGS ${RT} ${CMAKE_CURRENT_BINARY_DIR}/sharp_ui_glsl)
+target_include_directories(sharp_ui_test PRIVATE ${CMAKE_BINARY_DIR}/runtime/generated)
+# Anisotropic Filtering's Auto: 16x on a Mac at 1x at every screen shape (gpu/anisotropy_auto.h), as GetSampler applies it.
+sb_test(anisotropy_auto_test SOURCES ${RT}/video/picture_fit.cpp ARGS ${RT}/gpu/renderer.cpp)
+if(SB_GLSLANG_VALIDATOR)
+    foreach(shader sharp_premultiplied.frag sharp_straight.frag ui_easu.frag)
+        add_test(NAME sharp_ui_glsl_check_${shader} COMMAND ${SB_GLSLANG_VALIDATOR} -V --target-env vulkan1.1
+            ${CMAKE_CURRENT_BINARY_DIR}/sharp_ui_glsl/${shader} -o ${CMAKE_CURRENT_BINARY_DIR}/sharp_ui_glsl/${shader}.spv)
+        set_tests_properties(sharp_ui_glsl_check_${shader} PROPERTIES DEPENDS sharp_ui_test)
+    endforeach()
+endif()
 # Upscaling's values in settings.toml (user/settings.cpp as the game links
 # it): "fsr1" read, saved and read back, the environment's override, an
 # unknown value; in a scratch folder.
@@ -319,6 +335,13 @@ if(Python3_Interpreter_FOUND)
     else()
         add_test(NAME region_addresses_check COMMAND Python3::Interpreter -I ${CMAKE_CURRENT_SOURCE_DIR}/region_addresses_check.py ${ROOT})
     endif()
+    # Region hook parity (no game data): every region in the tree
+    # (config/<region>/, runtime/region/<region>_*) has the USA's midasm hooks,
+    # leaf functions, jump tables and named addresses, and is wired in
+    # everywhere a region is; its ALLOWED list holds the intentional
+    # differences. A fix made for the USA disc can't miss a region quietly.
+    add_test(NAME region_parity_check COMMAND Python3::Interpreter -I ${CMAKE_CURRENT_SOURCE_DIR}/region_parity_check.py ${ROOT})
+    set_tests_properties(region_parity_check PROPERTIES SKIP_RETURN_CODE 77)  # Python < 3.11 (no tomllib)
     # scripts/region_ppc.py on both forms of XenonRecomp's output (a Mac's
     # wrapper form; Linux's and clang-cl's alias form, with LF or CRLF): the
     # same namespaced files from each.

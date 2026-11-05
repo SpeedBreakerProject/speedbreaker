@@ -1,7 +1,7 @@
 // SpeedBreaker tests. GPL-3.0-or-later (see COPYING).
 //
-// Settings > Graphics > Upscaling and Shadow Resolution's values in
-// settings.toml (user/settings.cpp, linked as the game links it): tokens read,
+// Settings > Graphics > Upscaling, Shadow Resolution, Sharper UI and Movie
+// Upscaling's values in settings.toml (user/settings.cpp, linked as the game links it): tokens read,
 // saved and read back; environment overrides for one run, never saved; and
 // Sharpening's default, 0.3, unchanged.
 // The argument is a scratch folder (settings.toml is written there).
@@ -67,6 +67,8 @@ int main(int argc, char** argv)
     unsetenv("NFSMW_SCALING");
     unsetenv("NFSMW_SHARPEN");
     unsetenv("NFSMW_SHADOW_RESOLUTION");
+    unsetenv("NFSMW_SHARP_UI");
+    unsetenv("NFSMW_MOVIE_UPSCALE");
     const std::filesystem::path dir = argc > 1 ? argv[1] : "settings_scaling_scratch";
     std::filesystem::remove_all(dir);
     std::filesystem::create_directories(dir);
@@ -153,6 +155,54 @@ int main(int argc, char** argv)
     CHECK(settings::Save(file) && Read(file).find("shadow_resolution = \"1.5x\"") != std::string::npos,
         "environment override does not replace the file value:\n%s", Read(file).c_str());
     unsetenv("NFSMW_SHADOW_RESOLUTION");
+
+    // Sharper UI (gpu/sharp_ui.h): on by default, live, [video].sharper_ui,
+    // NFSMW_SHARP_UI=0 for one run, never saved.
+    {
+        const settings::Option& ui = settings::Info(Id::SharpUi);
+        CHECK(ui.category == settings::Category::Graphics && ui.type == settings::Type::Bool && ui.apply == settings::Apply::Live && !ui.hidden,
+            "Sharper UI: a live Graphics switch");
+        CHECK(std::string(ui.table) == "video" && std::string(ui.key) == "sharper_ui" && std::string(ui.env) == "NFSMW_SHARP_UI",
+            "Sharper UI: [video].sharper_ui, NFSMW_SHARP_UI");
+        CHECK(std::string(ui.label) == "Sharper UI", "label %s", ui.label);
+        Write(file, "");
+        CHECK(settings::Load(file) && settings::GetBool(Id::SharpUi), "Sharper UI on by default");
+        CHECK(settings::Set(Id::SharpUi, 0) == settings::SetResult::Applied && !settings::GetBool(Id::SharpUi), "Sharper UI off, live");
+        CHECK(settings::Save(file) && Read(file).find("sharper_ui = false") != std::string::npos, "saved off:\n%s", Read(file).c_str());
+        CHECK(settings::Load(file) && !settings::GetBool(Id::SharpUi), "read back off");
+        setenv("NFSMW_SHARP_UI", "1", 1);
+        CHECK(settings::Load(file) && settings::GetBool(Id::SharpUi) && settings::EnvOverride(Id::SharpUi), "NFSMW_SHARP_UI=1 wins for the run");
+        CHECK(settings::Save(file) && Read(file).find("sharper_ui = false") != std::string::npos, "the override isn't saved:\n%s", Read(file).c_str());
+        setenv("NFSMW_SHARP_UI", "0", 1);
+        Write(file, "");
+        CHECK(settings::Load(file) && !settings::GetBool(Id::SharpUi), "NFSMW_SHARP_UI=0 turns it off");
+        unsetenv("NFSMW_SHARP_UI");
+    }
+
+    // Movie Upscaling (video/upscale.h): Original, Sharper (the default);
+    // [video].movie_upscaling, NFSMW_MOVIE_UPSCALE=original|sharper.
+    {
+        const settings::Option& m = settings::Info(Id::MovieUpscaling);
+        CHECK(m.category == settings::Category::Graphics && m.type == settings::Type::Enum && m.apply == settings::Apply::Live && !m.hidden,
+            "Movie Upscaling: a live Graphics choice");
+        CHECK(std::string(m.key) == "movie_upscaling" && std::string(m.env) == "NFSMW_MOVIE_UPSCALE", "[video].movie_upscaling, NFSMW_MOVIE_UPSCALE");
+        CHECK(m.entries.size() == 2, "%zu entries", m.entries.size());
+        if (m.entries.size() == 2)
+        {
+            CHECK(m.entries[0].value == int32_t(settings::MovieUpscalingMode::Original) && std::string(m.entries[0].token) == "original",
+                "first: original");
+            CHECK(m.entries[1].value == int32_t(settings::MovieUpscalingMode::Sharper) && std::string(m.entries[1].token) == "sharper",
+                "second: sharper");
+        }
+        Write(file, "");
+        CHECK(settings::Load(file) && settings::GetInt(Id::MovieUpscaling) == int32_t(settings::MovieUpscalingMode::Sharper), "Sharper by default");
+        Write(file, "[video]\nmovie_upscaling = \"original\"\n");
+        CHECK(settings::Load(file) && settings::GetInt(Id::MovieUpscaling) == int32_t(settings::MovieUpscalingMode::Original), "original read");
+        setenv("NFSMW_MOVIE_UPSCALE", "sharper", 1);
+        CHECK(settings::Load(file) && settings::GetInt(Id::MovieUpscaling) == int32_t(settings::MovieUpscalingMode::Sharper),
+            "NFSMW_MOVIE_UPSCALE=sharper wins for the run");
+        unsetenv("NFSMW_MOVIE_UPSCALE");
+    }
 
     std::filesystem::remove_all(dir);
     if (s_failures)

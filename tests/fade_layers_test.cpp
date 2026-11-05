@@ -99,6 +99,16 @@ static int LayerCases(const LayerRule& rule)
         Match("pause dim centre", at(-0.53f, 0.57f, -1.91f, 1.91f, 0xC8000000u), s, false, rule);
         Match("a layer 0.93 of the band", at(-0.93f, 0.93f, -0.93f, 0.93f, kFade), s, false, rule);
         Match("the fade off-centre by 0.03 in y", at(-kFadeX, kFadeX, -kFadeY + 0.03f, kFadeY + 0.03f, kFade), s, false, rule);
+        // GitHub #87: the dialogs' dim (the career menu's "No aliases were
+        // found" / "Loading a new alias", NFSMW_LOG_COVERS 2026-11-04), off
+        // centre in x (-0.0135) but past both sides of the screen there, a
+        // hair short of its top: taken wherever x still reaches past the
+        // screen's sides (under Hor+ narrower than that the widen rule takes
+        // it first); the same off-centre x short of the sides is not.
+        Match("the dialogs' dim (x -1.307..1.280, y -0.999..0.995)", at(-1.307f, 1.280f, -0.999f, 0.995f, 0x4D000000u), s,
+            1.280f * s.sx >= 1.0f, rule);
+        Match("the dialogs' dim, opaque B3", at(-1.307f, 1.280f, -0.999f, 0.995f, 0xB3000000u), s, 1.280f * s.sx >= 1.0f, rule);
+        Match("a layer off-centre by 0.03 in x, short of the sides", at(-0.97f + 0.03f, 0.97f + 0.03f, -kFadeY, kFadeY, kFade), s, false, rule);
         Quad grad = at(-kFadeX, kFadeX, -kFadeY, kFadeY, kFade);
         grad.v[1].argb = grad.v[2].argb = 0x00000000u;  // the pause dim's side gradients: alpha varies
         Match("a gradient of the fade's shape", grad, s, false, rule);

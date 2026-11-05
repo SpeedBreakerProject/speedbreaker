@@ -20,6 +20,8 @@
 #include "render_scale.h"
 #include "shared_memory_glsl.h"
 #include "shadow_lend.h"
+#include "sharp_ui.h"
+#include "anisotropy_auto.h"
 #include "split_views.h"
 #include "xenos/registers.h"
 
@@ -35,6 +37,7 @@
 #include <game/cover_callers.h>
 #include <game/split_screen.h>
 #include <game/ultrawide.h>
+#include <game/movie_pacing.h>
 
 #include <glslang/Include/glslang_c_interface.h>
 #include <glslang/Public/resource_limits_c.h>
@@ -1573,8 +1576,14 @@ namespace gpu::renderer
             std::mutex compileMutex;
             bool vertexCompiled = false;
             VkShaderModule module = VK_NULL_HANDLE;  // VS
-            // PS variants by (colour outputs, interpolator inputs, alpha test).
+            // PS variants by (colour outputs, interpolator inputs, alpha test,
+            // Sharper UI's mode: gpu/sharp_ui.h).
             std::unordered_map<uint32_t, VkShaderModule> variants;
+            // A pixel shader with 2D fetches: its microcode (host order), for
+            // Sharper UI's translation, made with its first such pipeline.
+            std::vector<uint32_t> ucode;
+            std::string sharpGlsl;
+            bool sharpTranslated = false;
         };
         std::unordered_map<uint64_t, std::unique_ptr<Shader>> s_shaders;
         Shader* s_vs = nullptr;
@@ -1909,14 +1918,50 @@ namespace gpu::renderer
             return vs.module;
         }
 
-        VkShaderModule PixelVariant(Shader& ps, uint32_t outputs, uint32_t inputs, bool alphaTest)
+        VkShaderModule PixelVariant(Shader& ps, uint32_t outputs, uint32_t inputs, bool alphaTest,
+            gpu::sharp_ui::Mode sharp = gpu::sharp_ui::Mode::Off, uint32_t uiMask = 0)
         {
-            uint32_t key = (outputs & 0xF) | ((inputs & 0xFFFF) << 4) | (alphaTest ? 1u << 20 : 0);
+            uint32_t key = (outputs & 0xF) | ((inputs & 0xFFFF) << 4) | (alphaTest ? 1u << 20 : 0) | gpu::sharp_ui::VariantBits(sharp) |
+                ((uiMask & 3u) << 24);
             std::lock_guard lock(ps.compileMutex);
             auto it = ps.variants.find(key);
             if (it != ps.variants.end())
                 return it->second;
+            // Sharper UI: the same microcode translated with its 2D fetches
+            // through sharpTex2D (once per shader; the plain GLSL is left
+            // as it is).
+            const std::string* glsl = &ps.info.glsl;
+            if (sharp != gpu::sharp_ui::Mode::Off)
+            {
+                if (!ps.sharpTranslated)
+                {
+                    ps.sharpTranslated = true;
+                    if (!ps.ucode.empty())
+                    {
+                        gpu::TranslateOptions options;
+                        options.sharpFetch2D = true;
+                        TranslatedShader t = TranslateShader(ps.stage, ps.ucode.data(), ps.ucode.size(), options);
+                        if (t.ok && t.sharpFetches)
+                            ps.sharpGlsl = std::move(t.glsl);
+                    }
+                }
+                if (!ps.sharpGlsl.empty())
+                    glsl = &ps.sharpGlsl;
+                else
+                    sharp = gpu::sharp_ui::Mode::Off;  // nothing to reconstruct: the plain module (its own key)
+            }
             std::string preamble;
+            // NFSMW_SHARP_UI_EXP=1/2 (a diagnostic, the cost's breakdown): sharpTex2D stops after the hardware's
+            // sample, or after its checks (gpu/sharp_ui.h). Measured: neither costs anything; the texel fetches did.
+            static const int sharpExp = [] { const char* v = std::getenv("NFSMW_SHARP_UI_EXP"); return v ? std::atoi(v) : 0; }();
+            if (sharp != gpu::sharp_ui::Mode::Off && (sharpExp == 1 || sharpExp == 2))
+                preamble += std::format("#define SHARP_EXP {}\n", sharpExp);
+            if (sharp == gpu::sharp_ui::Mode::Straight || sharp == gpu::sharp_ui::Mode::Luma)
+                preamble += "#define SHARP_STRAIGHT\n";
+            if (sharp == gpu::sharp_ui::Mode::Luma)
+                preamble += "#define SHARP_SLOT0_ONLY\n";
+            if (sharp != gpu::sharp_ui::Mode::Off && uiMask)
+                preamble += std::format("#define SHARP_UI_MASK {}\n", uiMask & 3u);
             for (int i = 0; i < 4; i++)
                 if (outputs & (1u << i))
                     preamble += std::format("#define OUT{}\n", i);
@@ -1926,7 +1971,7 @@ namespace gpu::renderer
             if (alphaTest)
                 preamble += "#define ALPHA_TEST\n";
             std::string log;
-            auto spirv = CompileGlsl(ps.info.glsl, GLSLANG_STAGE_FRAGMENT, log, preamble);
+            auto spirv = CompileGlsl(*glsl, GLSLANG_STAGE_FRAGMENT, log, preamble);
             VkShaderModule module = VK_NULL_HANDLE;
             if (spirv.empty())
                 fprintf(stderr, "[renderer] ps_%016llx (variant %x): GLSL compile failed:\n%s\n",
@@ -1986,7 +2031,7 @@ namespace gpu::renderer
         };
         std::map<std::array<uint32_t, 6>, std::unique_ptr<TextureLayout>> s_textureLayouts;
 
-        const TextureLayout& GetTextureLayoutUncached(const Shader& vs, const Shader& ps);
+        const TextureLayout& GetTextureLayoutUncached(const Shader& vs, const Shader& ps, bool uiMask = false);
 
         const TextureLayout& GetTextureLayout(const Shader& vs, const Shader& ps)
         {
@@ -2000,12 +2045,25 @@ namespace gpu::renderer
             return *last;
         }
 
-        const TextureLayout& GetTextureLayoutUncached(const Shader& vs, const Shader& ps)
+        const TextureLayout& GetUiMaskTextureLayout(const Shader& vs, const Shader& ps)
+        {
+            static const Shader *lastVs = nullptr, *lastPs = nullptr;
+            static const TextureLayout* last = nullptr;
+            if (&vs == lastVs && &ps == lastPs)
+                return *last;
+            lastVs = &vs;
+            lastPs = &ps;
+            last = &GetTextureLayoutUncached(vs, ps, true);
+            return *last;
+        }
+
+        const TextureLayout& GetTextureLayoutUncached(const Shader& vs, const Shader& ps, bool uiMask)
         {
             std::array<uint32_t, 3> v = { vs.info.texture2DMask, vs.info.texture3DMask, vs.info.textureCubeMask };
             std::array<uint32_t, 3> p = { ps.info.texture2DMask, ps.info.texture3DMask, ps.info.textureCubeMask };
             std::array<uint32_t, 6> key = { v[0], v[1], v[2], p[0], p[1], p[2] };
-            auto& slot = s_textureLayouts[key];
+            static std::map<std::array<uint32_t, 6>, std::unique_ptr<TextureLayout>> s_uiMaskLayouts;  // + binding 127 (UI-C)
+            auto& slot = uiMask ? s_uiMaskLayouts[key] : s_textureLayouts[key];
             if (slot)
                 return *slot;
             slot = std::make_unique<TextureLayout>();
@@ -2020,6 +2078,8 @@ namespace gpu::renderer
                     if (stages)
                         bindings.push_back({ d * 32 + n, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, stages, nullptr });
                 }
+            if (uiMask)
+                bindings.push_back({ 127, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr });
             VkDescriptorSetLayoutCreateInfo dslci{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
             dslci.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR;
             dslci.bindingCount = uint32_t(bindings.size());
@@ -2916,7 +2976,7 @@ namespace gpu::renderer
             uint32_t colorMask;      // 4 bits per target
             uint32_t depthControl;   // RB_DEPTHCONTROL (0 without a depth target, or one attached for the pass only)
             uint32_t raster;         // cull | front CW << 2 | depth clamp << 3 | depth bias << 4
-            uint32_t pad;
+            uint32_t pad;            // bits 0-1: Sharper UI's gpu::sharp_ui::Mode (0: the plain pixel shader); 2-3: its UI mask kind
 
             bool operator==(const PipelineKey& o) const { return memcmp(this, &o, sizeof(*this)) == 0; }
         };
@@ -2988,7 +3048,7 @@ namespace gpu::renderer
                     outputs |= 1u << i;
             uint32_t psRegs = std::min(16u, ps.info.registerCount);
             uint32_t inputs = vs.info.interpolatorMask & ((1u << psRegs) - 1);
-            VkShaderModule psModule = PixelVariant(ps, outputs, inputs, (key.raster >> 5) & 1);
+            VkShaderModule psModule = PixelVariant(ps, outputs, inputs, (key.raster >> 5) & 1, gpu::sharp_ui::Mode(key.pad & 3), (key.pad >> 2) & 3);
             if (!psModule)
                 return VK_NULL_HANDLE;
             stages[1] = { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_FRAGMENT_BIT,
@@ -3403,6 +3463,67 @@ namespace gpu::renderer
             }
         };
 
+        // A front-end draw (the menus, the HUD, the loading screens): the
+        // front-end matrix in c0..c3 as the hook left it (x scale, no
+        // rotation, no projection), ePolys at vertex fetch constant 95, and a
+        // vertex shader that reads both (not just inherits them from the HUD
+        // drawn before it: the mirror's picture, a movie quad, a
+        // post-process pass). The edge-bar rules' test, at every screen
+        // shape: the hook keeps the scales at 16:9 too.
+        bool IsFrontEndDraw()
+        {
+            const float feX = game::FrontEndScaleX();
+            if (!(feX > 0.0f))
+                return false;
+            float c[16];
+            memcpy(c, &s_regs[XE_GPU_REG_SHADER_CONSTANT_000_X], sizeof(c));
+            const uint32_t* vf = &s_regs[XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0 + 95 * 2];
+            if (!(std::fabs(c[0] - feX) <= feX * 1e-5f && c[1] == 0.0f && c[2] == 0.0f && c[12] == 0.0f && c[13] == 0.0f &&
+                    c[14] == 0.0f && c[15] == 1.0f && (vf[0] & 3) == 3))
+                return false;
+            const auto& vi = s_vs->info;
+            return ((vi.vertexFetchConstants[95 / 32] >> (95 % 32)) & 1) && (vi.constRelative || (vi.constUsed[0] & 0xFull) == 0xFull);
+        }
+
+        // Settings > Graphics > Sharper UI (gpu/sharp_ui.h), as this draw
+        // applies it. NFSMW_SHARP_UI_AB=1 (a diagnostic): whatever the
+        // setting, on and off by turns every 4 images (the image this frame
+        // will submit, video::SubmittedImages() + 1: on when bit 2 is set),
+        // so captures a few frames apart pair off and on in one session;
+        // the presenter names each capture's image and state. (Blocks, not
+        // single frames: a capture's read-back holds the next present, so
+        // consecutive captures land 2 images apart.)
+        bool SharpUiOn()
+        {
+            static const bool ab = [] { const char* v = std::getenv("NFSMW_SHARP_UI_AB"); return v && v[0] == '1'; }();
+            if (!ab)
+                return settings::GetBool(settings::Id::SharpUi);
+            return (((video::SubmittedImages() + 1) >> 2) & 1) != 0;
+        }
+
+        // Movie Upscaling's Sharper at a scaled Internal Resolution
+        // (gpu/sharp_ui.h, video/upscale.h): the XMV player's picture is a
+        // clip-space quad (no viewport transform: PA_CL_VTE_CNTL's scale and
+        // offset enables clear) drawn into the scaled target, its 1280x720
+        // (or 1024x576) planes magnified by bilinear filtering; drawn while a
+        // movie plays, it takes sharpTex2D like a front-end draw. (At 1x the
+        // frame reaches the presenter at 1x and its EASU pass does it.)
+        // NFSMW_SHARP_UI_AB=1 turns it on and off with Sharper UI.
+        bool IsMovieDraw()
+        {
+            const int64_t last = game::LastMovieFrameNs();
+            const int64_t now = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+            return last > 0 && now >= last && now - last <= 250'000'000 && (Reg<reg::PA_CL_VTE_CNTL>().value & 0x3F) == 0;
+        }
+
+        bool SharpMovieOn()
+        {
+            static const bool ab = [] { const char* v = std::getenv("NFSMW_SHARP_UI_AB"); return v && v[0] == '1'; }();
+            if (!ab)
+                return settings::GetInt(settings::Id::MovieUpscaling) == int32_t(settings::MovieUpscalingMode::Sharper);
+            return (((video::SubmittedImages() + 1) >> 2) & 1) != 0;
+        }
+
         // NFSMW_LOG_COVERS=1 (gpu/covers.h, game/cover_callers.h): the
         // current draw's quads, if it is a front-end draw (the front-end
         // matrix in c0..c3 as the hook left it, ePolys at fetch 95 read by
@@ -3557,6 +3678,98 @@ namespace gpu::renderer
                         : plan.fill == gpu::bars::Fill::Vignette || plan.fill == gpu::bars::Fill::Layer ? "stretched" : "matched, nothing to fill",
                     (unsigned long long)s_vs->hash, (unsigned long long)s_ps->hash, count, v0 / 4);
             }
+        }
+
+        // NFSMW_SHARP_UI_RECTS=1 (a diagnostic, for Sharper UI's checks): the
+        // host pixels each front-end draw Sharper UI applies to covers (the
+        // bounding box of its vertices, after every rule, in its scissor),
+        // whether or not it is on in that frame, with the largest 2D texture
+        // it samples (":WxH", then "c" when every texture it samples is a
+        // k_8_8_8_8 one of 64x64 or less whose texels are all the same, such
+        // as the game's 32x32 white fill: no filter can change what it
+        // draws); one line per image whose set of boxes differs from
+        // the image before ("from image N"), 20000 lines at most. Outside
+        // them a picture must be the same either way.
+        void NoteSharpRect(uint32_t count, const IndexSource& src, const float posScale[4], const VkRect2D& scissor, float hostW, float hostH)
+        {
+            static const bool on = [] { const char* v = std::getenv("NFSMW_SHARP_UI_RECTS"); return v && v[0] == '1'; }();
+            if (!on || count == 0 || count > 65536)
+                return;
+            static uint64_t image = ~0ull;
+            static std::vector<std::array<int32_t, 7>> current, last;
+            static uint32_t lines = 0;
+            const uint64_t now = video::SubmittedImages() + 1;
+            if (now != image)
+            {
+                std::sort(current.begin(), current.end());
+                current.erase(std::unique(current.begin(), current.end()), current.end());
+                if (image != ~0ull && current != last && lines < 20000)
+                {
+                    lines++;
+                    std::string text;
+                    for (const auto& r : current)
+                        text += std::format(" [{},{})x[{},{}):{}x{}{}", r[0], r[2], r[1], r[3], r[4], r[5], r[6] ? "c" : "");
+                    fprintf(stderr, "[sharp-ui-rects] from image %llu:%s\n", (unsigned long long)image, text.c_str());
+                    last = current;
+                }
+                current.clear();
+                image = now;
+            }
+            float c[8];
+            memcpy(c, &s_regs[XE_GPU_REG_SHADER_CONSTANT_000_X], sizeof(c));
+            const uint32_t* vf = &s_regs[XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0 + 95 * 2];
+            const uint32_t base = vf[0] & 0x1FFFFFFC, endian = vf[1] & 3;
+            const uint32_t words = (vf[1] >> 2) & 0xFFFFFF, first = s_regs[XE_GPU_REG_VGT_INDX_OFFSET];
+            float x0 = 1e30f, x1 = -1e30f, y0 = 1e30f, y1 = -1e30f;
+            for (uint32_t i = 0; i < count; i++)
+            {
+                const uint32_t v = src.Get(i) + first;
+                if ((v + 1) * 8 > words)
+                    return;
+                float p[3];
+                for (uint32_t j = 0; j < 3; j++)
+                {
+                    const uint32_t b = GpuSwap(LoadPhysical(base + (v * 8 + j) * 4), endian);
+                    memcpy(&p[j], &b, 4);
+                }
+                const float x = p[0] * c[0] + p[1] * c[1] + p[2] * c[2] + c[3];
+                const float y = p[0] * c[4] + p[1] * c[5] + p[2] * c[6] + c[7];
+                x0 = std::min(x0, x);
+                x1 = std::max(x1, x);
+                y0 = std::min(y0, y);
+                y1 = std::max(y1, y);
+            }
+            const gpu::bars::Rect host = gpu::bars::ClipToHost(x0, x1, y0, y1, posScale, hostW, hostH);
+            const gpu::covers::Rect r = gpu::covers::Intersect({ host.x0, host.y0, host.x1, host.y1 },
+                { scissor.offset.x, scissor.offset.y, scissor.offset.x + int32_t(scissor.extent.width), scissor.offset.y + int32_t(scissor.extent.height) });
+            int32_t texW = 0, texH = 0;
+            bool constant = true;
+            for (uint32_t n = 0; n < 32; n++)
+                if ((s_ps->info.texture2DMask >> n) & 1)
+                {
+                    xenos::xe_gpu_texture_fetch_t t;
+                    memcpy(&t, &s_regs[XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0 + n * 6], sizeof(t));
+                    const int32_t tw = int32_t(t.size_2d.width) + 1, th = int32_t(t.size_2d.height) + 1;
+                    if (tw * th > texW * texH)
+                    {
+                        texW = tw;
+                        texH = th;
+                    }
+                    if (!constant)
+                        continue;
+                    const uint32_t tBase = (uint32_t(t.base_address) << 12) & 0x1FFFFFFFu, tPitch = uint32_t(t.pitch) << 5;
+                    if (uint32_t(t.format) != 6 || tw > 64 || th > 64 || !tPitch)
+                    {
+                        constant = false;
+                        continue;
+                    }
+                    const uint32_t first = LoadPhysical(tBase + gpu::bars::TexelOffset32(0, 0, tPitch, t.tiled));
+                    for (int32_t y = 0; y < th && constant; y++)
+                        for (int32_t x = 0; x < tw && constant; x++)
+                            constant = LoadPhysical(tBase + gpu::bars::TexelOffset32(uint32_t(x), uint32_t(y), tPitch, t.tiled)) == first;
+                }
+            if (r.x1 > r.x0 && r.y1 > r.y0)
+                current.push_back({ r.x0, r.y0, r.x1, r.y1, texW, texH, constant ? 1 : 0 });
         }
 
         // Get() for a whole draw, written straight into the ring: `out16`
@@ -4400,7 +4613,16 @@ void main()
             // while command buffers in flight keep theirs (never destroyed).
             int anisotropy = settings::GetInt(settings::Id::Anisotropy);
             if (anisotropy == settings::kAnisotropyAuto)
-                anisotropy = s_autoAnisotropy;
+            {
+                anisotropy = gpu::AutoAnisotropy(s_autoAnisotropy, gpu::kAnisotropyMac, gpu::SceneAtOneX(s_renderScale));
+                static int logged = -2;
+                if (anisotropy != logged)
+                {
+                    logged = anisotropy;
+                    fprintf(stderr, "[renderer] anisotropic filtering Auto: %dx%s\n", anisotropy,
+                        anisotropy != s_autoAnisotropy ? " (a Mac at 1x Internal Resolution)" : "");
+                }
+            }
             // Depth (k_24_8, k_24_8_FLOAT: the sun's shadow map) keeps the
             // game's own anisotropy: filtered along a line, its depths are
             // averaged across a decal's edge, and the shadow test there
@@ -7670,6 +7892,93 @@ void main()
         VkPipeline s_frontPipeline = VK_NULL_HANDLE;
         VkPipelineLayout s_frontLayout = VK_NULL_HANDLE;
         VkDescriptorSetLayout s_frontSetLayout = VK_NULL_HANDLE;
+
+        // UI-C (gpu/sharp_ui.h kUiMaskStoreGlsl, video/presenter.cpp's UI
+        // pass): front-end variants record their coverage into `accum`
+        // (R32UI, the scaled frame's host pixels; imageAtomicMax), and with
+        // each scaled front image a compute pass turns it into an R8 weight
+        // image (each pixel the most of its 3x3: a glyph's soft edge weighs
+        // as its middle does), handed to the presenter, then clears it.
+        // NFSMW_UI_MASK=0 turns it off (on with Sharper UI otherwise).
+        struct UiMaskState
+        {
+            bool checked = false, supported = false;
+            Image accum;
+            uint32_t accumW = 0, accumH = 0;
+            Image out[2];
+            uint32_t outW = 0, outH = 0, next = 0;
+            bool written = false;  // a draw wrote into accum since the last front image
+            VkPipeline pipeline = VK_NULL_HANDLE;
+            VkPipelineLayout layout = VK_NULL_HANDLE;
+            VkDescriptorSetLayout setLayout = VK_NULL_HANDLE;
+        } s_uiMask;
+
+        const char* kUiMaskGlsl = R"(#version 460
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(set = 0, binding = 0, r32ui) uniform readonly uimage2D accum;
+layout(set = 0, binding = 1, r8) uniform writeonly image2D weights;
+layout(push_constant) uniform P { ivec2 size; } p;
+void main()
+{
+    ivec2 g = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(g, p.size)))
+        return;
+    ivec2 lim = imageSize(accum) - 1;
+    uint m = 0u;
+    for (int y = -1; y <= 1; y++)
+        for (int x = -1; x <= 1; x++)
+            m = max(m, imageLoad(accum, clamp(g + ivec2(x, y), ivec2(0), lim)).r);
+    imageStore(weights, g, vec4(float(m) / 255.0));
+}
+)";
+
+        bool UiMaskWanted()
+        {
+            static const bool env = [] { const char* v = std::getenv("NFSMW_UI_MASK"); return !(v && v[0] == '0'); }();
+            if (!env)
+                return false;
+            if (!s_uiMask.checked)
+            {
+                s_uiMask.checked = true;
+                VkPhysicalDeviceFeatures features;
+                vkGetPhysicalDeviceFeatures(s_vk->physical, &features);
+                VkFormatProperties r8, r32;
+                vkGetPhysicalDeviceFormatProperties(s_vk->physical, VK_FORMAT_R8_UNORM, &r8);
+                vkGetPhysicalDeviceFormatProperties(s_vk->physical, VK_FORMAT_R32_UINT, &r32);
+                s_uiMask.supported = features.fragmentStoresAndAtomics &&
+                    (r8.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) &&
+                    (r32.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_ATOMIC_BIT);
+                fprintf(stderr, "[renderer] UI mask (Sharper UI's presenter pass): %s\n",
+                    s_uiMask.supported ? "available" : "unavailable (fragment atomics or R8 storage missing)");
+            }
+            return s_uiMask.supported;
+        }
+
+        // The accumulator and the two weight images, the scaled front
+        // image's size, made at a front image (passes ended); draws use them
+        // once they exist.
+        void EnsureUiMaskImages(uint32_t w, uint32_t h)
+        {
+            if (w == s_uiMask.accumW && h == s_uiMask.accumH && s_uiMask.accum.view)
+                return;
+            // (A new size: the old ones may be in flight; kept, not destroyed. Rare: a resolution change.)
+            s_uiMask.accumW = s_uiMask.outW = w;
+            s_uiMask.accumH = s_uiMask.outH = h;
+            s_uiMask.accum = CreateImage(VK_IMAGE_TYPE_2D, VK_FORMAT_R32_UINT, { w, h, 1 }, 1,
+                VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_VIEW_TYPE_2D, VK_IMAGE_ASPECT_COLOR_BIT);
+            for (Image& o : s_uiMask.out)
+                o = CreateImage(VK_IMAGE_TYPE_2D, VK_FORMAT_R8_UNORM, { w, h, 1 }, 1, VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+                    VK_IMAGE_VIEW_TYPE_2D, VK_IMAGE_ASPECT_COLOR_BIT);
+            ToGeneral(s_uiMask.accum.image, VK_IMAGE_ASPECT_COLOR_BIT, 1);
+            for (Image& o : s_uiMask.out)
+                ToGeneral(o.image, VK_IMAGE_ASPECT_COLOR_BIT, 1);
+            VkClearColorValue zero{};
+            VkImageSubresourceRange range{ VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+            vkCmdClearColorImage(s_cmd, s_uiMask.accum.image, VK_IMAGE_LAYOUT_GENERAL, &zero, 1, &range);
+            FullBarrier();
+            s_uiMask.written = false;
+            fprintf(stderr, "[renderer] UI mask images %ux%u\n", w, h);
+        }
         // The same for a texel axis's scale, made for that exact scale
         // (SB_FIXED_*) at its first scaled present (Steam Deck 1x10/9: the
         // divisions by the push constants were most of the front's cost).
@@ -8973,6 +9282,8 @@ void main()
             for (uint32_t i = 0; i < dwords; i++)
                 ucode[i] = __builtin_bswap32(words[i]);
             slot->info = TranslateShader(slot->stage, ucode.data(), dwords);
+            if (slot->stage == ShaderStage::Pixel && slot->info.ok && slot->info.texture2DMask)
+                slot->ucode = std::move(ucode);  // (Sharper UI's variant: gpu/sharp_ui.h)
             if (!slot->info.ok)
                 fprintf(stderr, "[renderer] %s_%016llx: translation failed: %s\n", type == 0 ? "vs" : "ps",
                     (unsigned long long)h, slot->info.error.c_str());
@@ -9542,7 +9853,7 @@ void main()
             return;
 
         // Pipeline state.
-        const TextureLayout& layout = GetTextureLayout(*s_vs, *s_ps);
+        const TextureLayout* layoutChoice = &GetTextureLayout(*s_vs, *s_ps);
         PipelineKey key{};
         key.vs = s_vs->hash;
         key.ps = s_ps->hash;
@@ -9579,12 +9890,86 @@ void main()
         key.raster = cull | (modeCntl.face ? 4u : 0u) | (clipCntl.clip_disable ? 8u : 0u) | (depthBias ? 16u : 0u) |
             (alphaTest ? 32u : 0u);
 
+        // Settings > Graphics > Sharper UI (gpu/sharp_ui.h): a front-end
+        // draw into a scaled target, with 2D textures and a blend whose
+        // colour premultiplied (or straight) filtering keeps, takes its
+        // pixel shader's sharpTex2D variant. Off, at 1x, and every other
+        // draw: key.pad 0, the plain pipeline as before.
+        const bool sharpCandidate = s_drawScaled && color[0] && s_ps->info.texture2DMask &&
+            gpu::RunsGuestPixelShader(edramMode, s_depthOnlyGuestPs);
+        const bool frontEnd = sharpCandidate && IsFrontEndDraw();
+        const gpu::sharp_ui::Mode sharpMode = frontEnd ? gpu::sharp_ui::ModeForBlend(key.blend[0]) : gpu::sharp_ui::Mode::Off;
+        if (sharpMode != gpu::sharp_ui::Mode::Off && SharpUiOn())
+        {
+            key.pad = uint32_t(sharpMode);
+            // UI-C: the draw's coverage into the UI mask (not over only small
+            // textures: the dims' and fades' white fill).
+            if (UiMaskWanted() && s_uiMask.accum.view)
+            {
+                bool small = true;
+                for (uint32_t n = 0; n < 32; n++)
+                    if ((s_ps->info.texture2DMask >> n) & 1)
+                    {
+                        const uint32_t d2 = s_regs[XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0 + n * 6 + 2];
+                        if (((d2 & 0x1FFF) + 1) * (((d2 >> 13) & 0x1FFF) + 1) > 32 * 32)
+                            small = false;
+                    }
+                key.pad |= gpu::sharp_ui::UiMaskKind(key.blend[0], small) << 2;
+            }
+        }
+        // The movie's quad, likewise (Movie Upscaling).
+        // (Straight whatever its blend: its planes are Y, U and V, whose alpha
+        // weights no colour; and the Y plane only, fetch slot 0, 1280x720:
+        // the 640x360 chroma planes carry little of what looks sharp, and
+        // all three cost ~4 ms at 4K on an M1 Pro.)
+        const gpu::sharp_ui::Mode movieMode = sharpCandidate && !frontEnd && IsMovieDraw()
+            ? gpu::sharp_ui::Mode::Luma : gpu::sharp_ui::Mode::Off;
+        if (movieMode != gpu::sharp_ui::Mode::Off && SharpMovieOn())
+            key.pad = uint32_t(movieMode);
+        static const bool logMovieDraws = std::getenv("NFSMW_SHARP_UI_RECTS") != nullptr;
+        if (movieMode != gpu::sharp_ui::Mode::Off && logMovieDraws)
+        {
+            static uint32_t movieLines = 0;
+            static std::unordered_set<uint64_t> seen;
+            if (movieLines < 64 && seen.insert(s_vs->hash ^ (s_ps->hash << 1) ^ key.blend[0]).second)
+            {
+                movieLines++;
+                std::string tex;
+                for (uint32_t n = 0; n < 32; n++)
+                    if ((s_ps->info.texture2DMask >> n) & 1)
+                    {
+                        const uint32_t d2 = s_regs[XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0 + n * 6 + 2];
+                        tex += std::format(" t{} {}x{}", n, (d2 & 0x1FFF) + 1, ((d2 >> 13) & 0x1FFF) + 1);
+                    }
+                fprintf(stderr, "[sharp-movie] vs_%016llx ps_%016llx VTE %03X blend %08X target %ux%u:%s\n", (unsigned long long)s_vs->hash,
+                    (unsigned long long)s_ps->hash, Reg<reg::PA_CL_VTE_CNTL>().value & 0xFFF, key.blend[0], color[0]->guestWidth,
+                    color[0]->guestHeight, tex.c_str());
+            }
+        }
+
+        if ((key.pad >> 2) & 3)
+            layoutChoice = &GetUiMaskTextureLayout(*s_vs, *s_ps);
         bool pipelinePending;
-        VkPipeline pipeline = GetPipeline(key, layout.pipeline, pipelinePending);
+        VkPipeline pipeline = GetPipeline(key, layoutChoice->pipeline, pipelinePending);
+        if (pipelinePending && key.pad)
+        {
+            // The variant still compiling (just turned on): the plain one meanwhile.
+            key.pad = 0;
+            layoutChoice = &GetTextureLayout(*s_vs, *s_ps);
+            pipeline = GetPipeline(key, layoutChoice->pipeline, pipelinePending);
+        }
         if (pipelinePending)
             return;  // still compiling (counted in OnSwap's log)
         if (pipeline == VK_NULL_HANDLE)
             return skip(5, "pipeline creation failed");
+        const TextureLayout& layout = *layoutChoice;
+        // UI-C: the accumulator this draw's variant writes (binding 127).
+        VkDescriptorImageInfo uiMaskInfo{ VK_NULL_HANDLE, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_GENERAL };
+        if ((key.pad >> 2) & 3)
+        {
+            uiMaskInfo.imageView = s_uiMask.accum.view;
+            s_uiMask.written = true;
+        }
 
         // Textures (may upload through the ring and so flush: before the
         // constants are allocated).
@@ -10166,6 +10551,83 @@ void main()
                 };
                 plan = gpu::bars::PlanVignette(draw, read, texel);
             }
+            // Vert+: menu art authored a little past the 16:9 frame's top or
+            // bottom (the Options screens' graffiti header) whose own edge
+            // showed as a cut with the scene above it: carried to the
+            // screen's edge by a copy stretched from a pivot inside it
+            // (GitHub #87, gpu/edge_bars.h).
+            // NFSMW_EDGE_PIECES=0 turns it off (an A/B switch).
+            static const bool edgePieces = [] { const char* v = std::getenv("NFSMW_EDGE_PIECES"); return !(v && v[0] == '0'); }();
+            // Vert+: the Options hub's graffiti tags, revealed in place below
+            // the 16:9 frame's top: moved up so their art's top is the
+            // screen's (GitHub #87, gpu/edge_bars.h's raise). Same switch.
+            // Asked before the edge piece: mid-reveal a tag's quad crosses
+            // the band edge like one.
+            if (plan.fill == gpu::bars::Fill::None && edgePieces)
+            {
+                // Only a picture seen mid-reveal, and from then on while it
+                // is drawn (the same texture, drawn within the last 4 s; the
+                // two tags share theirs): a still picture of the same shape
+                // stays.
+                struct Revealed { uint64_t key, frame; };
+                static Revealed revealed[16]{};
+                static uint32_t nextRevealed = 0;
+                const uint64_t key = (uint64_t((uint32_t(t0.base_address) << 12) & 0x1FFFFFFFu) << 32) | (uint64_t(draw.t0Width) << 16) | draw.t0Height;
+                auto admit = [&](bool revealing) {
+                    Revealed* r = nullptr;
+                    for (Revealed& e : revealed)
+                        if (e.frame && e.key == key && s_frame - e.frame <= 240)
+                            r = &e;
+                    if (!r && revealing)
+                        r = &revealed[nextRevealed++ % 16], r->key = key;
+                    if (!r)
+                        return false;
+                    r->frame = s_frame;
+                    return true;
+                };
+                // The art's visible top: its picture's first ink row
+                // (alpha), once per picture.
+                struct Ink { uint64_t key; int row; };
+                static Ink inks[16]{};
+                static uint32_t nextInk = 0;
+                int inkRow = -2;
+                for (const Ink& e : inks)
+                    if (e.key == key && e.row != -2)
+                        inkRow = e.row;
+                if (inkRow == -2 && gpu::bars::RaiseCandidate(draw))
+                {
+                    const uint32_t rt0Base = (uint32_t(t0.base_address) << 12) & 0x1FFFFFFFu;
+                    const uint32_t rt0Pitch = uint32_t(t0.pitch) << 5;
+                    auto rtexel = [&](uint32_t x, uint32_t y, uint32_t& word) {
+                        if (!rt0Pitch || x >= draw.t0Width || y >= draw.t0Height || x >= rt0Pitch)
+                            return false;
+                        word = GpuSwap(LoadPhysical(rt0Base + gpu::bars::TexelOffset32(x, y, rt0Pitch, t0.tiled != 0)), uint32_t(t0.endianness));
+                        return true;
+                    };
+                    inkRow = gpu::bars::FirstInkRow(rtexel, draw.t0Width, draw.t0Height);
+                    inks[nextInk++ % 16] = { key, inkRow };
+                    // Each byte's largest value over the picture's first rows,
+                    // to check the alpha byte: once per picture, in every log.
+                    std::string bytes;
+                    for (uint32_t y = 0; y < std::min(8u, draw.t0Height); y++)
+                    {
+                        uint32_t mx[4] = {};
+                        for (uint32_t x = 0; x < draw.t0Width; x++)
+                        {
+                            uint32_t w = 0;
+                            if (rtexel(x, y, w))
+                                for (int b = 0; b < 4; b++)
+                                    mx[b] = std::max(mx[b], (w >> (24 - 8 * b)) & 0xFFu);
+                        }
+                        bytes += std::format(" {:02X}{:02X}{:02X}{:02X}", mx[0], mx[1], mx[2], mx[3]);
+                    }
+                    fprintf(stderr, "[renderer] raise: t0 %08X %ux%u: first ink row %d (each row's largest byte, top byte first:%s)\n", rt0Base,
+                        draw.t0Width, draw.t0Height, inkRow, bytes.c_str());
+                }
+                plan = gpu::bars::PlanRaise(draw, read, admit, gpu::bars::FirstInkV(inkRow, draw.t0Height));
+            }
+            if (plan.fill == gpu::bars::Fill::None && edgePieces)
+                plan = gpu::bars::PlanEdgePiece(draw, read);
             // A flat full-screen layer short of the screen's edges (the fade
             // to black before a load): stretched to them (gpu/edge_bars.h).
             if (plan.fill == gpu::bars::Fill::None)
@@ -10183,10 +10645,12 @@ void main()
             const bool backdrop = barPlan.fill == gpu::bars::Fill::Backdrop;
             const bool vignette = barPlan.fill == gpu::bars::Fill::Vignette;
             const bool layer = barPlan.fill == gpu::bars::Fill::Layer;
+            const bool piece = barPlan.fill == gpu::bars::Fill::EdgePiece;
+            const bool raise = barPlan.fill == gpu::bars::Fill::Raise;
             const gpu::bars::Box& box = barPlan.box;
             const uint64_t key = (0x36ull << 56) | (uint64_t(kind) << 40) | (uint64_t(barPlan.rectCount) << 36) |
                 (uint64_t(std::lround(aspectX * 4096.0f)) << 18) | uint64_t(std::lround(aspectY * 4096.0f));
-            static uint64_t loggedKey[7] = { ~0ull, ~0ull, ~0ull, ~0ull, ~0ull, ~0ull, ~0ull };
+            static uint64_t loggedKey[9] = { ~0ull, ~0ull, ~0ull, ~0ull, ~0ull, ~0ull, ~0ull, ~0ull, ~0ull };
             if (loggedKey[kind] != key)
             {
                 loggedKey[kind] = key;
@@ -10194,15 +10658,19 @@ void main()
                 if (barPlan.rectCount)
                     snprintf(fills, sizeof(fills), "fills %u rectangle(s) %s, first [%d,%d)x[%d,%d) (host px)", barPlan.rectCount,
                         backdrop ? "outside it (past the 16:9 band, and the band's overscan rows)"
+                            : piece ? "from its pivot to the screen's edge, its art there stretched"
                             : blackout ? "outside it (past the 16:9 band, and the band's border round it)" : "past the 16:9 band", barPlan.rects[0].x0,
                         barPlan.rects[0].x1, barPlan.rects[0].y0, barPlan.rects[0].y1);
                 else
-                    snprintf(fills, sizeof(fills), "%s", vignette || layer ? "stretched to the screen's edges"
+                    snprintf(fills, sizeof(fills), "%s", raise ? "moved so its art's top is the screen's edge"
+                        : vignette || layer ? "stretched to the screen's edges"
                         : blackout || backdrop ? "fills nothing" : "reaches the screen edge: nothing to fill");
                 LogOnce(key,
                     "edge bars: frame %llu vs_%016llx ps_%016llx: %s (clip x %.3f..%.3f y %.3f..%.3f, colour %08X; view scale x %.4f y %.4f) %s",
                     (unsigned long long)s_frame, (unsigned long long)s_vs->hash, (unsigned long long)s_ps->hash,
-                    vignette ? "the Showcase's vignette (clear in the middle)" : layer ? "a full-screen layer short of the screen's edges (a fade)"
+                    raise ? "menu art revealed below the 16:9 band's edge (a raise)"
+                        : piece ? "menu art past the 16:9 band's edge (an edge piece)"
+                        : vignette ? "the Showcase's vignette (clear in the middle)" : layer ? "a full-screen layer short of the screen's edges (a fade)"
                         : backdrop ? "a full-band backdrop (black outside it)"
                         : blackout ? "a black frame" : kind == uint32_t(gpu::bars::Fill::RightBar) ? "the right vid-cam bar" : "the left vid-cam bar",
                     box.x0, box.x1, box.y0, box.y1, barPlan.argb, aspectX, aspectY, fills);
@@ -10210,14 +10678,14 @@ void main()
             // NFSMW_LOG_FRONTEND=1: the first frame of each run of frames
             // with a match, bars and black frames apart (one run per vid-cam
             // scene and per cut; any other is a draw this should not take).
-            static uint64_t lastBarFrame[5] = { ~0ull - 1, ~0ull - 1, ~0ull - 1, ~0ull - 1, ~0ull - 1 };
-            uint64_t& last = lastBarFrame[layer ? 4 : vignette ? 3 : backdrop ? 2 : blackout ? 1 : 0];
+            static uint64_t lastBarFrame[7] = { ~0ull - 1, ~0ull - 1, ~0ull - 1, ~0ull - 1, ~0ull - 1, ~0ull - 1, ~0ull - 1 };
+            uint64_t& last = lastBarFrame[raise ? 6 : piece ? 5 : layer ? 4 : vignette ? 3 : backdrop ? 2 : blackout ? 1 : 0];
             if (logFrontEnd && s_frame != last && s_frame != last + 1)
             {
                 xenos::xe_gpu_texture_fetch_t t0;
                 memcpy(&t0, &s_regs[XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0], sizeof(t0));
                 fprintf(stderr, "[frontend] edge bars: matching from frame %llu: %s x %.3f..%.3f y %.3f..%.3f colour %08X blend %08X t0 %08X %ux%u, %u rect(s)\n",
-                    (unsigned long long)s_frame, layer ? "layer" : vignette ? "vignette" : backdrop ? "backdrop" : blackout ? "black frame"
+                    (unsigned long long)s_frame, raise ? "raise" : piece ? "edge piece" : layer ? "layer" : vignette ? "vignette" : backdrop ? "backdrop" : blackout ? "black frame"
                         : kind == uint32_t(gpu::bars::Fill::RightBar) ? "right bar" : "left bar",
                     box.x0, box.x1, box.y0, box.y1, barPlan.argb, s_regs[XE_GPU_REG_RB_BLENDCONTROL0] & 0x1FFF1FFF,
                     (uint32_t(t0.base_address) << 12) & 0x1FFFFFFFu, uint32_t(t0.size_2d.width) + 1, uint32_t(t0.size_2d.height) + 1,
@@ -10472,8 +10940,13 @@ void main()
                     if (const float reachAllY = std::min(-allLoY, allHiY); cover && reachAllY < 1.0f)
                     {
                         // posScale.x and .y alone: about the viewport's centre
-                        // (clip 0,0), as above.
-                        kCover = std::min(1.0f / sv, 1.01f / reachAllY);
+                        // (clip 0,0), as above. Up to kFillEdge / sv, not 1 /
+                        // sv: a layer authored a hair short of the 16:9
+                        // frame's edge (the dialogs' dim, y -0.999..0.995 of
+                        // the band) scaled by 1 / sv alone stopped as short of
+                        // the screen's, and its top rows showed the menu
+                        // undimmed (GitHub #87).
+                        kCover = std::min(gpu::bars::kFillEdge / sv, 1.01f / reachAllY);
                         pc.posScale[0] *= kCover;
                         pc.posScale[1] *= kCover;
                     }
@@ -10542,6 +11015,16 @@ void main()
                             memcpy(pc.posScale, barPlan.posScale, sizeof(pc.posScale));
                         if (barPlan.fill == gpu::bars::Fill::Vignette)
                             memcpy(pc.posScale, barPlan.posScale, sizeof(pc.posScale));
+                        if (barPlan.fill == gpu::bars::Fill::Raise)
+                            memcpy(pc.posScale, barPlan.posScale, sizeof(pc.posScale));
+                        // An edge piece: the draw itself stops at the band's
+                        // edge; its copy (below, after it) fills the rows past.
+                        if (barPlan.fill == gpu::bars::Fill::EdgePiece && barPlan.clipOwn)
+                        {
+                            const gpu::bars::Rect& r = barPlan.own;
+                            scissor.offset = { r.x0, r.y0 };
+                            scissor.extent = { uint32_t(std::max(r.x1 - r.x0, 0)), uint32_t(std::max(r.y1 - r.y0, 0)) };
+                        }
                     }
                     // The edge candidates (above) that still stop short of
                     // the screen's edge after the rules, each distinct line
@@ -10592,7 +11075,9 @@ void main()
                         uint32_t& perT0Edge = perKey[(uint64_t(t0) << 32) | (kind << 3) | edgeCode];
                         if (perT0Edge >= 4)
                             continue;
-                        const std::string action = barPlan.fill == gpu::bars::Fill::Vignette ? std::string("vignette stretched to the screen's edges")
+                        const std::string action = barPlan.fill == gpu::bars::Fill::Raise ? std::string("raised: art top on the screen's edge")
+                            : barPlan.fill == gpu::bars::Fill::EdgePiece ? std::string("edge piece stretched to the screen's edge")
+                            : barPlan.fill == gpu::bars::Fill::Vignette ? std::string("vignette stretched to the screen's edges")
                             : barPlan.fill == gpu::bars::Fill::Layer ? std::string("layer stretched to the screen's edges")
                             : barPlan.rectCount
                             ? std::string(barPlan.fill == gpu::bars::Fill::Backdrop ? "backdrop fill"
@@ -10730,6 +11215,8 @@ void main()
         if (game::covers::Enabled())
             LogCovers(count, uint32_t(initiator.prim_type), src, pc.posScale, scissor, w * float(scaleX), h * float(scaleY), float(scaleX),
                 float(scaleY), barPlan);
+        if (sharpMode != gpu::sharp_ui::Mode::Off)
+            NoteSharpRect(count, src, pc.posScale, scissor, w * float(scaleX), h * float(scaleY));
         // NFSMW_LOG_DRAWS=<seconds>: every draw of one frame (target, viewport,
         // scissor, textures, shaders), consecutive duplicates folded.
         if (s_logDrawsNow)
@@ -10741,7 +11228,8 @@ void main()
                     line += std::format(" {}:{:08X}", n, (s_regs[XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0 + n * 6 + 1] & 0x1FFFF000u));
             if (barPlan.rectCount)
                 line += std::format(" +edge {} fill x{}", barPlan.fill == gpu::bars::Fill::Backdrop ? "backdrop"
-                    : barPlan.fill == gpu::bars::Fill::Blackout ? "black frame" : "bar", barPlan.rectCount);
+                    : barPlan.fill == gpu::bars::Fill::Blackout ? "black frame" : barPlan.fill == gpu::bars::Fill::EdgePiece ? "edge piece" : "bar",
+                    barPlan.rectCount);
             else if (barPlan.fill == gpu::bars::Fill::Vignette)
                 line += " +vignette stretched";
             else if (barPlan.fill == gpu::bars::Fill::Layer)
@@ -10820,7 +11308,7 @@ void main()
             uint32_t setOffset = ~0u;
             VkPipelineLayout textureLayout = VK_NULL_HANDLE;
             uint32_t textureCount = ~0u;
-            VkDescriptorImageInfo textures[96];
+            VkDescriptorImageInfo textures[97];
             DrawConstants pc{};
         };
         static BoundState bound;
@@ -10914,7 +11402,7 @@ void main()
         }
 #endif
 
-        VkWriteDescriptorSet writes[96];
+        VkWriteDescriptorSet writes[97];
         uint32_t writeCount = 0;
         for (uint32_t d = 0; d < 3; d++)
             for (uint32_t n = 0; n < 32; n++)
@@ -10928,6 +11416,15 @@ void main()
                 wds.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
                 wds.pImageInfo = &textureInfos[d * 32 + n];
             }
+        if (uiMaskInfo.imageView)
+        {
+            VkWriteDescriptorSet& wds = writes[writeCount++];
+            wds = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
+            wds.dstBinding = 127;
+            wds.descriptorCount = 1;
+            wds.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+            wds.pImageInfo = &uiMaskInfo;
+        }
         if (writeCount)
         {
             bool same = !fresh && bound.textureLayout == layout.pipeline && bound.textureCount == writeCount;
@@ -11351,11 +11848,51 @@ void main()
         vkCmdDispatch(s_cmd, (outW + 7) / 8, (outH + 7) / 8, 1);
         GuardGpu(pc.base, frontBytes, false, "front buffer");
         FullBarrier();
+        // UI-C: this frame's UI weights for the presenter, the accumulator
+        // cleared for the next (a real picture's only; in-between pictures
+        // keep none).
+        VkImageView uiMaskView = VK_NULL_HANDLE;
+        if (scaled && !b && settings::GetBool(settings::Id::SharpUi) && UiMaskWanted())
+        {
+            EnsureUiMaskImages(outW, outH);
+            if (s_uiMask.written)
+            {
+                if (!s_uiMask.pipeline)
+                {
+                    VkDescriptorSetLayoutBinding mb[2] = {
+                        { 0, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr },
+                        { 1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr },
+                    };
+                    CreateComputePipeline(kUiMaskGlsl, mb, 2, 2 * sizeof(int32_t), s_uiMask.setLayout, s_uiMask.layout, s_uiMask.pipeline);
+                }
+                Image& out = s_uiMask.out[s_uiMask.next];
+                s_uiMask.next ^= 1;
+                VkDescriptorImageInfo src{ VK_NULL_HANDLE, s_uiMask.accum.view, VK_IMAGE_LAYOUT_GENERAL };
+                VkDescriptorImageInfo dst{ VK_NULL_HANDLE, out.view, VK_IMAGE_LAYOUT_GENERAL };
+                VkWriteDescriptorSet mw[2] = {
+                    { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, VK_NULL_HANDLE, 0, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &src, nullptr, nullptr },
+                    { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, VK_NULL_HANDLE, 1, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &dst, nullptr, nullptr },
+                };
+                const int32_t size[2] = { int32_t(outW), int32_t(outH) };
+                vkCmdBindPipeline(s_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, s_uiMask.pipeline);
+                s_pushDescriptorSet(s_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, s_uiMask.layout, 0, 2, mw);
+                vkCmdPushConstants(s_cmd, s_uiMask.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(size), size);
+                vkCmdDispatch(s_cmd, (outW + 7) / 8, (outH + 7) / 8, 1);
+                FullBarrier();
+                VkClearColorValue zero{};
+                VkImageSubresourceRange range{ VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+                vkCmdClearColorImage(s_cmd, s_uiMask.accum.image, VK_IMAGE_LAYOUT_GENERAL, &zero, 1, &range);
+                FullBarrier();
+                s_uiMask.written = false;
+                uiMaskView = out.view;
+            }
+        }
 #ifdef _WIN32
         if (s_black.on)
             RecordBlackProbe(front, outW, outH);
 #endif
         SubmitRecorded(7);  // the presenter's blit comes later in queue order
+        video::SubmitUiMask(uiMaskView);  // (null: none for this picture)
         video::SubmitFrontImage(front.image, outW, outH, width, height, between, shift, target);
         // Back at 1x (a live change): the host-resolution image is no longer
         // needed. The presenter has this frame to show instead.

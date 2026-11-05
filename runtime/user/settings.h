@@ -60,6 +60,8 @@ namespace settings
         Mipmaps,
         InternalResolution,
         ShadowResolution,
+        SharpUi,         // Sharper UI: the front end's magnified art reconstructed (gpu/sharp_ui.h)
+        MovieUpscaling,  // how movies are enlarged while they play at 1x (video/upscale.h MoviePass)
         WindowWidth,   // hidden: the window's size, remembered between runs
         WindowHeight,  // hidden
         // Audio
@@ -173,6 +175,10 @@ namespace settings
     // taller view (Vert+, down to 4:3). Only a screen within 1% of 16:9 keeps
     // the 16:9 frame (video::kTallMinStretch). Widescreen: 16:9 with bars.
     enum class AspectMode : int32_t { Auto = 0, Widescreen = 1 };
+    // Movie Upscaling (video/upscale.h): Original is the Upscaling setting's
+    // pass, as before; Sharper is FSR 1's EASU with a light RCAS where FSR 1
+    // is offered, a clamped Lanczos where it isn't (iPhone, iPad).
+    enum class MovieUpscalingMode : int32_t { Original = 0, Sharper = 1 };
     // Anisotropy: 1 (off), 2, 4, 8, 16, or one of these.
     constexpr int32_t kAnisotropyAuto = 0;   // 16x on a discrete GPU or an M-series iPad, 4x on other integrated ones
     constexpr int32_t kAnisotropyGame = -1;  // each texture's own setting, as on the 360

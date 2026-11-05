@@ -132,7 +132,7 @@ belongs to its owners.</sub>
 | **Linux** (x86-64) | [Download][dl-steamos-x86_64] the x86-64 SteamOS build, `SpeedBreaker-steamos-x86_64.tar.xz`, or [build from source](#building-from-source) | Tested here on SteamOS. Players reported v0.1.1 working on Fedora 44 (GeForce GTX 1080 Ti) and Ubuntu 24.04 (Intel Arc 140T). Other setups: reports welcome. |
 | **Mac** (Apple silicon) | [Download][dl-macos]<br>`SpeedBreaker-macos.dmg` | MacBook Pro (M1 Pro) on macOS 27 and Mac Studio (M4 Max) on macOS 26; macOS 15.6 (Sequoia) in a virtual machine. There is no Intel Mac build. |
 | **iPhone** and **iPad** | [Sideload the IPA](#iphone-and-ipad) (experimental), `SpeedBreaker-<version>-ios.ipa` on the [release page][releases], or [build it yourself](#iphone-and-ipad) with Xcode | iPhone 15 Pro Max and iPhone 18 Pro Max (iOS 27). iPad Pro 12.9-inch (M2, iPadOS 27) with a Backbone Pro. Not on the App Store. Those were Xcode-signed builds: the IPA itself hasn't been installed on a device yet. |
-| **Windows** (beta) | [Download][all-releases] `SpeedBreaker-0.2.2-windows-x64-beta.zip` from the Releases page; see [Windows (beta)](#windows-beta) | Here: a laptop with Intel UHD Graphics (60 Hz). Players have reported it running on NVIDIA GeForce (GTX 1070, RTX 4090, RTX 5070 Ti) and AMD Radeon (RX 6700 XT, RX 6750 XT) graphics. Intel Arc graphics and 120/144 Hz monitors haven't been tested yet: [reports welcome](#reporting-a-bug). |
+| **Windows** (beta) | [Download][all-releases] `SpeedBreaker-0.2.3-windows-x64-beta.zip` from the Releases page; see [Windows (beta)](#windows-beta) | Here: a laptop with Intel UHD Graphics (60 Hz). Players have reported it running on NVIDIA GeForce (GTX 1070, RTX 4090, RTX 5070 Ti) and AMD Radeon (RX 6700 XT, RX 6750 XT) graphics. Intel Arc graphics and 120/144 Hz monitors haven't been tested yet: [reports welcome](#reporting-a-bug). |
 | **Android** | Coming soon | |
 
 Each link downloads the newest release. Every file and its `.sha256` checksum file are on the
@@ -313,7 +313,7 @@ its name>`, e.g. `NFSMW_GPU=intel %command%` in Steam's launch options.
 
 The Windows version is a **beta**: here it has been tested on one laptop with Intel UHD
 Graphics and a 60 Hz screen, and players have reported it on NVIDIA and AMD graphics cards.
-Download `SpeedBreaker-0.2.2-windows-x64-beta.zip` from the [Releases page][all-releases],
+Download `SpeedBreaker-0.2.3-windows-x64-beta.zip` from the [Releases page][all-releases],
 right-click it, choose **Extract All**, and double-click
 `SpeedBreaker.exe` in the extracted folder (not inside the zip). SpeedBreaker isn't signed, so
 Windows may say **"Windows protected your PC"**: click **More info**, then **Run anyway**.
@@ -478,10 +478,12 @@ then Yes, puts it back.
 | Anti-Aliasing | On / Off | On |
 | Upscaling | Bicubic / Bilinear / FSR 1 | Bicubic. FSR 1 (AMD FidelityFX Super Resolution 1) keeps curves, wires and diagonals smooth when the picture is enlarged a lot, such as 1x on a 1440p or 4K screen; it is used only when the picture is enlarged, costs a little more GPU time, and makes foliage look slightly painted. Not on iPhone and iPad. |
 | Sharpening | 0.00 to 1.00 | 0.30 (0 turns it off). With FSR 1, the share of its sharpening pass's full strength. |
-| Anisotropic Filtering | Auto / Off / 2x / 4x / 8x / 16x / Original | Auto: 16x on dedicated graphics cards and M-series iPads, 4x elsewhere. Original uses each texture's own setting, as on the 360. |
+| Anisotropic Filtering | Auto / Off / 2x / 4x / 8x / 16x / Original | Auto: 16x on dedicated graphics cards and M-series iPads, and on a Mac at 1x Internal Resolution; 4x elsewhere. Original uses each texture's own setting, as on the 360. |
 | Mipmaps | On / Off | On, so distant textures don't shimmer |
 | Internal Resolution | Auto / 1x / 1.5x / 2x / 3x | Each entry shows the size it renders on your screen (1x (1280x720) on a 16:9 screen, 1x (1280x800) on a Steam Deck with Fill Screen), and Auto the one it picked. Auto: enough to cover your screen, within what the device can afford: the screen's own shape when that fits (a Steam Deck's 1280x800), otherwise whole scales (1x, 2x, 3x, or 3x2 on an ultrawide). On iPhone and iPad, Auto always picks 1x. With Fill Screen, the rows count the screen's shape: 1x on a 16:10 screen is 1280x800. |
 | Shadow Resolution | 1x / 1.5x / 2x | 1x (1600x1600), the Xbox 360's map size, now spread over the whole picture so shadows reach its sides (a little softer than on the 360). 1.5x and 2x draw the sun's shadow map larger for sharper shadow edges, at more GPU time and memory. |
+| Sharper UI | On / Off | On. Above 1x Internal Resolution, the menus' and the HUD's text, icons and panels are enlarged with a sharper filter instead of a blur, so they look crisper on 1440p and 4K screens. Where the finished picture is then enlarged to the screen by an uneven factor (for example 1440p to 4K), the UI's pixels also take FSR 1's edge-aware upscale and skip the anti-aliasing pass. The art, layout and colors are the game's own; at 1x on a 16:9 screen it changes nothing. |
+| Movie Upscaling | Original / Sharper | Sharper: the game's 720p movies (the intro and the cutscenes) are enlarged with a sharper, edge-aware filter: FSR 1's upscale where the movie reaches the screen at 1x, the same filter as Sharper UI above 1x, and a Lanczos filter on iPhone and iPad at 1x. Original keeps the movies as before. |
 
 **Game:** Language (English): French, German, Italian, Spanish, Dutch, Swedish, Danish, Polish or
 Finnish switch the menus and the race text (European languages show km/h) the next time the game
@@ -647,7 +649,7 @@ SpeedBreaker folder instead: `data/`, `data/game` and `cache/`.
 2. A notice says where the zip file went: your **Desktop** (on SteamOS, pick it up in Desktop
    Mode, or in the Desktop app on a Steam Frame), the **SpeedBreaker** folder in the Files app on
    iPhone and iPad, or the data folder above when there is no Desktop. Its name says which
-   version you were running, for example `speedbreaker-bug-report-v0.2.2-<date>_<time>.zip`.
+   version you were running, for example `speedbreaker-bug-report-v0.2.3-<date>_<time>.zip`.
 3. Open an [issue][issues], attach the zip, and say what you were doing, what you expected, what
    happened, and roughly how long into the session it happened.
 
