@@ -13,6 +13,7 @@ SB_PAL_ES_ADDRESS(0x82078AA8, 0x82078AA8)  // .rdata beside 0x82078ab8, delta +0
 SB_PAL_ES_ADDRESS(0x82078AB0, 0x82078AB0)  // .rdata beside 0x82078ab8, delta +0x0, same bytes; game/language.h
 SB_PAL_ES_ADDRESS(0x82134608, 0x82134608)  // outside .pdata, neighbour delta +0x0, exact; game/light_trails.cpp
 SB_PAL_ES_ADDRESS(0x82148818, 0x82148818)  // in sub_82148818 (exact), exact; game/language.cpp
+SB_PAL_ES_ADDRESS(0x8215CB08, 0x8215CB08)  // in sub_8215CB08 (reloc-equal), reloc-equal; game/quick_race_cops.cpp
 SB_PAL_ES_ADDRESS(0x82161000, 0x82161000)  // in sub_82161000 (reloc-equal), reloc-equal; game/hfr.cpp
 SB_PAL_ES_ADDRESS(0x82168028, 0x82168028)  // in sub_82168028 (reloc-equal), reloc-equal; game/hfr_diag.cpp
 SB_PAL_ES_ADDRESS(0x821B82E8, 0x821B82E8)  // in sub_821B82E8 (exact), exact; game/language.h
@@ -26,9 +27,25 @@ SB_PAL_ES_ADDRESS(0x822254B0, 0x822254B0)  // in sub_82225438 (reloc-equal), exa
 SB_PAL_ES_ADDRESS(0x82225730, 0x82225730)  // in sub_82225730 (reloc-equal), reloc-equal; game/glare.cpp
 SB_PAL_ES_ADDRESS(0x82225A40, 0x82225A40)  // in sub_82225730 (reloc-equal), exact; game/glare.h
 SB_PAL_ES_ADDRESS(0x8222ADC0, 0x8222ADC0)  // in sub_8222ADC0 (reloc-equal), reloc-equal; game/hfr_diag.cpp
+SB_PAL_ES_ADDRESS(0x82234A68, 0x82234A68)  // in sub_82234A68 (exact), exact; game/quick_race_cops.cpp
+SB_PAL_ES_ADDRESS(0x822824C8, 0x822824E0)  // in sub_822824C8 (exact), exact; game/quick_race_cops.cpp
 SB_PAL_ES_ADDRESS(0x82282A58, 0x82282A70)  // in sub_82282A58 (reloc-equal), exact; game/language.cpp
 SB_PAL_ES_ADDRESS(0x82282F00, 0x82282F18)  // in sub_82282E80 (reloc-equal), exact; game/language.h
 SB_PAL_ES_ADDRESS(0x822BCBC8, 0x822BCBD0)  // in sub_822BCBC8 (reloc-equal), exact; game/language.cpp
+SB_PAL_ES_ADDRESS(0x822C4FB8, 0x822C4FC0)  // in sub_822C4FB8 (reloc-equal), exact; game/quick_race_cops.cpp
+SB_PAL_ES_ADDRESS(0x822E23D0, 0x822E23D8)  // in sub_822E23D0 (reloc-equal), exact; game/quick_race_cops.cpp
+SB_PAL_ES_ADDRESS(0x822E4648, 0x822E4650)  // outside .pdata, neighbour delta +0x8, exact; game/quick_race_cops.cpp
+SB_PAL_ES_ADDRESS(0x822E4680, 0x822E4688)  // outside .pdata, neighbour delta +0x8, exact; game/quick_race_cops.cpp
+SB_PAL_ES_ADDRESS(0x822E46B8, 0x822E46C0)  // outside .pdata, neighbour delta +0x8, exact; game/quick_race_cops.cpp
+SB_PAL_ES_ADDRESS(0x822E4750, 0x822E4758)  // outside .pdata, neighbour delta +0x8, exact; game/quick_race_cops.cpp
+SB_PAL_ES_ADDRESS(0x822E4758, 0x822E4760)  // in sub_822E4758 (reloc-equal), exact; game/quick_race_cops.cpp
+SB_PAL_ES_ADDRESS(0x822E47F0, 0x822E47F8)  // in sub_822E47F0 (reloc-equal), exact; game/quick_race_cops.cpp
+SB_PAL_ES_ADDRESS(0x822E4838, 0x822E4840)  // in sub_822E4838 (reloc-equal), exact; game/quick_race_cops.cpp
+SB_PAL_ES_ADDRESS(0x822E4908, 0x822E4910)  // in sub_822E4908 (reloc-equal), exact; game/quick_race_cops.cpp
+SB_PAL_ES_ADDRESS(0x822E4958, 0x822E4960)  // in sub_822E4958 (reloc-equal), exact; game/quick_race_cops.cpp
+SB_PAL_ES_ADDRESS(0x822E49A8, 0x822E49B0)  // in sub_822E49A8 (reloc-equal), exact; game/quick_race_cops.cpp
+SB_PAL_ES_ADDRESS(0x822E49F0, 0x822E49F8)  // outside .pdata, neighbour delta +0x8, exact; game/quick_race_cops.cpp
+SB_PAL_ES_ADDRESS(0x822E4A00, 0x822E4A08)  // outside .pdata, neighbour delta +0x8, exact; game/quick_race_cops.cpp
 SB_PAL_ES_ADDRESS(0x823AFC68, 0x823AFDC8)  // in sub_823AFC68 (reloc-equal), exact; game/hfr.cpp
 SB_PAL_ES_ADDRESS(0x823B48E0, 0x823B4A40)  // in sub_823B4740 (reloc-equal), exact; game/language.h
 SB_PAL_ES_ADDRESS(0x8243B0B0, 0x8243B218)  // outside .pdata, neighbour delta +0x168, exact; game/hfr_diag.cpp
@@ -44,6 +61,14 @@ SB_PAL_ES_ADDRESS(0x82456030, 0x82456198)  // in sub_82456030 (reloc-equal), rel
 SB_PAL_ES_ADDRESS(0x824E6220, 0x824E63D8)  // in sub_824E6220 (reloc-equal), reloc-equal; game/hfr_diag.cpp
 SB_PAL_ES_ADDRESS(0x824E63D4, 0x824E658C)  // in sub_824E6220 (reloc-equal), exact; game/light_trails.h
 SB_PAL_ES_ADDRESS(0x824E9C38, 0x824E9DF0)  // in sub_824E9C38 (reloc-equal), reloc-equal; game/hfr.cpp
+SB_PAL_ES_ADDRESS(0x825616E8, 0x825618E0)  // in sub_825616E8 (exact), exact; game/quick_race_cops.cpp
+SB_PAL_ES_ADDRESS(0x825617E8, 0x825619E0)  // in sub_825617E8 (reloc-equal), exact; game/quick_race_cops.cpp
+SB_PAL_ES_ADDRESS(0x825618B8, 0x82561AB0)  // in sub_825618B8 (reloc-equal), exact; game/quick_race_cops.cpp
+SB_PAL_ES_ADDRESS(0x82561F00, 0x825620F8)  // in sub_82561F00 (reloc-equal), exact; game/quick_race_cops.cpp
+SB_PAL_ES_ADDRESS(0x825621A8, 0x825623A0)  // in sub_825621A8 (reloc-equal), exact; game/quick_race_cops.cpp
+SB_PAL_ES_ADDRESS(0x82562620, 0x82562818)  // in sub_82562620 (reloc-equal), exact; game/quick_race_cops.cpp
+SB_PAL_ES_ADDRESS(0x825629B8, 0x82562BB0)  // in sub_825629B8 (reloc-equal), exact; game/quick_race_cops.cpp
+SB_PAL_ES_ADDRESS(0x82562C48, 0x82562E40)  // in sub_82562C48 (reloc-equal), exact; game/quick_race_cops.cpp
 SB_PAL_ES_ADDRESS(0x82593A58, 0x82593C50)  // in sub_82593A58 (reloc-equal), reloc-equal; debug/timeline.cpp
 SB_PAL_ES_ADDRESS(0x82597498, 0x82597690)  // in sub_82597498 (exact), exact; debug/timeline.cpp
 SB_PAL_ES_ADDRESS(0x82597FF0, 0x825981E8)  // in sub_82597FF0 (reloc-equal), reloc-equal; game/hfr.cpp
@@ -69,7 +94,7 @@ SB_PAL_ES_ADDRESS(0x8290965C, 0x8290965C)  // .data (same layout), same bytes; g
 SB_PAL_ES_ADDRESS(0x82909730, 0x82909730)  // .data (same layout), same bytes; game/hfr.cpp
 SB_PAL_ES_ADDRESS(0x82909770, 0x82909770)  // .data (same layout), same bytes; game/hfr.cpp
 SB_PAL_ES_ADDRESS(0x82A2C480, 0x82A2C480)  // .data (same layout), same bytes; game/hfr.cpp
-SB_PAL_ES_ADDRESS(0x82A2C684, 0x82A2C684)  // .data (same layout), same bytes; game/split_screen.h
+SB_PAL_ES_ADDRESS(0x82A2C684, 0x82A2C684)  // .data (same layout), same bytes; game/quick_race_cops.h, game/split_screen.h
 SB_PAL_ES_ADDRESS(0x82A2CB6C, 0x82A2CB6C)  // .data (same layout), same bytes; game/hfr.cpp, game/hfr_diag.cpp, hid/input.cpp
 SB_PAL_ES_ADDRESS(0x82A2CC08, 0x82A2CC08)  // .data (same layout), same bytes; game/hfr.cpp
 SB_PAL_ES_ADDRESS(0x82A2CF40, 0x82A2CF40)  // .data (same layout), same bytes; game/hfr.cpp

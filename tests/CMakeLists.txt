@@ -198,6 +198,10 @@ sb_test(swapchain_policy_test SOURCES ${RT}/video/swapchain_policy.cpp)
 # pointer-keyed matrix cache and the hook's resend (game/front_end_matrix.h,
 # header only; the "EVENT HANDLER" label above the boot PSA).
 sb_test(front_end_matrix_test)
+# Quick Race's Cops row: where a race type's cops byte is beside the game's
+# own rows' bytes, and when the row is offered (game/quick_race_cops.h, header
+# part only).
+sb_test(quick_race_cops_test)
 # Settings > Display > Fullscreen against the window's own state
 # (video/fullscreen_policy.h, header only): the green button and other system
 # changes never change the saved setting, the menu does; presenter.cpp is read

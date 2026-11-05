@@ -9,7 +9,6 @@
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
-#include <cstring>
 
 namespace
 {
@@ -28,8 +27,13 @@ namespace
     constexpr uint32_t kToggleWidgetCreate = 0x822E46B8; // FEToggleWidget(this, bool)
     constexpr uint32_t kAddToggleOption = 0x822E23D0;   // UIWidgetMenu::AddToggleOption(menu, widget, bool)
     constexpr uint32_t kSetLanguageHash = 0x822824C8;   // FEngSetLanguageHash(object, hash)
-    constexpr uint32_t kTrackDirectionVtable = 0x820A5BE0;
-    constexpr uint32_t kVtableBytes = 15 * 4;
+    // Track Direction's vtable (0x820A5BE0 in .rdata), slot by slot: its own
+    // destructor, Act and Draw, then FEToggleWidget's and FEStatWidget's.
+    // Built from the functions rather than copied from .rdata, whose bytes are
+    // code pointers and so differ by release: region::Addr maps each function
+    // (on the PAL disc they make up its own Track Direction vtable,
+    // 0x820A5CA8).
+    constexpr uint32_t kVtableSlots = 15;
     constexpr uint32_t kWidgetBytes = 92;
     constexpr uint32_t kVtableBlinkArrows = 56;         // slot offsets
     constexpr uint32_t kVtableDraw = 12;
@@ -45,11 +49,29 @@ namespace
         uint32_t vt = s_vtable.load(std::memory_order_acquire);
         if (vt)
             return vt;
-        void* host = g_userHeap.Alloc(kVtableBytes);
+        void* host = g_userHeap.Alloc(4 * kVtableSlots);
         if (!host)
             return 0;
-        memcpy(host, base + region::Addr(kTrackDirectionVtable), kVtableBytes);
+        const uint32_t slots[kVtableSlots] = {
+            region::Addr(0x825618B8),  // destructor
+            region::Addr(0x825616E8),  // Act (hooked below)
+            region::Addr(0x822E4750),  // CheckMouse
+            region::Addr(0x825617E8),  // Draw (hooked below)
+            region::Addr(0x822E4758),  // Position
+            region::Addr(0x822E4908),  // Show
+            region::Addr(0x822E4958),  // Hide
+            region::Addr(0x822E47F0),  // Enable
+            region::Addr(0x822E4838),  // Disable
+            region::Addr(0x822E49A8),  // SetFocus
+            region::Addr(0x822E49F0),  // UnsetFocus
+            region::Addr(0x82234A68),  // SetPos
+            region::Addr(0x822E4648),  // SetPosX
+            region::Addr(0x822E4680),  // SetPosY
+            region::Addr(0x822E4A00),  // BlinkArrows
+        };
         vt = g_memory.MapVirtual(host);
+        for (uint32_t i = 0; i < kVtableSlots; i++)
+            PPC_STORE_U32(vt + 4 * i, slots[i]);
         s_vtable.store(vt, std::memory_order_release);
         fprintf(stderr, "[cops] Quick Race's race options get a Cops row (NFSMW_QUICK_RACE_COPS=0 for none)\n");
         return vt;
@@ -61,12 +83,8 @@ namespace
         return vt != 0 && widget != 0 && PPC_LOAD_U32(widget) == vt;
     }
 
-    void Call(PPCContext& ctx, uint8_t* base, uint32_t usa)
-    {
-        g_memory.FindFunction(region::Addr(usa))(ctx, base);
-    }
-
-    void CallIndirect(PPCContext& ctx, uint8_t* base, uint32_t guest)
+    // A guest function, by the running release's address.
+    void Call(PPCContext& ctx, uint8_t* base, uint32_t guest)
     {
         g_memory.FindFunction(guest)(ctx, base);
     }
@@ -110,18 +128,18 @@ namespace
         ctx.r4.u64 = 0;
         ctx.r5.u64 = 0;
         ctx.r6.u64 = 0;
-        Call(ctx, base, kMalloc);
+        Call(ctx, base, region::Addr(kMalloc));
         const uint32_t widget = ctx.r3.u32;
         if (widget)
         {
             ctx.r3.u64 = widget;
             ctx.r4.u64 = 1;
-            Call(ctx, base, kToggleWidgetCreate);
+            Call(ctx, base, region::Addr(kToggleWidgetCreate));
             PPC_STORE_U32(widget, vt);
             ctx.r3.u64 = menu;
             ctx.r4.u64 = widget;
             ctx.r5.u64 = 1;
-            Call(ctx, base, kAddToggleOption);
+            Call(ctx, base, region::Addr(kAddToggleOption));
         }
         ctx.lr = lr;
     }
@@ -150,9 +168,9 @@ namespace
         PPC_STORE_U8(widget + kWidgetChanged, 1);
         ctx.r3.u64 = widget;
         ctx.r4.u64 = message;
-        CallIndirect(ctx, base, PPC_LOAD_U32(vt + kVtableBlinkArrows));
+        Call(ctx, base, PPC_LOAD_U32(vt + kVtableBlinkArrows));
         ctx.r3.u64 = widget;
-        CallIndirect(ctx, base, PPC_LOAD_U32(vt + kVtableDraw));
+        Call(ctx, base, PPC_LOAD_U32(vt + kVtableDraw));
         ctx.lr = lr;
     }
 
@@ -165,10 +183,10 @@ namespace
         const bool on = cops && PPC_LOAD_U8(cops) != 0;
         ctx.r3.u64 = PPC_LOAD_U32(widget + kWidgetValue);
         ctx.r4.u64 = on ? kValueOn : kValueOff;
-        Call(ctx, base, kSetLanguageHash);
+        Call(ctx, base, region::Addr(kSetLanguageHash));
         ctx.r3.u64 = PPC_LOAD_U32(widget + kWidgetLabel);
         ctx.r4.u64 = kLabelCops;
-        Call(ctx, base, kSetLanguageHash);
+        Call(ctx, base, region::Addr(kSetLanguageHash));
         ctx.lr = lr;
     }
 }
@@ -181,10 +199,10 @@ namespace game::quick_race_cops
     }
 }
 
-// The hooks need each function's PAL name (region/pal_es_names.h) in a build
-// with the PAL code; until survey/region_map.py has mapped them, a PAL build
-// leaves the option out.
-#if !SB_PAL_ES || defined(SB_PAL_ES_sub_82561F00)
+// The PAL (Spanish) release runs the same hooks: SB_HOOK reaches its own
+// copies of these functions (region/pal_es_names.h), and every guest address
+// above goes through region::Addr (region/pal_es_addresses.inc), both written
+// by survey/region_map.py table.
 
 // UIQRTrackOptions' setups (r3 = the screen). Drag (sub_82562408) is left as is.
 #define SB_COPS_SETUP(name) \
@@ -240,5 +258,3 @@ SB_HOOK(sub_822C4FB8)
     SB_ORIGINAL(sub_822C4FB8)(ctx, base);
     PPC_STORE_U8(settings + kSettingsCops, cops);
 }
-
-#endif
