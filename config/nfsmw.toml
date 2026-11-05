@@ -234,6 +234,19 @@ name = "UltrawideMirror"
 address = 0x8245CED8
 registers = ["f1", "f2", "f3", "f4"]
 
+# ... and the sun shadow map's fit (sub_82456030, views 1 and 2 -> 15 and 16):
+# it rebuilds the camera's frustum from the camera's FOV angle and the target's
+# shape, not from the projection the hook above widened, and fits the scene's
+# 1600x1600 shadow map around that (narrower than the view drawn, at 16:9
+# too). Before `fdivs f10,f13,f30` (P00 = 1 / tan(half the horizontal FOV)):
+# f30 = that tangent, f2 / f1 = the vertical one's sine and cosine (the next
+# instruction divides them), r29 = the view; the hook refits them to the
+# view's stored projection.
+[[midasm_hook]]
+name = "UltrawideShadowFit"
+address = 0x82456240
+registers = ["r29", "f30", "f2", "f1"]
+
 # Game time in whole vblanks (runtime/game/frame_time.cpp): the frame's
 # measured time (milliseconds, 16.16 fixed point) as the main loop
 # (sub_823B0008) passes it to the frame (sub_823AFE20) ...

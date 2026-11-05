@@ -1753,6 +1753,14 @@ vec3 srgbToLinear(vec3 c)
     return mix(hi, lo, lessThanEqual(c, vec3(0.04045)));
 }
 
+vec3 linearToSrgb(vec3 c)
+{
+    c = clamp(c, 0.0, 1.0);
+    vec3 lo = c * 12.92;
+    vec3 hi = 1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055;
+    return mix(hi, lo, lessThanEqual(c, vec3(0.0031308)));
+}
+
 // hdr::LocalScale: the share of the added light this pixel keeps, so that
 // its neighbourhood (kHdrAverageCs's 3x3 cells' mean v^8, between cell
 // centres) adds at most localBudget of SDR white; 0 turns it off.
@@ -1804,11 +1812,20 @@ void main()
     float peak = framePeak(p.peak, st.smoothed);
     vec3 scene = expand(srgbToLinear(texture(sceneTex, uv).rgb), peak, localScale(uv, peak));
     vec4 ui = texture(uiTex, uv);
-    // ImGui blends into a transparent target with SRC_ALPHA, so the stored
-    // RGB is premultiplied: undo that, decode sRGB, premultiply in linear.
-    vec3 uiStraight = ui.a > 0.0 ? ui.rgb / ui.a : vec3(0.0);
-    vec3 uiLinear = srgbToLinear(uiStraight) * ui.a;
-    vec3 outLinear = scene * (1.0 - ui.a) + uiLinear;
+    // hdr::BlendUi: ImGui blends into a transparent target with SRC_ALPHA,
+    // so the stored RGB is premultiplied, sRGB-encoded. It goes over the
+    // scene as in SDR (where ImGui draws on the UNORM swapchain): blended in
+    // sRGB-encoded values, not linear light, which let a dark translucent
+    // panel show the game far brighter in HDR. The scene up to SDR white is
+    // encoded, the UI blended over it, decoded; the light above SDR white is
+    // removed where the UI covers the pixel (hdr::UiHighlightShare, gone
+    // from coverage 1/16 = hdr::kUiSdrCoverage up, smoothstep below it for
+    // anti-aliased fringes): the overlay stays at standard brightness, so
+    // the scene under it is SDR, and the UI's own white stays SDR white.
+    // With no UI (a = 0) the highlights keep their full strength.
+    vec3 sdr = min(scene, vec3(1.0));
+    vec3 uiOver = clamp(linearToSrgb(sdr) * (1.0 - ui.a) + ui.rgb, 0.0, 1.0);
+    vec3 outLinear = srgbToLinear(uiOver) + (scene - sdr) * (1.0 - smoothstep(0.0, 0.0625, ui.a));
     if (p.pq != 0u)
         outLinear = nitsToPq(rec709ToRec2020(outLinear) * p.sdrWhiteNits);
     color = vec4(outLinear, 1.0);
