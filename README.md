@@ -549,8 +549,10 @@ your own disc, and SpeedBreaker checks it file by file.
 **Which version of the game do I need?**
 The Xbox 360 **USA release (NTSC-U, English)** or the **European (PAL) release with Spanish
 movies and speech** (since v0.2.0). The installer checks your image and tells you which one it
-found, or that it's a different version. Other PAL discs (German and the rest), Japanese discs and
-re-releases have different code, so the installer refuses them for now. Installing one disc
+found, or that it's a different version. The **German (PAL) disc** runs in a build made from source
+with its code (`ppc-pal-de/`, [Building from source](#building-from-source) step 2); the downloads don't
+include it yet, and their installer says so. Other PAL discs, Japanese discs and re-releases have
+different code, so the installer refuses them for now. Installing one disc
 beside the other keeps both installs. Both discs hold the game's text in ten languages: pick one
 in Settings > Game > Language. Games on Demand packages aren't supported, and no title update is
 used.
@@ -575,6 +577,7 @@ No. Xbox 360 saves can't be imported, so your career starts fresh.
 It always says what to do. The usual causes:
 
 - *Another game, or an unsupported version:* it isn't the USA or the European (PAL) Spanish disc.
+  The German disc is refused by a build without its code (see above).
 - *Truncated image:* most often a copy cut off at 4 GB by a FAT32 drive. Copy it again from your
   own backup, onto a drive that can hold files over 4 GB.
 - *Not a disc image,* a Games on Demand package, or a video-only DVD image.
@@ -665,8 +668,9 @@ pull requests are handled.
 - **Languages:** the movies and the speech (the police radio, the voices in the scenes) stay in
   the disc's language in every language: English on the USA disc, Spanish on the PAL one. Fan
   translations aren't supported.
-- **Discs:** only the USA and the European (PAL) Spanish discs install; German and the other PAL
-  discs are still to come.
+- **Discs:** only the USA and the European (PAL) Spanish discs install with the downloads; the
+  German one needs a build from source with its code ([Building from source](#building-from-source) step 2), and the
+  other PAL discs are still to come.
 - **Smooth Motion on SteamOS and Linux:** offered only at 120 Hz and 90 Hz, and not on the Steam
   Deck, where busy scenes can't keep up and it would ghost.
 - **Steering wheels are experimental:** the steering feel is still being tuned; see
@@ -791,6 +795,15 @@ shasum -a 256 game/files-pal-es/default.xex
 # must print aad15fc218d034de3131f746e0b763dd8049a40dd676efc87667fcaf4fc72694
 tools/XenonRecomp/build/XenonRecomp/XenonRecomp config/pal-es/nfsmw.toml tools/XenonRecomp/XenonUtils/ppc_context.h
 python3 scripts/region_ppc.py ppc-pal-es pal_es
+
+# Optional, for the German (PAL) disc too, the same way (ppc-pal-de/; without it the build refuses
+# that disc). docs/REGION_PAL_DE.md says how its tables were made.
+mkdir -p game/files-pal-de ppc-pal-de
+tools/extract-xiso/build/extract-xiso -d game/files-pal-de -x /path/to/your-german-backup.iso
+shasum -a 256 game/files-pal-de/default.xex
+# must print 23ece29d18724ea28971d52f936964d127148bd2359ff24795da7442b9069bf4
+tools/XenonRecomp/build/XenonRecomp/XenonRecomp config/pal-de/nfsmw.toml tools/XenonRecomp/XenonUtils/ppc_context.h
+python3 scripts/region_ppc.py ppc-pal-de pal_de
 ```
 
 #### 3. Build

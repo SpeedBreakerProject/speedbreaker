@@ -73,3 +73,40 @@ else()
     set(SB_HAVE_PAL_ES OFF CACHE INTERNAL "ppc-pal-es is linked")
     message(STATUS "PAL (Spanish) release: not linked (no ppc-pal-es/, or SB_PAL_ES=OFF)")
 endif()
+
+# The European (PAL, German) release's code, the same way (../ppc-pal-de:
+# XenonRecomp with config/pal-de/nfsmw.toml on that disc's default.xex, then
+# scripts/region_ppc.py ppc-pal-de pal_de). Its address table and names
+# (runtime/region/pal_de_addresses.inc, pal_de_names.h; docs/REGION_PAL_DE.md)
+# must be there too.
+# SB_PAL_DE: AUTO (when ppc-pal-de/ is there), ON (required) or OFF.
+set(SB_PAL_DE AUTO CACHE STRING "Link the PAL (German) release's recompiled code: AUTO, ON or OFF")
+file(GLOB PPC_PAL_DE_SOURCES ${ROOT}/ppc-pal-de/*.cpp)
+if(SB_PAL_DE STREQUAL "ON" AND NOT PPC_PAL_DE_SOURCES)
+    message(FATAL_ERROR "SB_PAL_DE=ON, but ppc-pal-de/ has no generated sources")
+endif()
+if(PPC_PAL_DE_SOURCES AND NOT SB_PAL_DE STREQUAL "OFF")
+    file(READ ${ROOT}/ppc-pal-de/ppc_recomp_shared.h _sb_pal_de_head LIMIT 64)
+    if(NOT _sb_pal_de_head MATCHES "^// Namespaced by scripts/region_ppc.py: pal_de")
+        message(FATAL_ERROR "ppc-pal-de/ isn't namespaced: run python3 scripts/region_ppc.py ppc-pal-de pal_de")
+    endif()
+    foreach(_sb_generated pal_de_addresses.inc pal_de_names.h)
+        if(NOT EXISTS ${ROOT}/runtime/region/${_sb_generated})
+            message(FATAL_ERROR "ppc-pal-de/ is there, but runtime/region/${_sb_generated} isn't: run "
+                "python3 -I survey/region_map.py table --region pal-de <usa dir> <de dir> <funcmap.tsv> (docs/REGION_PAL_DE.md)")
+        endif()
+    endforeach()
+    add_library(NfsmwRecompPalDeLib STATIC ${PPC_PAL_DE_SOURCES})
+    target_compile_features(NfsmwRecompPalDeLib PUBLIC cxx_std_20)
+    target_include_directories(NfsmwRecompPalDeLib PRIVATE
+        ${ROOT}/ppc-pal-de
+        ${ROOT}/tools/XenonRecomp/XenonUtils
+        ${ROOT}/tools/XenonRecomp/thirdparty/simde)
+    get_target_property(_sb_ppc_options NfsmwRecompLib COMPILE_OPTIONS)
+    target_compile_options(NfsmwRecompPalDeLib PRIVATE ${_sb_ppc_options})
+    set(SB_HAVE_PAL_DE ON CACHE INTERNAL "ppc-pal-de is linked")
+    message(STATUS "PAL (German) release: linked (ppc-pal-de/)")
+else()
+    set(SB_HAVE_PAL_DE OFF CACHE INTERNAL "ppc-pal-de is linked")
+    message(STATUS "PAL (German) release: not linked (no ppc-pal-de/, or SB_PAL_DE=OFF)")
+endif()

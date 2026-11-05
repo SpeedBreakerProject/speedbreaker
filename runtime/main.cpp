@@ -283,8 +283,8 @@ namespace
 #endif
 }
 
-// The installed disc's release, before settings load: the PAL (Spanish)
-// disc's own language, Spanish, is the Language row's default there (a
+// The installed disc's release, before settings load: a PAL disc's own
+// language (Spanish, German) is the Language row's default there (a
 // settings.toml a save wrote keeps the language it holds). Cheap: the
 // installs' default.xex sizes (install/locate.h).
 static void SetReleaseDefaults(int argc, char** argv)
@@ -298,9 +298,10 @@ static void SetReleaseDefaults(int argc, char** argv)
     }
     else if (std::optional<install::GameInstall> game = install::FindGameInstall())
         manifest = game->manifest;
-    if (manifest && manifest->region == "pal-es")
-        settings::SetDeviceDefault(settings::Id::GameLanguage, game::language::kSpanish,
-            "the European (PAL, Spanish) disc's language");
+    if (!manifest)
+        return;
+    if (const int32_t language = game::language::DiscLanguage(manifest->region); language >= 0)
+        settings::SetDeviceDefault(settings::Id::GameLanguage, language, std::format("the language of the {} disc", manifest->regionName));
 }
 
 int main(int argc, char** argv)
@@ -612,23 +613,24 @@ int main(int argc, char** argv)
             if (!region::Available(release))
             {
                 fprintf(stderr, "[runtime] %s is the %.*s release's default.xex, and this build has no recompiled code "
-                    "for it (built without ppc-pal-es/)\n", xexPath.string().c_str(), int(known->regionName.size()),
-                    known->regionName.data());
+                    "for it (built without ppc-%.*s/)\n", xexPath.string().c_str(), int(known->regionName.size()),
+                    known->regionName.data(), int(known->region.size()), known->region.data());
                 return 1;
             }
             region::Select(release);
             report::RefreshGuestSymbols();
-            // A first run that installed the PAL disc just now loaded the
-            // settings before the disc was known: its language, Spanish,
-            // becomes the default and this run's (SetReleaseDefaults does it
-            // before loading on later runs).
-            if (release == region::Release::PalEs && settings::IsDefault(settings::Id::GameLanguage)
-                && !settings::EnvOverride(settings::Id::GameLanguage) && settings::GetInt(settings::Id::GameLanguage) != game::language::kSpanish)
+            // A first run that installed a PAL disc just now loaded the
+            // settings before the disc was known: its language (Spanish,
+            // German) becomes the default and this run's (SetReleaseDefaults
+            // does it before loading on later runs).
+            const int32_t language = game::language::DiscLanguage(known->region);
+            if (language >= 0 && settings::IsDefault(settings::Id::GameLanguage)
+                && !settings::EnvOverride(settings::Id::GameLanguage) && settings::GetInt(settings::Id::GameLanguage) != language)
             {
-                settings::SetDeviceDefault(settings::Id::GameLanguage, game::language::kSpanish,
-                    "the European (PAL, Spanish) disc's language, installed this run");
+                settings::SetDeviceDefault(settings::Id::GameLanguage, language,
+                    std::format("the language of the {} disc, installed this run", known->regionName));
                 settings::Reset(settings::Id::GameLanguage);
-                game::language::SetLaunchLanguage(game::language::kSpanish);
+                game::language::SetLaunchLanguage(language);
             }
         }
     }

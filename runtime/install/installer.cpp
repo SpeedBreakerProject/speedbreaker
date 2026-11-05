@@ -16,6 +16,8 @@
 #include <format>
 #include <fstream>
 #include <set>
+#include <string>
+#include <vector>
 
 #include <fcntl.h>
 #ifdef _WIN32
@@ -36,9 +38,25 @@ namespace install
         namespace fs = std::filesystem;
 
         constexpr const char* kGameName = "Need for Speed: Most Wanted";
+
         // The releases the compiled-in manifests were generated from
-        // (config/nfsmw.toml, config/nfsmw-pal-es.toml).
-        constexpr const char* kReleases = "the USA and the European (PAL, Spanish) Xbox 360 releases";
+        // (config/nfsmw.toml, config/pal-es/, config/pal-de/): "the USA and
+        // the European (PAL, Spanish) Xbox 360 releases".
+        std::string Releases()
+        {
+            std::vector<std::string> names;
+            for (const Manifest* m : GameManifests())
+            {
+                std::string name(m->regionName);
+                if (name.starts_with("Europe "))
+                    name = "European " + name.substr(7);
+                names.push_back("the " + name);
+            }
+            std::string text;
+            for (size_t i = 0; i < names.size(); i++)
+                text += (i == 0 ? "" : i + 1 == names.size() ? " and " : ", ") + names[i];
+            return text + " Xbox 360 releases";
+        }
         constexpr size_t kChunk = 4 << 20;
         // Room beyond the files themselves: directory blocks, the marker, and
         // not filling the user's disk to the last byte.
@@ -654,6 +672,16 @@ namespace install
         // Same title, different executable: another region or revision. The
         // recompiled code matches one executable byte for byte, so nothing
         // else can run, whatever else is on the disc.
+        // A release SpeedBreaker supports, but not this build (its code isn't
+        // linked): say so before copying anything.
+        if (const ReleaseWithoutCodeInfo other = ReleaseWithoutCode(found); IsGameManifest(manifest) && !other.regionName.empty())
+        {
+            r = Fail(Error::UnsupportedVersion, std::format("{} is the {} disc of {}. SpeedBreaker can run it, but this build "
+                "doesn't include its code: it needs a build made from source with {}/ (README, step 2). This build supports {}.",
+                What(source), other.regionName, kGameName, other.codeFolder, Releases()), id.file->path);
+            r.foundHash = found;
+            return r;
+        }
         std::string supported, damaged;
         if (IsGameManifest(manifest))
         {
@@ -663,7 +691,7 @@ namespace install
                 if (id.file->size == m->Xex().size)
                     damaged = ", unless this one is a damaged dump";
             }
-            supported = std::format("Only {} are supported (default.xex {}){}", kReleases, supported, damaged);
+            supported = std::format("Only {} are supported (default.xex {}){}", Releases(), supported, damaged);
         }
         else
             supported = std::format("Only default.xex {} is supported{}", std::string(xex.sha256),
