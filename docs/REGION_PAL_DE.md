@@ -17,7 +17,12 @@ runtime's hooks or for another region.
 | `runtime/install/manifest_pal_de.inc` | `scripts/gen_install_manifest.py` |
 
 They hold addresses, names, sizes and hashes only, as their Spanish
-counterparts do.
+counterparts do. The German manifest is a game manifest only in a build that
+links `ppc-pal-de/` (`SB_PAL_DE`); a build without it, like the downloads for
+now, refuses the German disc up front and says it needs a build with its code.
+Without the images, `tests/region_addresses_check.py . --region pal-de` checks
+that `config/pal-de/` is still `config/` translated: a hook added to
+`config/nfsmw.toml` and missing here fails it.
 
 ## What the survey found
 

@@ -8,17 +8,18 @@ it's built into the game).
 
 ### What's new
 
-- **The German (PAL) disc is supported.** It plays like the Spanish one: its own code, German
-  movies and police radio, and German as the Language row's default. It installs beside a USA or
-  Spanish install, with its saves in their own folder (save-pal-de/).
+- **The German (PAL) disc, in builds from source.** A build with its code (README, Building from
+  source, step 2) plays it like the Spanish one: its own code, German movies and police radio, and
+  German as the Language row's default. It installs beside a USA or Spanish install, with its saves
+  in their own folder (save-pal-de/). The downloads don't include it yet: their installer refuses
+  the German disc up front, saying it needs a build with its code.
 
 ### More about it
 
-- The installer tells three discs apart. A default.xex of a size two regions share would be told
-  apart by the install's marker or its hash (none does today).
-- For builders: ppc-pal-de/ from config/pal-de/ (README step 2; -DSB_PAL_DE=OFF leaves it out).
+- For builders: ppc-pal-de/ from config/pal-de/ (-DSB_PAL_DE=OFF leaves it out).
   survey/func_map.py and survey/region_map.py --region pal-de made its tables, and do the same for
   another region (docs/REGION_PAL_DE.md).
+
 ## v0.2.2
 
 ### Fixed

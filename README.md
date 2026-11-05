@@ -74,12 +74,11 @@ and a settings menu you can open mid-race.
 - **Two-player split screen** (Quick Race > Split Screen), with two controllers.
 - **USB steering wheels (experimental).** Tested with a Logitech G29 on a Mac, force feedback
   included; the steering feel is still being tuned.
-- **Three discs: USA, and the European (PAL) Spanish and German ones.** One app plays any of
-  them; a PAL disc brings its own movies and police radio (Spanish or German), and installs
-  beside the other installs, each with its own saves.
+- **Two discs: USA and European (PAL) Spanish.** One app plays either; the PAL disc brings its
+  Spanish movies and police radio, and installs beside a USA install, each with its own saves.
 - **Ten languages.** English, French, German, Italian, Spanish, Dutch, Swedish, Danish, Polish
   and Finnish, from the disc's own text (Settings > Game > Language). On the USA disc the movies
-  and the speech stay in English; on a PAL disc they're in its language (Spanish or German).
+  and the speech stay in English; on the PAL disc they're Spanish.
 - **HDR (new).** On an HDR display (a Mac with one, SteamOS and the Steam Deck OLED with HDR on,
   or a Windows or Linux PC in HDR) the sun, headlights and lit signs go brighter than white,
   while the rest of the picture stays as it was. Off by default.
@@ -145,7 +144,7 @@ should say OK. What changed in each release is in [CHANGELOG.md](CHANGELOG.md).
 ### System requirements
 
 - **Everyone:** a disc image of your own Xbox 360 disc, the **USA (NTSC-U)** release or the
-  **European (PAL) release with Spanish or German movies and speech** (see
+  **European (PAL) release with Spanish movies and speech** (see
   [Quick start](#quick-start)), about **7.2 GB** of free space, and a display running at about
   **60 Hz** (or 120 Hz, 180 Hz or 240 Hz on SteamOS and Linux).
 - **Split screen:** two controllers.
@@ -172,8 +171,8 @@ should say OK. What changed in each release is in [CHANGELOG.md](CHANGELOG.md).
 
 ## Quick start
 
-1. **Back up your own disc.** SpeedBreaker supports three versions of the game: the **USA (NTSC-U,
-   English) Xbox 360 disc** and the **European (PAL) discs with Spanish or German movies and speech**. The installer takes a full `.iso`, a trimmed XISO, or a folder with
+1. **Back up your own disc.** SpeedBreaker supports two versions of the game: the **USA (NTSC-U,
+   English) Xbox 360 disc** and the **European (PAL) disc with Spanish movies and speech**. The installer takes a full `.iso`, a trimmed XISO, or a folder with
    the extracted disc files. No title update is needed. SpeedBreaker doesn't provide game files
    or disc images, or link to them.
 2. **Get SpeedBreaker.** [Download it](#download) for Steam Deck, Steam Machine and Steam Frame
@@ -373,7 +372,7 @@ SpeedBreaker isn't on the App Store. There are two ways to get it onto your iPho
 
 Once SpeedBreaker is on your device:
 
-1. **Get your disc image onto it** (the USA, or the European (PAL) Spanish or German disc). Copy the `.iso` into **Files > On My iPhone (or iPad) >
+1. **Get your disc image onto it** (the USA or the European (PAL) Spanish disc). Copy the `.iso` into **Files > On My iPhone (or iPad) >
    SpeedBreaker**, where it is found by itself. Or tap **Browse** and pick it from anywhere the
    Files app reaches, such as iCloud Drive or a USB drive. A browsed image is read where it is,
    not copied first.
@@ -487,8 +486,7 @@ then Yes, puts it back.
 **Game:** Language (English): French, German, Italian, Spanish, Dutch, Swedish, Danish, Polish or
 Finnish switch the menus and the race text (European languages show km/h) the next time the game
 starts. The text comes from the disc's own files; the movies and the speech stay in the disc's
-language (English on the USA disc, Spanish or German on a PAL one). A PAL disc starts in its own
-language.
+language (English on the USA disc, Spanish on the PAL one). The PAL disc starts in Spanish.
 The line under the row says what your installed files give the language you choose. Not shown on
 iPhone and iPad.
 
@@ -549,18 +547,19 @@ No. No game files are included or distributed. You install the game from your ow
 your own disc, and SpeedBreaker checks it file by file.
 
 **Which version of the game do I need?**
-The Xbox 360 **USA release (NTSC-U, English)**, the **European (PAL) release with Spanish
-movies and speech** (since v0.2.0) or the **German (PAL) release** (new). The installer
-checks your image and tells you which one it found, or that it's a different version. Other PAL
-discs, Japanese discs and re-releases have different code, so the installer refuses them for now.
-Installing one disc beside another keeps both installs. Every disc holds the game's text in ten
-languages: pick one
+The Xbox 360 **USA release (NTSC-U, English)** or the **European (PAL) release with Spanish
+movies and speech** (since v0.2.0). The installer checks your image and tells you which one it
+found, or that it's a different version. The **German (PAL) disc** runs in a build made from source
+with its code (`ppc-pal-de/`, [Building from source](#building-from-source) step 2); the downloads don't
+include it yet, and their installer says so. Other PAL discs, Japanese discs and re-releases have
+different code, so the installer refuses them for now. Installing one disc
+beside the other keeps both installs. Both discs hold the game's text in ten languages: pick one
 in Settings > Game > Language. Games on Demand packages aren't supported, and no title update is
 used.
 
 **Does it work with the PC version of the game?**
-No. SpeedBreaker is built from the Xbox 360 version and installs only from the Xbox 360 USA disc or
-the European (PAL) Spanish or German disc.
+No. SpeedBreaker is built from the Xbox 360 version and installs only from the Xbox 360 USA or
+European (PAL) Spanish disc.
 PC copies of *Most Wanted*, including the Black Edition, aren't supported.
 
 **Is this an emulator?**
@@ -577,7 +576,8 @@ No. Xbox 360 saves can't be imported, so your career starts fresh.
 **The installer refused my image. Why?**
 It always says what to do. The usual causes:
 
-- *Another game, or an unsupported version:* it isn't the USA disc or the European (PAL) Spanish or German disc.
+- *Another game, or an unsupported version:* it isn't the USA or the European (PAL) Spanish disc.
+  The German disc is refused by a build without its code (see above).
 - *Truncated image:* most often a copy cut off at 4 GB by a FAT32 drive. Copy it again from your
   own backup, onto a drive that can hold files over 4 GB.
 - *Not a disc image,* a Games on Demand package, or a video-only DVD image.
@@ -666,10 +666,11 @@ pull requests are handled.
   connected by USB through its own controller framework, which never runs the motors. Pair it
   over Bluetooth for rumble (a DualSense rumbles either way). The game says so once.
 - **Languages:** the movies and the speech (the police radio, the voices in the scenes) stay in
-  the disc's language in every language: English on the USA disc, Spanish or German on a PAL one. Fan
+  the disc's language in every language: English on the USA disc, Spanish on the PAL one. Fan
   translations aren't supported.
-- **Discs:** only the USA and the European (PAL) Spanish and German discs install; the other PAL
-  discs are still to come.
+- **Discs:** only the USA and the European (PAL) Spanish discs install with the downloads; the
+  German one needs a build from source with its code ([Building from source](#building-from-source) step 2), and the
+  other PAL discs are still to come.
 - **Smooth Motion on SteamOS and Linux:** offered only at 120 Hz and 90 Hz, and not on the Steam
   Deck, where busy scenes can't keep up and it would ghost.
 - **Steering wheels are experimental:** the steering feel is still being tuned; see
@@ -795,8 +796,8 @@ shasum -a 256 game/files-pal-es/default.xex
 tools/XenonRecomp/build/XenonRecomp/XenonRecomp config/pal-es/nfsmw.toml tools/XenonRecomp/XenonUtils/ppc_context.h
 python3 scripts/region_ppc.py ppc-pal-es pal_es
 
-# Optional, for the German (PAL) disc too, the same way (ppc-pal-de/; -DSB_PAL_DE=OFF leaves it
-# out and refuses that disc). docs/REGION_PAL_DE.md says how its tables were made.
+# Optional, for the German (PAL) disc too, the same way (ppc-pal-de/; without it the build refuses
+# that disc). docs/REGION_PAL_DE.md says how its tables were made.
 mkdir -p game/files-pal-de ppc-pal-de
 tools/extract-xiso/build/extract-xiso -d game/files-pal-de -x /path/to/your-german-backup.iso
 shasum -a 256 game/files-pal-de/default.xex

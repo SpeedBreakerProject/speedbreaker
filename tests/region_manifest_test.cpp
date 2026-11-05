@@ -2,19 +2,18 @@
 // European (PAL, Spanish) manifests, told apart by default.xex's hash and
 // size and by the version an install's marker records, and FindGameInstall
 // finding either region's install (with which it is) in a scratch folder with
-// a sandbox HOME. A build with the German disc's manifest
-// (runtime/install/manifest_pal_de.inc, generated from the player's own disc)
-// checks it too, including a default.xex size it shares with another region
-// (the marker, else the hash, says which). From the repo root:
+// a sandbox HOME. Built with SB_PAL_DE=1 (region_manifest_test_pal_de), the
+// German disc's manifest is a third region; without it, that disc is refused
+// up front (ReleaseWithoutCode). From the repo root:
 //   clang++ -std=c++20 -O2 -Iruntime tests/region_manifest_test.cpp runtime/install/{placement,installer,locate,manifest,result,disc_source,sha256}.cpp runtime/user/portable.cpp -o build/region_manifest_test
 //   (on macOS add -framework CoreFoundation)
 //   build/region_manifest_test [folder]
+//   (add -DSB_PAL_DE=1 for the German region)
 // No game files: the stand-in installs are a default.xex of the right size
 // (all zeros) and a marker.
 #include <install/installer.h>
 #include <install/locate.h>
 #include <install/placement.h>
-#include <install/sha256.h>
 #include <user/paths.h>
 
 #include <cstdio>
@@ -22,7 +21,6 @@
 #include <filesystem>
 #include <fstream>
 #include <string>
-#include <vector>
 
 #include <unistd.h>
 
@@ -32,20 +30,16 @@ static int g_failures = 0;
 namespace fs = std::filesystem;
 using namespace install;
 
-// The German disc's manifest, when the build has it.
-static const Manifest* German()
-{
-    for (const Manifest* m : GameManifests())
-        if (m->region == "pal-de")
-            return m;
-    return nullptr;
-}
+#ifndef SB_PAL_DE
+#define SB_PAL_DE 0
+#endif
+
+static constexpr std::string_view kGermanXex = "23ece29d18724ea28971d52f936964d127148bd2359ff24795da7442b9069bf4";
 
 static void Manifests()
 {
     auto all = GameManifests();
-    const Manifest* de = German();
-    CHECK(all.size() == (de ? 3u : 2u), "two regions, three with the German one: %zu", all.size());
+    CHECK(all.size() == (SB_PAL_DE ? 3u : 2u), "regions: %zu", all.size());
     const Manifest& usa = GameManifest();
     CHECK(all[0] == &usa, "USA first (the default)");
     const Manifest* pal = ManifestForVersion("2e42eb3950fcc436");
@@ -82,17 +76,28 @@ static void Manifests()
     CHECK(&Pick(usa, pal) == pal && &Pick(*pal, &usa) == &usa && &Pick(usa, nullptr) == &usa, "Pick, compiled-in");
     CHECK(&Pick(test, pal) == &test, "Pick, a test manifest");
     CHECK(IsGameManifest(usa) && IsGameManifest(*pal) && !IsGameManifest(test), "IsGameManifest");
-    CHECK(ManifestsWithXexSize(usa.Xex().size) >= 1 && ManifestsWithXexSize(pal->Xex().size) >= 1 && ManifestsWithXexSize(16) == 0,
-        "ManifestsWithXexSize");
+    CHECK(ReleaseWithoutCode(usa.Xex().sha256).regionName.empty() && ReleaseWithoutCode(pal->Xex().sha256).regionName.empty()
+        && ReleaseWithoutCode("00").regionName.empty(), "ReleaseWithoutCode: none for a built-in or unknown hash");
 
-    if (!de)
-        return;
-    CHECK(de == all[2], "the German manifest last");
-    CHECK(de->regionName == "Europe (PAL, German)", "its name: %.*s", int(de->regionName.size()), de->regionName.data());
-    CHECK(de->titleId == usa.titleId, "one title ID for all three");
-    CHECK(ManifestForXexHash(de->Xex().sha256) == de && ManifestForVersion(de->version) == de, "the German one by hash and version");
-    CHECK(de->Xex().sha256 != usa.Xex().sha256 && de->Xex().sha256 != pal->Xex().sha256, "its own default.xex");
-    CHECK(ManifestsWithXexSize(de->Xex().size) >= 1, "its size counted");
+    // The German disc: a region with its code linked, refused up front without it.
+    const Manifest* de = ManifestForXexHash(kGermanXex);
+    const ReleaseWithoutCodeInfo without = ReleaseWithoutCode(kGermanXex);
+#if SB_PAL_DE
+    CHECK(de && de == all[2] && de->region == "pal-de" && de->regionName == "Europe (PAL, German)", "the German manifest, last");
+    CHECK(without.regionName.empty(), "with its code: not refused");
+    if (de)
+    {
+        CHECK(de->titleId == usa.titleId && de->files.size() == 49, "its title and 49 files");
+        CHECK(ManifestForXexSize(3944448) == de && ManifestForVersion(de->version) == de, "by size and version");
+        size_t german = 0;
+        for (const ManifestFile& f : de->files)
+            german += f.path.ends_with("_german_pal.wmv");
+        CHECK(german == 33, "German movies: %zu", german);
+    }
+#else
+    CHECK(!de && !ManifestForXexSize(3944448), "without its code: no German manifest");
+    CHECK(without.regionName == "Europe (PAL, German)" && without.codeFolder == "ppc-pal-de", "refused, naming its code");
+#endif
 }
 
 static void Write(const fs::path& file, const std::string& text)
@@ -149,16 +154,13 @@ static void Installs(const fs::path& root, const char* argv0)
     Write(user / kInstallMarker, "manifest_version = \"0123456789abcdef\"\n");
     CHECK(!FindGameInstall(), "an older marker: not current");
 
-    // Set up by hand (NFSMW_GAME_DIR): no marker, the region by size (unless
-    // the German default.xex has the PAL one's size too: then by the hash,
-    // which a stand-in of zeros doesn't have; GermanInstalls checks that).
+    // Set up by hand (NFSMW_GAME_DIR): no marker, the region by size.
     fs::path byHand = root / "by-hand";
     StandIn(byHand, pal->Xex().size, nullptr);
     setenv("NFSMW_GAME_DIR", byHand.c_str(), 1);
     found = FindGameInstall();
-    if (ManifestsWithXexSize(pal->Xex().size) == 1)
-        CHECK(found && found->manifest == pal && !found->marker && found->origin == InstallOrigin::Environment,
-            "NFSMW_GAME_DIR, PAL by size");
+    CHECK(found && found->manifest == pal && !found->marker && found->origin == InstallOrigin::Environment,
+        "NFSMW_GAME_DIR, PAL by size");
     fs::resize_file(byHand / "default.xex", 1234);
     CHECK(!FindGameInstall(), "another size: neither region (ignored, logged)");
     unsetenv("NFSMW_GAME_DIR");
@@ -176,77 +178,28 @@ static void Installs(const fs::path& root, const char* argv0)
     CHECK(!FindGameInstall(test), "a test manifest finds no real region's install");
 }
 
-// ManifestForXexFile: a default.xex file's region by its size (no hashing
-// while no two regions share it).
-static void XexFiles(const fs::path& root)
-{
-    const Manifest& usa = GameManifest();
-    const Manifest* pal = ManifestForVersion("2e42eb3950fcc436");
-    if (!pal)
-        return;
-    fs::path dir = root / "xex-files";
-    if (ManifestsWithXexSize(usa.Xex().size) == 1)
-    {
-        StandIn(dir, usa.Xex().size, nullptr);
-        CHECK(ManifestForXexFile(dir / "default.xex") == &usa, "a USA-sized default.xex: USA");
-    }
-    if (ManifestsWithXexSize(pal->Xex().size) == 1)
-    {
-        StandIn(dir, pal->Xex().size, nullptr);
-        CHECK(ManifestForXexFile(dir / "default.xex") == pal, "a PAL-sized default.xex: PAL");
-    }
-    fs::resize_file(dir / "default.xex", 1234);
-    CHECK(!ManifestForXexFile(dir / "default.xex"), "another size: none");
-    CHECK(!ManifestForXexFile(dir / "missing.xex"), "no file: none");
-}
-
-// The German disc's installs, when the build has its manifest.
+// The German disc's installs (a build with its code).
 static void GermanInstalls(const fs::path& root)
 {
-    const Manifest* de = German();
-    if (!de)
-    {
-        printf("  (no German manifest in this build: its install checks skipped)\n");
-        return;
-    }
+#if SB_PAL_DE
     const Manifest& usa = GameManifest();
+    const Manifest* de = ManifestForXexHash(kGermanXex);
+    if (!de)
+        return;
     RecordInstallPath(DefaultInstallPath());  // the earlier recorded install: gone
     fs::path user = DefaultInstallPath();
     StandIn(user, de->Xex().size, std::string(de->version).c_str());
     std::optional<GameInstall> found = FindGameInstall();
-    CHECK(found && found->manifest == de && found->marker, "a German install: found, German (%s)",
-        found && found->manifest ? std::string(found->manifest->region).c_str() : "-");
+    CHECK(found && found->manifest == de && found->marker, "a German install: found, German");
     CHECK(InstalledRegion(user) == de, "InstalledRegion: German");
     CHECK(RegionFolder("/h/game", *de) == fs::path("/h/game PAL-DE"), "RegionFolder German: %s", RegionFolder("/h/game", *de).c_str());
-
-    // A default.xex size another region has too: the marker says which; with
-    // none (set up by hand), the file's hash.
-    const Manifest* sameSize = nullptr;
-    for (const Manifest* m : GameManifests())
-        if (m != de && m->Xex().size == de->Xex().size)
-            sameSize = m;
-    fs::path byHand = root / "by-hand-de";
-    StandIn(byHand, de->Xex().size, nullptr);
-    if (sameSize)
-    {
-        Write(user / kInstallMarker, "manifest_version = \"" + std::string(sameSize->version) + "\"\n");
-        found = FindGameInstall();
-        CHECK(found && found->manifest == sameSize, "one size, the %.*s marker: that region", int(sameSize->region.size()),
-            sameSize->region.data());
-        Sha256 sha;
-        std::vector<char> zeros(de->Xex().size);
-        sha.Update(zeros.data(), zeros.size());
-        const Manifest* byHash = ManifestForXexHash(ToHex(sha.Finish()));
-        CHECK(ManifestForXexFile(byHand / "default.xex") == byHash, "one size, no marker: by its hash");
-    }
-    else
-        CHECK(ManifestForXexFile(byHand / "default.xex") == de, "its own size: German, without hashing");
-
-    // A German disc beside a USA install.
     fs::path dir = root / "keep-de", game = dir / "game";
     StandIn(game, usa.Xex().size, "535fd83157066102");
     RegionKeep k = KeepOtherRegion(game, *de);
     CHECK(k.kept == &usa && k.gameDir == dir / "game PAL-DE", "German beside USA: %s", k.gameDir.c_str());
+#else
+    (void)root;
+#endif
 }
 
 // The PAL-safety rule (install/placement.h's KeepOtherRegion): a disc of one
@@ -271,10 +224,7 @@ static void KeepRegions(const fs::path& root)
     StandIn(game, usa.Xex().size, nullptr);
     CHECK(!InstalledRegion(game), "no marker (extracted by hand): none");
     StandIn(game, usa.Xex().size, "0123456789abcdef");
-    // (By size; with the German default.xex of the USA one's size, by the
-    // hash, which a stand-in of zeros doesn't have.)
-    if (ManifestsWithXexSize(usa.Xex().size) == 1)
-        CHECK(InstalledRegion(game) == &usa, "an older USA marker: still the USA install (it would be lost)");
+    CHECK(InstalledRegion(game) == &usa, "an older USA marker: still the USA install (it would be lost)");
     StandIn(game, usa.Xex().size, "535fd83157066102");
     CHECK(InstalledRegion(game) == &usa, "a USA install");
     fs::resize_file(game / "default.xex", 1234);
@@ -340,7 +290,6 @@ int main(int argc, char** argv)
     }
     fs::path root = fs::absolute(tmpl);
     Installs(root, argv[0]);
-    XexFiles(root);
     KeepRegions(root);
     GermanInstalls(root);
     chdir(base.c_str());

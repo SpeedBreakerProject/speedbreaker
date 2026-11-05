@@ -314,9 +314,14 @@ PAL_ES_EXTRA_FUNCTIONS = [
     (0x823AF0F8, 0xE0, 0x823AF108, 11, 0x823AF1D0),
 ]
 
-# The German build's: not known before its image has been looked at. None:
-# find_extra_functions finds them on each run (and prints what it found).
-PAL_DE_EXTRA_FUNCTIONS = None
+# The German build has the same two, at the same addresses (found by
+# find_extra_functions on its image, and checked against it like the Spanish
+# ones). A region whose extra functions aren't known yet takes None:
+# find_extra_functions then finds them on each run (and prints what it found).
+PAL_DE_EXTRA_FUNCTIONS = [
+    (0x823AF018, 0xE0, 0x823AF028, 11, 0x823AF0F0),
+    (0x823AF0F8, 0xE0, 0x823AF108, 11, 0x823AF1D0),
+]
 
 
 class Region:

@@ -2,7 +2,6 @@
 #include "locate.h"
 #include "installer.h"
 #include "placement.h"
-#include "sha256.h"
 
 #include <user/paths.h>
 
@@ -10,7 +9,6 @@
 #include <cstdio>
 #include <cstdlib>
 #include <format>
-#include <fstream>
 #include <set>
 
 #ifdef _WIN32
@@ -51,20 +49,6 @@ namespace install
         }
 #endif
 
-        // The compiled-in region of the default.xex `xex` (in `dir`, of
-        // `size` bytes): its size says it, unless two regions' executables
-        // have that size (the German and the Spanish disc's could); then the
-        // marker beside it, if it names one of them, else its hash.
-        const Manifest* RegionOfXex(const fs::path& dir, const fs::path& xex, uint64_t size)
-        {
-            if (ManifestsWithXexSize(size) <= 1)
-                return ManifestForXexSize(size);
-            if (std::optional<std::string> marker = ReadInstallMarker(dir))
-                if (const Manifest* m = ManifestForVersion(*marker); m && m->Xex().size == size)
-                    return m;
-            return ManifestForXexFile(xex);
-        }
-
         // default.xex in `dir` with the manifest's size (and, if asked, the
         // current marker beside it), as spelled on disk. For a compiled-in
         // manifest, any region's: `used` (if given) says which.
@@ -94,7 +78,7 @@ namespace install
             uint64_t size = fs::file_size(xex, ec);
             if (ec)
                 return std::nullopt;
-            const Manifest& manifest = Pick(requested, IsGameManifest(requested) ? RegionOfXex(dir, xex, size) : nullptr);
+            const Manifest& manifest = Pick(requested, ManifestForXexSize(size));
             if (size != manifest.Xex().size)
                 return std::nullopt;
             if (requireMarker && ReadInstallMarker(dir) != std::optional<std::string>(manifest.version))
@@ -154,34 +138,6 @@ namespace install
             candidate.status = opened.Ok() ? checked : opened;
             found.push_back(std::move(candidate));
         }
-    }
-
-    const Manifest* ManifestForXexFile(const std::filesystem::path& xex)
-    {
-        std::error_code ec;
-        const uint64_t size = fs::file_size(xex, ec);
-        if (ec)
-            return nullptr;
-        if (ManifestsWithXexSize(size) <= 1)
-            return ManifestForXexSize(size);
-        std::ifstream f(xex, std::ios::binary);
-        if (!f)
-            return nullptr;
-        Sha256 sha;
-        std::vector<char> chunk(1 << 20);
-        uint64_t read = 0;
-        while (f)
-        {
-            f.read(chunk.data(), std::streamsize(chunk.size()));
-            const std::streamsize n = f.gcount();
-            if (n <= 0)
-                break;
-            sha.Update(chunk.data(), size_t(n));
-            read += uint64_t(n);
-        }
-        if (read != size)
-            return nullptr;
-        return ManifestForXexHash(ToHex(sha.Finish()));
     }
 
     const Manifest* InstalledRegion(const std::filesystem::path& dir)

@@ -13852,7 +13852,7 @@ labels = [
     0x82780488,
 ]
 
-# ---- PAL ONLY (survey/region_map.py find_extra_functions) ----
+# ---- PAL ONLY (survey/region_map.py PAL_DE_EXTRA_FUNCTIONS) ----
 [[switch]]
 base = 0x823AF028
 r = 11

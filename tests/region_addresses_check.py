@@ -4,10 +4,6 @@ the Spanish one's (pal-es, the default) or the German one's (pal-de):
 
     python3 tests/region_addresses_check.py <repo> [<usa dir> <pal dir> <funcmap.tsv>] [--region pal-de]
 
-The German tables (runtime/region/pal_de_addresses.inc, pal_de_names.h) are
-generated from the player's own discs (docs/REGION_PAL_DE.md): without them,
---region pal-de passes with a line saying it was skipped.
-
 Without the images (the default; no game data needed):
   - every guest address the runtime's sources name (runtime/region/
     hook_addresses.py) has a PAL address in runtime/region/pal_es_addresses.inc
@@ -18,7 +14,10 @@ Without the images (the default; no game data needed):
   - every code or .rdata constant the runtime's .cpp files use is used through
     region::Addr (its PAL address can differ; .data, .bss and addresses outside
     the image are the same in both, which the table records);
-  - no address is in one of the 19 functions the PAL build changed.
+  - no address is in one of the 19 functions the PAL build changed;
+  - config/<region>/ is config/ translated: the same settings and hooks, only
+    their addresses moved (a hook added to config/nfsmw.toml since the region's
+    was written fails here).
 With the two decrypted images (survey/region_map.py's inputs: <dir>/image.bin
 and xexsurvey.txt) and the function map, also: the bytes at each USA address
 and its PAL one match (instructions with branch displacements and address
@@ -29,6 +28,42 @@ import pathlib
 import re
 import subprocess
 import sys
+
+
+HEX82 = re.compile(r'0x82[0-9A-Fa-f]{6}\b')
+
+
+def config_shape(text, regional):
+    """The recompiler config with what a region changes taken out: the guest
+    addresses in its settings (not in comments, which keep the USA ones), the
+    lines naming the disc and its folders, the GENERATED header and the
+    PAL-only block survey/region_map.py adds. Two configs of one shape differ
+    in addresses only."""
+    out, skip = [], False
+    for line in text.splitlines():
+        if regional and line.startswith('# GENERATED') or line.startswith('# The PAL') or \
+                line.startswith('# where the PAL build') or line.startswith('# addresses.'):
+            continue
+        s = line.strip()
+        if s.startswith('# PAL only (') or s.startswith('# ---- PAL ONLY ('):
+            skip = True
+            continue
+        if skip:
+            if s.startswith('# manual') or (s.startswith('#') and 'PAL' not in s and not s.startswith('{')):
+                skip = False
+            elif s.startswith('{') or s.startswith('[[switch]]') or s.startswith('base') or s.startswith('r =') \
+                    or s.startswith('default') or s.startswith('labels') or s.startswith('0x') or s in (']', ''):
+                continue
+            else:
+                skip = False
+        if s.startswith('# XenonRecomp config for') or s.startswith('# default.xex SHA-256') \
+                or s.startswith('file_path') or s.startswith('out_directory_path'):
+            continue
+        code, hash_, comment = line.partition('#')
+        out.append(HEX82.sub('0x82______', code) + hash_ + comment)
+    while out and out[-1] == '':
+        out.pop()
+    return out
 
 
 def main():
@@ -48,10 +83,6 @@ def main():
     stem = region.replace('-', '_')
     macro = 'SB_' + stem.upper()
     table_file, names_file = root / f'runtime/region/{stem}_addresses.inc', root / f'runtime/region/{stem}_names.h'
-    if region != 'pal-es' and not table_file.exists():
-        print(f'region_addresses_check: skipped for {region} (no {table_file.relative_to(root)}: '
-              'generated from the player\'s own discs, docs/REGION_PAL_DE.md)')
-        sys.exit(0)
 
     fails = []
     table = {}
@@ -82,6 +113,22 @@ def main():
     for addr in table:
         if addr not in found:
             fails.append(f'{addr:#010x}: in the table but no longer in the sources (rerun survey/region_map.py table --region {region})')
+
+    # The region's recompiler config is the USA one translated (survey/
+    # region_map.py toml): the same settings and hooks, only their addresses
+    # moved. One the USA config gained since (a new midasm hook) and the
+    # region's didn't means it wasn't written again: no image needed to see it.
+    for name in ('nfsmw.toml', 'switch_tables.toml'):
+        usa_cfg, reg_cfg = root / 'config' / name, root / 'config' / region / name
+        if not reg_cfg.exists():
+            fails.append(f'config/{region}/{name}: missing (survey/region_map.py toml --region {region})')
+            continue
+        a, b = config_shape(usa_cfg.read_text(), False), config_shape(reg_cfg.read_text(), True)
+        if a != b:
+            import difflib
+            d = [l for l in difflib.unified_diff(a, b, f'config/{name}', f'config/{region}/{name}', n=0, lineterm='')][2:8]
+            fails.append(f'config/{region}/{name} is not config/{name} translated (rerun survey/region_map.py toml'
+                         f' --region {region}): ' + ' | '.join(d))
 
     rt = root / 'runtime'
     hooks = ha.hooked_functions(root)

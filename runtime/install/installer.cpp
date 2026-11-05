@@ -672,6 +672,16 @@ namespace install
         // Same title, different executable: another region or revision. The
         // recompiled code matches one executable byte for byte, so nothing
         // else can run, whatever else is on the disc.
+        // A release SpeedBreaker supports, but not this build (its code isn't
+        // linked): say so before copying anything.
+        if (const ReleaseWithoutCodeInfo other = ReleaseWithoutCode(found); IsGameManifest(manifest) && !other.regionName.empty())
+        {
+            r = Fail(Error::UnsupportedVersion, std::format("{} is the {} disc of {}. SpeedBreaker can run it, but this build "
+                "doesn't include its code: it needs a build made from source with {}/ (README, step 2). This build supports {}.",
+                What(source), other.regionName, kGameName, other.codeFolder, Releases()), id.file->path);
+            r.foundHash = found;
+            return r;
+        }
         std::string supported, damaged;
         if (IsGameManifest(manifest))
         {

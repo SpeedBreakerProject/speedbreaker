@@ -175,7 +175,7 @@ functions = [
     { address = 0x828139E0, size = 0x1D8 },
     { address = 0x8286AB70, size = 0x2BC },
     { address = 0x8286BAA8, size = 0x154 },
-    # PAL only (survey/region_map.py find_extra_functions)
+    # PAL only (survey/region_map.py PAL_DE_EXTRA_FUNCTIONS)
     { address = 0x823AF018, size = 0xE0 },
     { address = 0x823AF0F8, size = 0xE0 },
     # manual (see MANUAL in survey/leaf_switch_bounds.py)

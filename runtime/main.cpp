@@ -291,7 +291,11 @@ static void SetReleaseDefaults(int argc, char** argv)
 {
     const install::Manifest* manifest = nullptr;
     if (argc > 1)
-        manifest = install::ManifestForXexFile(argv[1]);
+    {
+        std::error_code ec;
+        uint64_t size = std::filesystem::file_size(argv[1], ec);
+        manifest = ec ? nullptr : install::ManifestForXexSize(size);
+    }
     else if (std::optional<install::GameInstall> game = install::FindGameInstall())
         manifest = game->manifest;
     if (!manifest)

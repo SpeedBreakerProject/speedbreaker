@@ -4,7 +4,9 @@
 // generated from a verified dump by scripts/gen_install_manifest.py, one per
 // supported release (region): manifest.inc (USA), manifest_pal_es.inc
 // (Europe, the PAL disc with Spanish speech and movies) and manifest_pal_de.inc
-// (Europe, the German PAL disc). Each region's code is
+// (Europe, the German PAL disc; compiled in only by a build that links its
+// code, SB_PAL_DE: a build without it refuses that disc up front,
+// ReleaseWithoutCode). Each region's code is
 // recompiled from that one default.xex, so its hash doubles as the
 // supported-version check and says which region a disc or install is (the
 // title ID is the same in all).
@@ -47,24 +49,27 @@ namespace install
     // files; they all take a Manifest so tests can pass a small one instead.
     const Manifest& GameManifest();
 
-    // Every compiled-in manifest, USA first. Their default.xex hashes and
-    // versions all differ (static_asserts in manifest.cpp); so do the USA and
-    // the Spanish disc's default.xex sizes, but the German one's may be one of
-    // theirs (ManifestsWithXexSize).
+    // Every compiled-in manifest, USA first. Their default.xex hashes, sizes
+    // and versions all differ (static_asserts in manifest.cpp).
     std::span<const Manifest* const> GameManifests();
     bool IsGameManifest(const Manifest& manifest);  // one of GameManifests()
 
     // The compiled-in manifest with that default.xex SHA-256 (lower-case hex),
-    // default.xex size, or version; nullptr if none. By size: the first
-    // (GameManifests' order) when two share it.
+    // default.xex size, or version; nullptr if none.
     const Manifest* ManifestForXexHash(std::string_view sha256);
     const Manifest* ManifestForXexSize(uint64_t size);
     const Manifest* ManifestForVersion(std::string_view version);
 
-    // How many compiled-in manifests have a default.xex of that size: more
-    // than one, and only the hash (or an install marker's version) says
-    // which region a default.xex of that size is (install/locate.h).
-    size_t ManifestsWithXexSize(uint64_t size);
+    // A release SpeedBreaker supports whose code this build doesn't link
+    // (the German disc without SB_PAL_DE), by its default.xex SHA-256: its
+    // name for the player ("Europe (PAL, German)") and the folder its code is
+    // generated into ("ppc-pal-de"). Empty when the hash is none of those.
+    struct ReleaseWithoutCodeInfo
+    {
+        std::string_view regionName;
+        std::string_view codeFolder;
+    };
+    ReleaseWithoutCodeInfo ReleaseWithoutCode(std::string_view sha256);
 
     // What the installer's functions use for `requested`: itself, unless it
     // is a compiled-in manifest and `other` (also compiled in, or nullptr)

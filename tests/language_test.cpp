@@ -401,11 +401,10 @@ namespace
 
 namespace
 {
-    // The European (PAL, German) disc, as the Spanish one is laid out (an
-    // assumption: German speech only, COPSPEECH_GE, and its movies as
-    // <name>_german_pal.wmv): German is its own language, every other one
-    // gets its text and the German movies and speech. And each disc's
-    // default language (main.cpp).
+    // The European (PAL, German) disc: every language's text, German speech
+    // only (COPSPEECH_GE), and its 33 movies as <name>_german_pal.wmv. German
+    // is its own language, every other one gets its text and the German movies
+    // and speech. And each disc's default language (main.cpp).
     void TestGermanDisc()
     {
         CHECK(DiscLanguage("pal-de") == kGerman && DiscLanguage("pal-es") == kSpanish && DiscLanguage("usa") == -1
@@ -431,7 +430,7 @@ namespace
             CHECK(!f.speech && f.speechRedirect && f.speechRedirect->id == kGerman, "%s: German speech", l.token);
             CHECK(SpeechIndexTo(kSpeechPickBegin + 0xE0, kSpeechCollection, 0, f.speechRedirect->id) == 2, "%s: record 2", l.token);
         }
-        // Its boot (assumed to pass 2): the chosen language applies, English too.
+        // Its boot passes 2 (German): the chosen language applies, English too.
         for (uint32_t lr : kCallers)
             for (const Language& l : kLanguages)
                 CHECK(BootLanguageFor(lr, kGerman, l.id, true) == (lr == kBootCall ? l.id : kGerman), "German boot %s lr %08X", l.token, lr);
