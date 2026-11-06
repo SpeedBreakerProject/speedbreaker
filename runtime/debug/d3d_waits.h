@@ -36,5 +36,5 @@ namespace d3dwaits
     // Declare the semaphore as extern so other files can see it
     extern BinarySemaphore waiting_semaphore;
     
-    void blocking();
+    void Block();
 }

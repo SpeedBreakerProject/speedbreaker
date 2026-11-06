@@ -23,10 +23,10 @@ namespace d3dwaits
 {
     BinarySemaphore waiting_semaphore;
 
-    void blocking()
+    void Block()
     {
         SB_WAKE("D3DWait blocking");
-        waiting_semaphore.acquire_with_timeout(std::chrono::milliseconds(200)); 
+        waiting_semaphore.acquire_with_timeout(std::chrono::milliseconds(20)); 
     }
 }
 
@@ -63,7 +63,7 @@ SB_HOOK(sub_825A5B20)
     }
     SB_WAKE("D3DWait called");
     if (std::getenv("NFSMW_SYNCHRONIZE_D3D_WAITS") != nullptr){
-        d3dwaits::blocking();
+        d3dwaits::Block();
     }
     SB_ORIGINAL(sub_825A5B20)(ctx, base);
 }
