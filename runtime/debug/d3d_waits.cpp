@@ -12,26 +12,21 @@
 #include <cpu/guest_time.h>
 #include <cpu/backoff.h>
 #include "timeline.h"
+#include "d3d_waits.h"
 
 //DEBUGGING
 #include <debug/wake_stats.h>
-#include <gpu/wakeup.h>
 
 extern "C" PPC_FUNC(__imp__sub_825A5B20);
 
-namespace
+namespace d3dwaits
 {
-    // On the 360 a spinning hardware thread cost nothing. Here the game's
-    // main thread spun a whole core at 100% while it waited for the command
-    // processor. The CP changes the address that is checked for this busy
-    // waiting when calling PM4_EVENT_WRITE_SHD, so we can simply synchronize.
-    void BackOff()
+    BinarySemaphore waiting_semaphore;
+
+    void blocking()
     {
-        SB_WAKE("BackOff called");
-        thread_local uint32_t seen = gpu::D3DWakeup().Snapshot();
-        const bool woken = gpu::D3DWakeup().Wait(seen, std::chrono::milliseconds(16));
-        if (woken) SB_WAKE("BackOff woken"); else SB_WAKE("BackOff timeout");
-        seen = gpu::D3DWakeup().Snapshot();
+        SB_WAKE("D3DWait blocking");
+        waiting_semaphore.acquire_with_timeout(std::chrono::milliseconds(200)); 
     }
 }
 
@@ -66,6 +61,9 @@ SB_HOOK(sub_825A5B20)
             last = now;
         }
     }
-    BackOff();
+    SB_WAKE("D3DWait called");
+    if (std::getenv("NFSMW_SYNCHRONIZE_D3D_WAITS") != nullptr){
+        d3dwaits::blocking();
+    }
     SB_ORIGINAL(sub_825A5B20)(ctx, base);
 }

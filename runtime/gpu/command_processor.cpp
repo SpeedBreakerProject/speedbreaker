@@ -23,10 +23,11 @@
 #include <debug/timeline.h>
 #include <report/report.h>
 #include <unordered_set>
+#include <region/region.h>
+#include <debug/d3d_waits.h>
 
 // DEBUG
 #include <debug/wake_stats.h>
-#include <gpu/wakeup.h>
 
 namespace gpu
 {
@@ -66,6 +67,8 @@ namespace gpu
         // of 0.94 instead of 1.28.
         alignas(4096) uint32_t s_regs[REGISTER_COUNT];
 
+        static std::mutex s_workMutex;
+        static std::condition_variable s_workCv;
         std::atomic<uint32_t> s_primaryBuffer{ 0 };  // physical
         uint32_t s_primarySize = 0;                  // bytes
         uint32_t s_readIndex = 0;                    // dwords
@@ -756,9 +759,9 @@ namespace gpu
                 if (memory && s_selfWaits && !report::g_testHang.load(std::memory_order_relaxed))
                     if (auto pending = PendingValue(poll); pending && compare(info, *pending & mask, ref))
                         return true;
+                uint32_t vblankToken = s_vblanks;
                 while (true)
                 {
-                    const uint32_t seen = gpu::VblankWakeup().Snapshot();
                     uint32_t value = memory ? LoadSwapped(poll) : s_regs[poll % REGISTER_COUNT];
                     if (!memory && poll == REG_COHER_STATUS_HOST)
                     {
@@ -774,6 +777,7 @@ namespace gpu
                         }
                         break;
                     }
+                    SB_WAKE("PM4_WAIT_REG_MEM yield");
                     // Deferred fence writes may be what the CPU is waiting for
                     // before it produces what we wait for: get them moving.
                     // (Most of these waits, MakeCoherent's, pass at once and
@@ -830,9 +834,11 @@ namespace gpu
                         DumpHistory();
                     }
                     // This is called in menus over and over until the next frame.
-                    // We can use synchronization to wait for the next Vblank, with a 17 ms safety net.
+                    // We can use synchronization to wait for the next Vblank.
                     (void)wait;
-                    const bool woken = gpu::VblankWakeup().Wait(seen, std::chrono::milliseconds(17));
+                    if (std::getenv("NFSMW_SYNCHRONIZE_REGMEM_TO_VBLANK") != nullptr){
+                        s_vblanks.wait(vblankToken);
+                    }
                 }
                 return true;
             }
@@ -903,9 +909,11 @@ namespace gpu
                 WriteRegister(REG_VGT_EVENT_INITIATOR, initiator & 0x3F);
                 QueueStore(address, (initiator >> 31) & 1 ? s_counter.load() : value);
                 uint32_t base_address = address & 0x0FFFFF00;
-                if (base_address == 0x0644A000 || base_address == 0x0A644000)
-                    gpu::D3DWakeup().Wake();
-                return true;
+                if (std::getenv("NFSMW_SYNCHRONIZE_D3D_WAITS") != nullptr){
+                    if (base_address == 0x0644A000)
+                        d3dwaits::waiting_semaphore.release();
+                    return true;
+                }
             }
 
             case PM4_EVENT_WRITE_EXT:
@@ -1137,59 +1145,116 @@ namespace gpu
             PPCContext& ctx = thread.ppcContext;
             renderer::Initialize(s_regs);
             auto lastWork = std::chrono::steady_clock::now();
-            while (true)
+            fprintf(stderr, "[wptr host addr] %p\n", (void*)MmioRegister(REG_CP_RB_WPTR));
+            if (std::getenv("NFSMW_SYNCHRONIZE_COMMAND_PROCESSOR") != nullptr)
             {
-                uint32_t primary = s_primaryBuffer;
-                uint32_t writeIndex = *MmioRegister(REG_CP_RB_WPTR);
-                if (primary == 0 || writeIndex == s_readIndex || writeIndex * 4 >= s_primarySize)
+                fprintf(stderr, "Synchronizing Command Processor\n");
+                while (true)
                 {
-                    // Kicks come in bursts and the game often waits on their
-                    // results: poll with yields for 2 ms after the last work,
-                    // then back off to short sleeps.
-                    // No new commands: whatever is recorded goes out now (the
-                    // game may be waiting on a fence in it).
+                    // 1. Drain loop: process everything currently in the ring
+                    while (true)
+                    {
+                        uint32_t primary = s_primaryBuffer;
+                        uint32_t writeIndex = *MmioRegister(REG_CP_RB_WPTR);
+                        bool hasWork = primary != 0 && writeIndex != s_readIndex && (writeIndex * 4 < s_primarySize);
+
+                        if (!hasWork)
+                            break; // Ring is empty, drop out to sleep
+
+                        s_regs[REG_CP_RB_WPTR] = writeIndex;
+                        Reader r{ Physical(primary), s_primarySize, s_readIndex * 4, writeIndex * 4 };
+                        timeline::Mark(timeline::BatchBegin, (writeIndex - s_readIndex) & (s_primarySize / 4 - 1));
+                        s_busyFrom = std::chrono::steady_clock::now();
+                        s_busyWaitFrom = renderer::g_cpWaitNs;
+                        ExecuteBuffer(r, ctx);
+                        AccountBusy();
+                        timeline::Mark(timeline::BatchEnd);
+
+                        if (writewatch::g_submitRequested.exchange(false))
+                            renderer::Submit();
+                        renderer::SubmitIfIdle();
+
+                        s_readIndex = writeIndex;
+                        if (uint32_t wb = s_readWriteback)
+                            *reinterpret_cast<be<uint32_t>*>(Physical(wb)) = writeIndex;
+                        lastWork = std::chrono::steady_clock::now();
+                    }
+
+                    // 2. Housekeeping
                     if (writewatch::g_submitRequested.exchange(false))
-                        renderer::Submit();  // a guest thread waits on recorded work
+                        renderer::Submit();
                     renderer::SubmitIfDue();
-                    // The game is suspended: its threads stand still, so
-                    // wait for the resume rather than poll all the while.
+
                     if (guesttime::Suspended())
                     {
                         guesttime::WaitWhileSuspended();
                         lastWork = std::chrono::steady_clock::now();
                         continue;
                     }
-                    if (std::chrono::steady_clock::now() - lastWork < std::chrono::microseconds(1000))
-                        {
-                            std::this_thread::yield();
-                            SB_WAKE("cp-workerloop-yield");
-                        }
-                    else
-                        {
-                        std::this_thread::sleep_for(std::chrono::microseconds(1000));
-                        SB_WAKE("cp-workerloop-1000-microseconds");
-                        }
-                    continue;
+                    {
+                        std::unique_lock<std::mutex> lock(s_workMutex);
+                        s_workCv.wait_for(lock, std::chrono::milliseconds(20), [&]() {
+                            uint32_t p = s_primaryBuffer;
+                            uint32_t w = *MmioRegister(REG_CP_RB_WPTR);
+                            return p != 0 && w != s_readIndex && (w * 4 < s_primarySize);
+                        });
+                    }
                 }
-                s_regs[REG_CP_RB_WPTR] = writeIndex;
-                Reader r{ Physical(primary), s_primarySize, s_readIndex * 4, writeIndex * 4 };
-                timeline::Mark(timeline::BatchBegin, (writeIndex - s_readIndex) & (s_primarySize / 4 - 1));
-                s_busyFrom = std::chrono::steady_clock::now();
-                s_busyWaitFrom = renderer::g_cpWaitNs;
-                ExecuteBuffer(r, ctx);
-                AccountBusy();
-                timeline::Mark(timeline::BatchEnd);
-                if (writewatch::g_submitRequested.exchange(false))
-                    renderer::Submit();
-                renderer::SubmitIfIdle();
-                s_readIndex = writeIndex;
-                // The read pointer is fetch progress (as on the hardware), not
-                // completion: everything the batch needs has been consumed or
-                // copied, so its ring space is free now. D3D tracks resource
-                // lifetimes with fences, which stay deferred to GPU completion.
-                if (uint32_t wb = s_readWriteback)
-                    *reinterpret_cast<be<uint32_t>*>(Physical(wb)) = writeIndex;
-                lastWork = std::chrono::steady_clock::now();
+            } else {
+                while (true)
+                {
+                    uint32_t primary = s_primaryBuffer;
+                    uint32_t writeIndex = *MmioRegister(REG_CP_RB_WPTR);
+                    if (primary == 0 || writeIndex == s_readIndex || writeIndex * 4 >= s_primarySize)
+                    {
+                        // Kicks come in bursts and the game often waits on their
+                        // results: poll with yields for 2 ms after the last work,
+                        // then back off to short sleeps.
+                        // No new commands: whatever is recorded goes out now (the
+                        // game may be waiting on a fence in it).
+                        if (writewatch::g_submitRequested.exchange(false))
+                            renderer::Submit();  // a guest thread waits on recorded work
+                        renderer::SubmitIfDue();
+                        // The game is suspended: its threads stand still, so
+                        // wait for the resume rather than poll all the while.
+                        if (guesttime::Suspended())
+                        {
+                            guesttime::WaitWhileSuspended();
+                            lastWork = std::chrono::steady_clock::now();
+                            continue;
+                        }
+                        if (std::chrono::steady_clock::now() - lastWork < std::chrono::microseconds(1000))
+                            {
+                                std::this_thread::yield();
+                                SB_WAKE("cp-workerloop-yield");
+                            }
+                        else
+                            {
+                            std::this_thread::sleep_for(std::chrono::microseconds(1000));
+                            SB_WAKE("cp-workerloop-1000-microseconds");
+                            }
+                        continue;
+                    }
+                    s_regs[REG_CP_RB_WPTR] = writeIndex;
+                    Reader r{ Physical(primary), s_primarySize, s_readIndex * 4, writeIndex * 4 };
+                    timeline::Mark(timeline::BatchBegin, (writeIndex - s_readIndex) & (s_primarySize / 4 - 1));
+                    s_busyFrom = std::chrono::steady_clock::now();
+                    s_busyWaitFrom = renderer::g_cpWaitNs;
+                    ExecuteBuffer(r, ctx);
+                    AccountBusy();
+                    timeline::Mark(timeline::BatchEnd);
+                    if (writewatch::g_submitRequested.exchange(false))
+                        renderer::Submit();
+                    renderer::SubmitIfIdle();
+                    s_readIndex = writeIndex;
+                    // The read pointer is fetch progress (as on the hardware), not
+                    // completion: everything the batch needs has been consumed or
+                    // copied, so its ring space is free now. D3D tracks resource
+                    // lifetimes with fences, which stay deferred to GPU completion.
+                    if (uint32_t wb = s_readWriteback)
+                        *reinterpret_cast<be<uint32_t>*>(Physical(wb)) = writeIndex;
+                    lastWork = std::chrono::steady_clock::now();
+                }
             }
         }
 
@@ -1287,12 +1352,11 @@ namespace gpu
                 video::NoteGuestVblank(fired);
                 s_counter++;
                 s_vblanks++;
+                s_vblanks.notify_one();
                 DispatchInterrupt(thread.ppcContext, 0, 2);
                 timing.Add(fired - next, now() - fired);
                 auto status = clock.GetStatus();
                 SB_WAKE("End of VSync!");
-                gpu::VblankWakeup().Wake();
-                gpu::ProgressWakeup().Wake();
                 if (status.locked != locked || status.slips != slips || status.extraChanges != holdChanges || ++count % 3600 == 0)
                 {
                     LogVblank(status, timing, timerName);
@@ -1371,5 +1435,22 @@ namespace gpu
             uint32_t(*MmioRegister(REG_CP_RB_WPTR)));
         text += FormatHistory();
         return text;
+    }
+}
+
+// Ring buffer write pointer update
+SB_HOOK(sub_82596A20)
+{
+    const bool sync = (std::getenv("NFSMW_SYNCHRONIZE_COMMAND_PROCESSOR") != nullptr);
+    std::unique_lock<std::mutex> lock(gpu::s_workMutex, std::defer_lock);
+    if (sync)
+    {
+        lock.lock(); // Lock is acquired here
+    }
+    SB_ORIGINAL(sub_82596A20)(ctx, base);
+        if (sync)
+    {
+        lock.unlock(); // Explicitly drop the lock before notifying to prevent waiter thrashing
+        gpu::s_workCv.notify_one();
     }
 }
