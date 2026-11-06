@@ -908,11 +908,10 @@ namespace gpu
                 }
                 WriteRegister(REG_VGT_EVENT_INITIATOR, initiator & 0x3F);
                 QueueStore(address, (initiator >> 31) & 1 ? s_counter.load() : value);
+                static const bool syncD3DWaits = std::getenv("NFSMW_SYNCHRONIZE_D3D_WAITS") != nullptr;
                 uint32_t base_address = address & 0x0FFFFF00;
-                if (std::getenv("NFSMW_SYNCHRONIZE_D3D_WAITS") != nullptr){
-                    if (base_address == 0x0644A000)
-                        d3dwaits::waiting_semaphore.release();
-                }
+                if (syncD3DWaits && base_address == d3dwaits::fence_page.load(std::memory_order_relaxed))
+                    d3dwaits::waiting_semaphore.release();
                 return true;
             }
 
@@ -1193,7 +1192,7 @@ namespace gpu
                     }
                     {
                         std::unique_lock<std::mutex> lock(s_workMutex);
-                        s_workCv.wait_for(lock, std::chrono::milliseconds(20), [&]() {
+                        s_workCv.wait_for(lock, std::chrono::milliseconds(500), [&]() {
                             uint32_t p = s_primaryBuffer;
                             uint32_t w = *MmioRegister(REG_CP_RB_WPTR);
                             return p != 0 && w != s_readIndex && (w * 4 < s_primarySize);

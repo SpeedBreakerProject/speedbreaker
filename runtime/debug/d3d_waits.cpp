@@ -63,6 +63,8 @@ SB_HOOK(sub_825A5B20)
     }
     SB_WAKE("D3DWait called");
     if (std::getenv("NFSMW_SYNCHRONIZE_D3D_WAITS") != nullptr){
+        uint32_t device = PPC_LOAD_U32(ctx.r3.u32);
+        d3dwaits::fence_page.store(PPC_LOAD_U32(device + 10384) & 0x0FFFFF00, std::memory_order_relaxed);
         d3dwaits::Block();
     }
     SB_ORIGINAL(sub_825A5B20)(ctx, base);

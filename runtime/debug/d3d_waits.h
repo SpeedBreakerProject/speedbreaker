@@ -4,6 +4,7 @@
 
 namespace d3dwaits
 {
+    inline std::atomic<uint32_t> fence_page{0};
     class BinarySemaphore {
     private:
         std::mutex mtx;
