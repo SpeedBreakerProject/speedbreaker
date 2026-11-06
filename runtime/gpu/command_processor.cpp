@@ -912,8 +912,8 @@ namespace gpu
                 if (std::getenv("NFSMW_SYNCHRONIZE_D3D_WAITS") != nullptr){
                     if (base_address == 0x0644A000)
                         d3dwaits::waiting_semaphore.release();
-                    return true;
                 }
+                return true;
             }
 
             case PM4_EVENT_WRITE_EXT:
