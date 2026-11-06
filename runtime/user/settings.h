@@ -68,6 +68,7 @@ namespace settings
         MasterVolume,
         Mute,
         MuteInBackground,
+        Speakers71,  // 7.1 Speakers: the surrounds on both pairs of a 7.1 output (apu/speaker_layout.h)
         // Input
         StickDeadzone,
         TriggerDeadzone,

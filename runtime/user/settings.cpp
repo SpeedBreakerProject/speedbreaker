@@ -393,6 +393,14 @@ namespace settings
               .table = "audio", .key = "mute_in_background", .label = "Mute in Background",
               .description = "Silence the game while its window isn't focused.",
               .env = "NFSMW_MUTE_UNFOCUSED", .defaultValue = 0 },
+            // GitHub issue #91 (apu/speaker_layout.h). Off by default: on it
+            // changes what a 7.1 output plays, which nobody asked for unless
+            // they turn it on; off, every output gets the 5.1 as before.
+            { .id = Id::Speakers71, .category = Category::Audio, .type = Type::Bool, .apply = Apply::Live,
+              .table = "audio", .key = "speakers_71", .label = "7.1 Speakers",
+              .description = "The game's sound is 5.1, so on 7.1 speakers one surround pair stays silent. On: the two "
+                             "surround channels play on both pairs, a little quieter each. Only 7.1 outputs change.",
+              .env = "NFSMW_SPEAKERS_71", .defaultValue = 0 },
             // Input
             { .id = Id::StickDeadzone, .category = Category::Input, .type = Type::Float, .apply = Apply::Live,
               .table = "input", .key = "stick_deadzone", .label = "Stick Deadzone",

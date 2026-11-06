@@ -6,8 +6,9 @@
 // (256 samples x 6 channels, planar big-endian float).
 //
 // Frames go to an SDL3 audio stream (5.1 float; SDL downmixes to whatever
-// the device has). The callback runs like the hardware's: one frame every
-// 5.33 ms, evenly (the game's voices hold only a couple of frames of
+// the device has; with Settings > Audio > 7.1 Speakers, 7.1 on an 8-channel
+// device: apu/speaker_layout.h). The callback runs like the hardware's: one
+// frame every 5.33 ms, evenly (the game's voices hold only a couple of frames of
 // decoded audio). Calling it in
 // bursts of whatever the device pulls at once (1024+ samples on PipeWire)
 // left every voice empty for half of each burst: gameplay audio came out
@@ -30,6 +31,7 @@
 #include <stdafx.h>
 #include "audio.h"
 #include "audio_cadence.h"
+#include "speaker_layout.h"
 #include <kernel/function.h>
 #include <cpu/guest_thread.h>
 #include <cpu/guest_time.h>
@@ -53,13 +55,20 @@ namespace
     std::atomic<bool> s_running{ false };
     std::atomic<uint64_t> s_framesSubmitted{ 0 };
     std::atomic<uint64_t> s_rendered{ 0 };  // render callbacks (apu::RenderedFrames)
-    constexpr uint32_t CHANNELS = 6;               // FL FR FC LFE SL SR
+    constexpr uint32_t CHANNELS = apu::kGameChannels;  // the game's frames: FL FR FC LFE SL SR
     // Set once, under s_streamMutex, which also orders starting the device
     // (OpenDevice, a guest thread) against pausing it (the main thread), so
     // a suspension can't slip between the check and the start.
     std::mutex s_streamMutex;
     SDL_AudioStream* s_stream = nullptr;
-    constexpr int FRAME_BYTES = SAMPLES_PER_FRAME * CHANNELS * sizeof(float);
+    // What the stream takes (apu/speaker_layout.h): 5.1, or 7.1 with 7.1
+    // Speakers on and an 8-channel device. The audio thread sets it (and
+    // OpenDevice before that thread starts); s_channels and
+    // s_deviceChannels are read from any thread (QueuedMs, the menu).
+    apu::SpeakerLayout s_layout = apu::SpeakerLayout::Game51;
+    std::atomic<uint32_t> s_channels{ CHANNELS };
+    std::atomic<int> s_deviceChannels{ 0 };  // 0: no device (yet)
+    int FrameBytes() { return int(SAMPLES_PER_FRAME * s_channels.load(std::memory_order_relaxed) * sizeof(float)); }
     std::atomic<int> s_targetFrames{ 4 };  // SDL queue level to hold (frames of 256 samples)
     int s_deviceFrames = 0;                // the device's buffer at the stream's rate (FollowDevice)
     // What the hang report says about the audio (apu::DescribeState): when
@@ -76,6 +85,61 @@ namespace
         return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
     }
 
+    // The stream's layout for its device's channels and the 7.1 Speakers
+    // setting (apu/speaker_layout.h): when it changes (the setting, or a
+    // device with other channels), the stream takes the new layout from
+    // the next frame on; what is queued plays out in the old one (SDL keeps
+    // each format's data apart). Off, or not 7.1, it stays 5.1 as before.
+    void LogWide()
+    {
+        fprintf(stderr, "[audio] 7.1 Speakers: 7.1 output, the game's two surround channels on the back and side pairs (%.1f dB each)\n",
+            20.0 * std::log10(double(apu::kSurroundShare)));
+    }
+
+    void FollowLayout(int deviceChannels)
+    {
+        const bool on = settings::GetBool(settings::Id::Speakers71);
+        const apu::SpeakerLayout layout = apu::SpeakerLayoutFor(on, deviceChannels);
+        static int noted = -1;  // the device channels last logged about
+        if (layout != s_layout)
+        {
+            const SDL_AudioSpec spec{ SDL_AUDIO_F32, int(apu::ChannelsOf(layout)), int(SAMPLE_RATE) };
+            if (!SDL_SetAudioStreamFormat(s_stream, &spec, nullptr))
+            {
+                static bool logged = false;  // it's tried again every second: say so once
+                if (!std::exchange(logged, true))
+                    fprintf(stderr, "[audio] 7.1 Speakers: couldn't switch the output to %s: %s (staying %s)\n",
+                        apu::SpeakerLayoutName(layout), SDL_GetError(), apu::SpeakerLayoutName(s_layout));
+                return;
+            }
+            s_layout = layout;
+            s_channels.store(apu::ChannelsOf(layout), std::memory_order_relaxed);
+            noted = deviceChannels;
+            if (layout == apu::SpeakerLayout::Wide71)
+                LogWide();
+            else
+                fprintf(stderr, "[audio] 7.1 Speakers: 5.1 output as before (%s, the device has %d channels)\n",
+                    on ? "on" : "off", deviceChannels);
+            return;
+        }
+        // Once per device: 7.1 in use; an 8-channel output with the setting
+        // off plays the surrounds on one of its two pairs (SDL's 5.1 to 7.1),
+        // and the log says where to change that; with it on but no 7.1
+        // device, why nothing changed. Off on any other device: nothing.
+        if (deviceChannels != noted)
+        {
+            noted = deviceChannels;
+            if (layout == apu::SpeakerLayout::Wide71)
+                LogWide();
+            else if (!on && deviceChannels == 8)
+                fprintf(stderr, "[audio] the output is 7.1 (8 channels): the game's 5.1 surround channels play on its back "
+                    "pair only; Settings > Audio > 7.1 Speakers plays them on the side pair too\n");
+            else if (on && layout == apu::SpeakerLayout::Game51)
+                fprintf(stderr, "[audio] 7.1 Speakers is on, but the output has %d channels, not 8: 5.1 as before\n",
+                    deviceChannels);
+        }
+    }
+
     // The queue level for the stream's device as it is now: two device
     // buffers (at the stream's rate), at least 4 frames. Logs it when it
     // changes, as when iOS moves the output to Bluetooth headphones, whose
@@ -87,14 +151,16 @@ namespace
         SDL_AudioDeviceID device = SDL_GetAudioStreamDevice(s_stream);
         if (!SDL_GetAudioDeviceFormat(device, &deviceSpec, &deviceFrames))
             return;
+        s_deviceChannels.store(deviceSpec.channels, std::memory_order_relaxed);
+        FollowLayout(deviceSpec.channels);
         if (deviceFrames > 0 && deviceSpec.freq > 0)
             deviceFrames = int(int64_t(deviceFrames) * SAMPLE_RATE / deviceSpec.freq);
         if (!opening && deviceFrames == s_deviceFrames)
             return;
         s_deviceFrames = deviceFrames;
         s_targetFrames = std::max(4, (2 * deviceFrames + int(SAMPLES_PER_FRAME) - 1) / int(SAMPLES_PER_FRAME));
-        fprintf(stderr, "[audio] %s: %s, 5.1 float at %u Hz (device %d ch, %s at %d Hz; device buffer %d samples, queue target %.1f ms)\n",
-            opening ? "output" : "output now", SDL_GetAudioDeviceName(device), SAMPLE_RATE, deviceSpec.channels,
+        fprintf(stderr, "[audio] %s: %s, %s float at %u Hz (device %d ch, %s at %d Hz; device buffer %d samples, queue target %.1f ms)\n",
+            opening ? "output" : "output now", SDL_GetAudioDeviceName(device), apu::SpeakerLayoutName(s_layout), SAMPLE_RATE, deviceSpec.channels,
             SDL_GetAudioFormatName(deviceSpec.format), deviceSpec.freq, deviceFrames,
             1000.0 * s_targetFrames * SAMPLES_PER_FRAME / SAMPLE_RATE);
     }
@@ -110,7 +176,31 @@ namespace
             fprintf(stderr, "[audio] SDL audio init failed: %s (silent)\n", SDL_GetError());
             return;
         }
-        SDL_AudioSpec spec{ SDL_AUDIO_F32, int(CHANNELS), int(SAMPLE_RATE) };
+        // NFSMW_TEST_AUDIO_DEVICE_CHANNELS=<n> (tests): the default output
+        // device opened at n channels first, and held open: as a system whose
+        // output has n channels (Windows opens a 7.1 receiver's device at 8,
+        // whatever the game asks for). With SDL's disk driver
+        // (SDL_AUDIO_DRIVER=disk, SDL_AUDIO_DISK_OUTPUT_FILE), a 7.1 output to
+        // check without 7.1 speakers: what the device gets is in the file.
+        if (const char* v = std::getenv("NFSMW_TEST_AUDIO_DEVICE_CHANNELS"); v && std::atoi(v) > 0)
+        {
+            const SDL_AudioSpec hold{ SDL_AUDIO_F32, std::atoi(v), int(SAMPLE_RATE) };
+            if (SDL_OpenAudioDevice(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &hold))
+                fprintf(stderr, "[test] NFSMW_TEST_AUDIO_DEVICE_CHANNELS: the output device held open at %d channels\n", hold.channels);
+            else
+                fprintf(stderr, "[test] NFSMW_TEST_AUDIO_DEVICE_CHANNELS: couldn't open the output device: %s\n", SDL_GetError());
+        }
+        // 7.1 Speakers on and a default device with 8 channels: ask for 7.1
+        // (the stream's format, and what the device is opened with where the
+        // system lets the app choose). Otherwise 5.1, as before.
+        apu::SpeakerLayout layout = apu::SpeakerLayout::Game51;
+        if (settings::GetBool(settings::Id::Speakers71))
+        {
+            SDL_AudioSpec deviceSpec{};
+            if (SDL_GetAudioDeviceFormat(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &deviceSpec, nullptr))
+                layout = apu::SpeakerLayoutFor(true, deviceSpec.channels);
+        }
+        SDL_AudioSpec spec{ SDL_AUDIO_F32, int(apu::ChannelsOf(layout)), int(SAMPLE_RATE) };
         SDL_AudioStream* stream = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec, nullptr, nullptr);
         if (!stream)
         {
@@ -122,6 +212,8 @@ namespace
             // so until apu::ResumeOutput starts it.
             std::lock_guard lock(s_streamMutex);
             s_stream = stream;
+            s_layout = layout;
+            s_channels.store(apu::ChannelsOf(layout), std::memory_order_relaxed);
             if (!guesttime::Suspended())
                 SDL_ResumeAudioStreamDevice(s_stream);
         }
@@ -258,7 +350,7 @@ namespace
                 // Follow the device clock: one frame more or less when the
                 // queue drifts from its target, never stopping the game's
                 // sound (audio_cadence.h).
-                int queued = std::max(0, SDL_GetAudioStreamQueued(s_stream)) / FRAME_BYTES;
+                int queued = std::max(0, SDL_GetAudioStreamQueued(s_stream)) / FrameBytes();
                 frames = s_cadence.Frames(queued, s_targetFrames);
                 if (s_cadence.Stalled() && !s_deviceStalledNs.load(std::memory_order_relaxed))
                 {
@@ -329,7 +421,17 @@ namespace apu
         if (!s_stream)
             return 0.0;
         int queued = std::max(0, SDL_GetAudioStreamQueued(s_stream));
-        return 1000.0 * queued / (CHANNELS * sizeof(float) * SAMPLE_RATE);
+        return 1000.0 * queued / (s_channels.load(std::memory_order_relaxed) * sizeof(float) * SAMPLE_RATE);
+    }
+
+    int OutputChannels()
+    {
+        return s_deviceChannels.load(std::memory_order_relaxed);
+    }
+
+    bool SurroundOnBothPairs()
+    {
+        return s_channels.load(std::memory_order_relaxed) == 8;
     }
 }
 
@@ -414,6 +516,8 @@ uint32_t XAudioSubmitRenderDriverFrame(uint32_t driver, void* samples)
             float volume = float(settings::GetInt(settings::Id::MasterVolume)) / 100.0f;
             float gain = muted || background ? 0.0f : volume * volume;  // squared: closer to perceived loudness
             SDL_SetAudioStreamGain(s_stream, gain);
+            // 7.1 Speakers, turned on or off in the menu: from this frame.
+            FollowLayout(s_deviceChannels.load(std::memory_order_relaxed));
             static float logged = -1.0f;
             if (gain != logged)
             {
@@ -425,16 +529,11 @@ uint32_t XAudioSubmitRenderDriverFrame(uint32_t driver, void* samples)
             }
         }
     }
-    const auto* in = static_cast<const uint32_t*>(samples);
-    float out[SAMPLES_PER_FRAME * CHANNELS];
-    for (uint32_t c = 0; c < CHANNELS; c++)
-        for (uint32_t i = 0; i < SAMPLES_PER_FRAME; i++)
-        {
-            uint32_t bits = ByteSwap(in[c * SAMPLES_PER_FRAME + i]);
-            float v;
-            memcpy(&v, &bits, 4);
-            out[i * CHANNELS + c] = v;
-        }
+    // The frame as the stream takes it: 5.1 as the game mixed it, or 7.1
+    // with the surrounds on both pairs (apu/speaker_layout.h).
+    float out[SAMPLES_PER_FRAME * apu::kMaxChannels];
+    const uint32_t outFloats = SAMPLES_PER_FRAME * apu::ChannelsOf(s_layout);
+    apu::InterleaveFrame(static_cast<const uint32_t*>(samples), SAMPLES_PER_FRAME, s_layout, out);
     // Cut-out detection: the device ran dry, or the game's frames stopped.
     // Gaps in guest time, so a suspension (the device paused with it) isn't
     // one, even for a frame that was under way as it began.
@@ -471,11 +570,12 @@ uint32_t XAudioSubmitRenderDriverFrame(uint32_t driver, void* samples)
         s_dropped.fetch_add(1, std::memory_order_relaxed);
         return 0;
     }
-    SDL_PutAudioStreamData(s_stream, out, sizeof(out));
+    SDL_PutAudioStreamData(s_stream, out, int(outFloats * sizeof(float)));
 
-    // NFSMW_AUDIO_DUMP=<file>: the final mix as raw interleaved 6-channel
-    // float (48 kHz), from NFSMW_AUDIO_DUMP_FROM seconds for
-    // NFSMW_AUDIO_DUMP_SECONDS (default 30).
+    // NFSMW_AUDIO_DUMP=<file>: the final mix as raw interleaved float (48 kHz)
+    // as the stream takes it: 6 channels, or 8 while 7.1 Speakers is in use
+    // (a switch mid-dump changes it from there); from NFSMW_AUDIO_DUMP_FROM
+    // seconds for NFSMW_AUDIO_DUMP_SECONDS (default 30).
     {
         static const char* dumpPath = std::getenv("NFSMW_AUDIO_DUMP");
         static const double from = [] { const char* v = std::getenv("NFSMW_AUDIO_DUMP_FROM"); return v ? std::atof(v) : 0.0; }();
@@ -490,7 +590,7 @@ uint32_t XAudioSubmitRenderDriverFrame(uint32_t driver, void* samples)
                 dumpPath = nullptr;
             if (dump)
             {
-                fwrite(out, sizeof(out), 1, dump);
+                fwrite(out, outFloats * sizeof(float), 1, dump);
                 dumped += SAMPLES_PER_FRAME;
                 if (dumped >= uint64_t(seconds * SAMPLE_RATE))
                 {
@@ -508,15 +608,16 @@ uint32_t XAudioSubmitRenderDriverFrame(uint32_t driver, void* samples)
         static double sumSquares = 0;
         static float peak = 0;
         static uint32_t frames = 0;
-        for (float v : out)
+        for (uint32_t k = 0; k < outFloats; k++)
         {
+            const float v = out[k];
             sumSquares += double(v) * v;
             peak = std::max(peak, std::fabs(v));
         }
         if (++frames == 375)
         {
             fprintf(stderr, "[audio] level: peak %.3f, rms %.4f\n", peak,
-                std::sqrt(sumSquares / (375.0 * SAMPLES_PER_FRAME * CHANNELS)));
+                std::sqrt(sumSquares / (375.0 * outFloats)));
             sumSquares = 0;
             peak = 0;
             frames = 0;

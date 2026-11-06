@@ -195,6 +195,11 @@ sb_test(present_schedule_test)
 # doesn't stop the game's sound (GitHub issue #20: the sound stopped for good,
 # then the game hung after the race), and a working one is followed as before.
 sb_test(audio_cadence_test)
+# Settings > Audio > 7.1 Speakers (apu/speaker_layout.h, header only; GitHub
+# issue #91: a 7.1 receiver left its side pair silent): off, the frame is bit
+# for bit the 5.1 it was; on, with an 8-channel device, the game's surrounds
+# on both the back and the side pair at -3 dB each.
+sb_test(speaker_layout_test)
 # EA SND's mixer never drops sounds for time on a host (apu/ea_cpu_budget.h,
 # header only; GitHub issue #35: one sound, usually the engine, much quieter
 # until the next gear change): EA's budget rule as a model, the policy, and

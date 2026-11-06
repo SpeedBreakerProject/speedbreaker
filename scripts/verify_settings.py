@@ -106,7 +106,7 @@ ROWS = {
                 'video.xbox_display_gamma', 'video.cooler_colors', 'video.hdr'] + (['video.hdr_format'] if MAC else []) + ['video.hdr_strength', 'video.hdr_paper_white'],
     'Graphics': ['video.anti_aliasing', 'video.scaling', 'video.sharpening', 'video.anisotropic_filtering',
                  'video.mipmaps', 'video.internal_resolution', 'video.shadow_resolution'],
-    'Audio': ['audio.master_volume', 'audio.mute', 'audio.mute_in_background'],
+    'Audio': ['audio.master_volume', 'audio.mute', 'audio.mute_in_background', 'audio.speakers_71'],
     'Input': ['input.stick_deadzone', 'input.trigger_deadzone', 'input.vibration'],
     'Advanced': ['advanced.async_shaders', 'advanced.performance_overlay'],
 }
@@ -117,7 +117,7 @@ DEFAULTS = {
     'video.aspect_ratio': '"auto"', 'video.brightness': '0', 'video.xbox_display_gamma': 'true', 'video.cooler_colors': 'false', 'video.hdr': 'false',
     'video.hdr_format': '"auto"', 'video.hdr_strength': '"2x"', 'video.hdr_paper_white': '"auto"', 'video.sharpening': '0.3', 'video.anisotropic_filtering': '"auto"',
     'video.mipmaps': 'true', 'video.internal_resolution': '"auto"', 'video.shadow_resolution': '"1x"', 'audio.master_volume': '100', 'audio.mute': 'false',
-    'audio.mute_in_background': 'false', 'input.stick_deadzone': '0.08', 'input.trigger_deadzone': '0.02',
+    'audio.mute_in_background': 'false', 'audio.speakers_71': 'false', 'input.stick_deadzone': '0.08', 'input.trigger_deadzone': '0.02',
     'input.vibration': 'true', 'advanced.async_shaders': 'true', 'advanced.performance_overlay': 'false',
 }
 

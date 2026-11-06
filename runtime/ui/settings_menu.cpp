@@ -13,6 +13,7 @@
 #include "ui.h"
 #include "quit_game.h"
 
+#include <apu/audio.h>       // the 7.1 Speakers row's note: the output's channels
 #include <game/language.h>  // the Language row's note: what the installed files give
 #include <gpu/renderer.h>    // Internal Resolution's labels: what each entry renders now
 #include <report/report.h>
@@ -830,6 +831,11 @@ namespace ui
                     ImGui::TextDisabled("Changes take effect the next time the game starts.");
                 return;
             }
+            // 7.1 Speakers: what it does, then (below) what this output is.
+            // (Other rows show only the line below: their descriptions have
+            // been left out of the help line since the Controls page, PR #12.)
+            if (o.id == Id::Speakers71)
+                ImGui::TextWrapped("%s", o.description);
             // The experiment's finer scale wins over Screen Resolution's.
             if (float scale = video::PresentScaleOverride(); o.id == Id::PresentScale && scale > 0.0f)
                 ImGui::TextDisabled("NFSMW_PRESENT_SCALE sets %.2f for this run.", double(scale));
@@ -848,6 +854,20 @@ namespace ui
                 ImGui::TextDisabled("This screen shows 60 pictures a second: nothing to add here.");
             else if (o.id == Id::Hdr || o.id == Id::HdrFormat || o.id == Id::HdrStrength || o.id == Id::HdrPaperWhite)
                 ImGui::TextDisabled("In use: %s.", video::HdrStatus());
+            // What this output is, so a 7.1 owner can tell it applies.
+            else if (o.id == Id::Speakers71)
+            {
+                const int channels = apu::OutputChannels();
+                if (apu::SurroundOnBothPairs())
+                    ImGui::TextDisabled("In use: 7.1, the surround channels on both pairs.");
+                else if (channels == 8)
+                    ImGui::TextDisabled("This output is 7.1 (8 channels).%s",
+                        settings::GetBool(o.id) ? "" : " Off: one of its surround pairs is silent.");
+                else if (channels > 0)
+                    ImGui::TextDisabled("This output has %d channel%s, not 7.1: nothing changes here.", channels, channels == 1 ? "" : "s");
+                else
+                    ImGui::TextDisabled("No sound output.");
+            }
             else if (o.apply == settings::Apply::Restart)
                 ImGui::TextDisabled("Changes take effect the next time the game starts.");
             else if (std::string note = o.id == Id::FrameRate ? video::AutoFrameRateNote() : std::string(); !note.empty())
