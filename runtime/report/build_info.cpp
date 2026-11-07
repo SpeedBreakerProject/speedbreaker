@@ -5,7 +5,9 @@
 // commit. build_info.inc is written at build time by build_info.cmake
 // (runtime/CMakeLists.txt); a build without it (a hand-run compiler) still
 // works and says "unknown". A labelled build (SB_BUILD_LABEL: the Windows
-// beta) also defines NFSMW_BUILD_RELEASE, "Windows beta 2026-10-11".
+// beta) also defines NFSMW_BUILD_RELEASE, "Windows beta 2026-10-11", and a
+// release build (SB_RELEASE_TAG) NFSMW_BUILD_TAG, the tag it is published
+// as: "v0.2.4", "v0.2.4-windows-beta.7".
 #include <stdafx.h>
 #include "report.h"
 
@@ -14,6 +16,9 @@
 #endif
 #ifndef NFSMW_BUILD_VERSION
 #define NFSMW_BUILD_VERSION "0.0.0"
+#endif
+#ifndef NFSMW_BUILD_TAG
+#define NFSMW_BUILD_TAG ""
 #endif
 #ifndef NFSMW_BUILD_COMMIT
 #define NFSMW_BUILD_COMMIT "unknown"
@@ -33,6 +38,16 @@ namespace report
     {
         static const std::string text = std::format("v{} ({})", Version(), BuildId());
         return text.c_str();
+    }
+
+    const char* ReleaseTag()
+    {
+        return NFSMW_BUILD_TAG;
+    }
+
+    bool Dirty()
+    {
+        return NFSMW_BUILD_DIRTY != 0;
     }
 
     const char* BuildId()

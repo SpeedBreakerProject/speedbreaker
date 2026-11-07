@@ -61,6 +61,13 @@
 # --dmg: also <output>/SpeedBreaker-macos.dmg (the app and a shortcut to
 # Applications, to drag it onto) with its .sha256, the release download, and
 # a copy named by the version (SpeedBreaker-<version>-macos.dmg, a hard link).
+# A download is a release build: it must carry its release tag, v<version>
+# (configured with -DSB_RELEASE_TAG=v<version>; the update check's identity
+# for it, NFSMW_BUILD_TAG). Any build whose tag isn't its version's is
+# refused, --dmg or not; an untagged app (not a download) is a development
+# build, which shows a newer release's page but never updates itself.
+# SB_UNTAGGED=1 makes a dmg of an untagged build anyway, to try one (never a
+# release).
 # The dmg is an HFS+ volume (Mac OS Extended) on a GPT disk, compressed
 # (UDZO), made by hdiutil while it works: macOS 27 deprecates hdiutil's
 # create, attach, detach and imageinfo (they still work; -quiet hides the
@@ -165,6 +172,26 @@ def build_identity():
     if not re.fullmatch(r'\d+\.\d+\.\d+', version or ''):
         raise SystemExit(f'make_app.py: no version in {BUILD} (project() in CMakeLists.txt; build first)')
     return version, info.get('COMMIT', 'unknown'), info.get('DIRTY', '0') == '1'
+
+
+def check_release_tag(version):
+    """The build's release tag (NFSMW_BUILD_TAG) must be its version's; a download (--dmg) must have one."""
+    tag = ''
+    try:
+        with open(os.path.join(BUILD, 'runtime/generated/build_info.inc')) as f:
+            m = re.search(r'^#define NFSMW_BUILD_TAG "([^"\n]*)"', f.read(), re.M)
+            tag = m.group(1) if m else ''
+    except OSError:
+        pass
+    if tag and tag != f'v{version}':
+        raise SystemExit(f'make_app.py: the build is tagged {tag}, not v{version} (its version on macOS): '
+                         f'reconfigure with -DSB_RELEASE_TAG=v{version}')
+    if DMG and not tag and os.environ.get('SB_UNTAGGED') != '1':
+        raise SystemExit(f'make_app.py: --dmg makes a release download, and the build has no release tag: '
+                         f'reconfigure with -DSB_RELEASE_TAG=v{version} and build again (SB_UNTAGGED=1: a dmg to try, never a release)')
+    if not tag:
+        print('make_app.py: note: an untagged build (a development build: it never updates itself)', file=sys.stderr)
+    return tag
 
 
 def build_number(commit):
@@ -493,6 +520,7 @@ def main():
     if not os.access(BIN, os.X_OK):
         raise SystemExit(f'make_app.py: no {BIN}; build first')
     version, commit, dirty = build_identity()
+    check_release_tag(version)
     if dirty:
         print(f'make_app.py: warning: the build is {commit}-dirty (uncommitted changes): not for release', file=sys.stderr)
     minimum = cache_value('CMAKE_OSX_DEPLOYMENT_TARGET')

@@ -116,7 +116,7 @@ DEFAULTS = {
     'video.anti_aliasing': 'true', 'video.scaling': '"bicubic"',
     'video.aspect_ratio': '"auto"', 'video.brightness': '0', 'video.xbox_display_gamma': 'true', 'video.cooler_colors': 'false', 'video.hdr': 'false',
     'video.hdr_format': '"auto"', 'video.hdr_strength': '"2x"', 'video.hdr_paper_white': '"auto"', 'video.sharpening': '0.3', 'video.anisotropic_filtering': '"auto"',
-    'video.mipmaps': 'true', 'video.internal_resolution': '"auto"', 'video.shadow_resolution': '"1x"', 'audio.master_volume': '100', 'audio.mute': 'false',
+    'video.mipmaps': 'true', 'video.internal_resolution': '"auto"', 'video.shadow_resolution': '"auto"', 'audio.master_volume': '100', 'audio.mute': 'false',
     'audio.mute_in_background': 'false', 'input.stick_deadzone': '0.08', 'input.trigger_deadzone': '0.02',
     'input.vibration': 'true', 'advanced.async_shaders': 'true', 'advanced.performance_overlay': 'false',
 }

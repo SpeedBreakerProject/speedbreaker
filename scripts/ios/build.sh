@@ -17,6 +17,8 @@
 #   IOS_BUNDLE_ID       the app's bundle identifier (unique to the team)
 #   IOS_DEVICE          the device to install on (`xcrun devicectl list
 #                       devices`; the only connected one by default)
+#   SB_RELEASE_TAG      v<version> for a release build (make_ipa.sh needs it);
+#                       "" back to a development build
 #   IOS_UNSIGNED=1      an app nobody signed, for make_ipa.sh (an IPA that
 #                       players sideload): no team, no account, no profile;
 #                       in build/ios/xcode-unsigned. IOS_BUNDLE_ID is then
@@ -46,6 +48,12 @@ if [ ! -f "$BUILD/build.ninja" ]; then
         -DSDL3_DIR="$PREFIX/lib/cmake/SDL3" -Dglslang_DIR="$PREFIX/lib/cmake/glslang" \
         -DFFMPEG_XMA="$PREFIX" -DMOLTENVK_DIR="$MOLTENVK"
 fi
+# SB_RELEASE_TAG=v<version>: a release build (the update check's identity
+# for it, NFSMW_BUILD_TAG; make_ipa.sh needs it). Set on every run that names
+# it, so the cached configure follows.
+if [ -n "${SB_RELEASE_TAG+x}" ]; then
+    cmake -S "$ROOT" -B "$BUILD" -DSB_RELEASE_TAG="$SB_RELEASE_TAG" > /dev/null
+fi
 ninja -C "$BUILD" -j"$JOBS"
 
 # The runtime's archive whole (static constructors register things nobody
@@ -60,6 +68,9 @@ LIBS=(
 )
 if [ -f "$BUILD/recomp/libNfsmwRecompPalEsLib.a" ]; then
     LIBS+=("$BUILD/recomp/libNfsmwRecompPalEsLib.a")
+fi
+if [ -f "$BUILD/recomp/libNfsmwRecompPalDeLib.a" ]; then
+    LIBS+=("$BUILD/recomp/libNfsmwRecompPalDeLib.a")
 fi
 LIBS+=(
     "$BUILD/runtime/libXenonUtilsLite.a" "$BUILD/runtime/libo1heap.a"

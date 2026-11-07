@@ -1,28 +1,34 @@
 #!/usr/bin/env python3
-"""USA -> another region's guest addresses, for Most Wanted's PAL (Spanish) disc.
+"""USA -> another region's guest addresses, for Most Wanted's PAL discs: the
+Spanish one (pal-es, the default) and the German one (pal-de).
 
-The PAL default.xex is the USA build's source tree built for Europe: 22,679
-functions, aligned 1:1 with the USA's (all but 19 the same code modulo the
-addresses in it), laid out in 17 pieces shifted by 0..+0x200; .data and .bss
-keep their addresses, .rdata items shift by 0..+0xD0. This maps any USA
+The PAL (Spanish) default.xex is the USA build's source tree built for Europe:
+22,679 functions, aligned 1:1 with the USA's (all but 19 the same code modulo
+the addresses in it), laid out in 17 pieces shifted by 0..+0x200; .data and
+.bss keep their addresses, .rdata items shift by 0..+0xD0. This maps any USA
 address the recompiler config or the runtime names to the PAL one, and checks
 the PAL bytes there are the USA's (instructions compared with branch
-displacements and address halves masked).
+displacements and address halves masked). The German default.xex is mapped
+the same way; how close it is to the USA's is only known once this has run on
+it (an address it can't map is an error naming it).
 
-    python3 survey/region_map.py toml   <usa dir> <pal dir> <funcmap.tsv>
+    python3 survey/region_map.py toml   <usa dir> <pal dir> <funcmap.tsv> [--region pal-de]
         writes config/pal-es/{nfsmw.toml,switch_tables.toml} from config/
-    python3 survey/region_map.py table  <usa dir> <pal dir> <funcmap.tsv>
-        writes runtime/region/pal_es_addresses.inc: every guest address the
-        runtime's sources name (runtime/region/hook_addresses.py finds them)
-    python3 survey/region_map.py check  <usa dir> <pal dir> <funcmap.tsv>
+        (config/pal-de/ with --region pal-de)
+    python3 survey/region_map.py table  <usa dir> <pal dir> <funcmap.tsv> [--region pal-de]
+        writes runtime/region/pal_es_addresses.inc (pal_de_addresses.inc):
+        every guest address the runtime's sources name
+        (runtime/region/hook_addresses.py finds them)
+    python3 survey/region_map.py check  <usa dir> <pal dir> <funcmap.tsv> [--region pal-de]
         both, compared with the committed files (exit 1 on a difference)
 
 <usa dir>/<pal dir>: a decrypted, decompressed image of each default.xex
 (image.bin, base 0x82000000; survey/xexsurvey.cpp writes it, with the section
 table in xexsurvey.txt). funcmap.tsv: usa_addr pal_addr usa_len pal_len status
-for every USA .pdata function (status exact, reloc-equal or changed). All are
-derived from the player's own discs and never committed: only the addresses
-this writes are. Run with python3 -I.
+for every USA .pdata function (status exact, reloc-equal or changed;
+survey/func_map.py writes it from the two images). All are derived from the
+player's own discs and never committed: only the addresses this writes are.
+Run with python3 -I.
 """
 import bisect
 import collections
@@ -65,6 +71,24 @@ class Image:
     def bytes(self, addr, n):
         o = addr - BASE
         return self.data[o:o + n] if 0 <= o and o + n <= len(self.data) else None
+
+    def functions(self):
+        """The .pdata functions, [(start, length in bytes)] sorted by start:
+        8-byte entries, the start, then the length in words at bits 8..29
+        (XenonRecomp's IMAGE_CE_RUNTIME_FUNCTION)."""
+        if not hasattr(self, '_functions'):
+            pdata = [s for s in self.sections if s[0] == '.pdata']
+            if not pdata:
+                sys.exit('no .pdata section in xexsurvey.txt (survey/xexsurvey.cpp\'s section table)')
+            _, lo, hi, _ = pdata[0]
+            out = {}
+            for a in range(lo, hi - 7, 8):
+                begin, packed = struct.unpack_from('>II', self.data, a - BASE)
+                length = ((packed >> 8) & 0x3FFFFF) * 4
+                if begin and length:
+                    out.setdefault(begin, length)
+            self._functions = sorted(out.items())
+        return self._functions
 
 
 def norm(ws):
@@ -256,17 +280,26 @@ HEX = re.compile(r'0x82[0-9A-Fa-f]{6}\b')
 
 
 def translate_toml(rm, text, header, replacements):
-    out = []
-    for line in text.splitlines(keepends=True):
+    out, bad = [], []
+    for n, line in enumerate(text.splitlines(keepends=True), 1):
         code, hash_, comment = line.partition('#')
         for old, new in replacements:
             code = code.replace(old, new)
 
         def sub(m):
             usa = int(m.group(0), 16)
-            pal, _ = rm.code(usa)
+            try:
+                pal, _ = rm.code(usa)
+            except ValueError as e:
+                bad.append(f'line {n}: {e}')
+                return m.group(0)
             return f'0x{pal:08X}'
         out.append(HEX.sub(sub, code) + hash_ + comment)
+    if bad:
+        # Every address at once: each needs a look by hand (a function the
+        # other build changed, or one it doesn't have).
+        sys.exit(f'{header.splitlines()[0]}\ncannot map {len(bad)} address(es):\n  ' + '\n  '.join(bad[:200])
+                 + ('\n  ...' if len(bad) > 200 else ''))
     return header + ''.join(out)
 
 
@@ -281,10 +314,41 @@ PAL_ES_EXTRA_FUNCTIONS = [
     (0x823AF0F8, 0xE0, 0x823AF108, 11, 0x823AF1D0),
 ]
 
+# The German build has the same two, at the same addresses (found by
+# find_extra_functions on its image, and checked against it like the Spanish
+# ones). A region whose extra functions aren't known yet takes None:
+# find_extra_functions then finds them on each run (and prints what it found).
+PAL_DE_EXTRA_FUNCTIONS = [
+    (0x823AF018, 0xE0, 0x823AF028, 11, 0x823AF0F0),
+    (0x823AF0F8, 0xE0, 0x823AF108, 11, 0x823AF1D0),
+]
 
-def extra_tables(rm):
+
+class Region:
+    """What differs between the PAL releases this maps to."""
+
+    def __init__(self, rid, name, title, xex_sha256, extras_name, extras):
+        self.id = rid                          # pal-es: config/pal-es/, ppc-pal-es/, game/files-pal-es/
+        self.stem = rid.replace('-', '_')      # pal_es: runtime/region/pal_es_addresses.inc, pal_es_names.h
+        self.macro = 'SB_' + self.stem.upper()  # SB_PAL_ES_ADDRESS, SB_PAL_ES_sub_<USA>
+        self.name = name                       # "PAL (Spanish)"
+        self.title = title                     # "(Xbox 360, Europe/PAL, Spanish)" in the config's first line
+        self.xex_sha256 = xex_sha256
+        self.extras_name, self.extras = extras_name, extras
+        self.rerun = 'survey/region_map.py table' + ('' if rid == 'pal-es' else f' --region {rid}')
+
+
+REGIONS = {
+    'pal-es': Region('pal-es', 'PAL (Spanish)', 'Europe/PAL, Spanish', hook_addresses.PAL_ES_XEX_SHA256,
+                     'PAL_ES_EXTRA_FUNCTIONS', PAL_ES_EXTRA_FUNCTIONS),
+    'pal-de': Region('pal-de', 'PAL (German)', 'Europe/PAL, German', hook_addresses.PAL_DE_XEX_SHA256,
+                     'PAL_DE_EXTRA_FUNCTIONS', PAL_DE_EXTRA_FUNCTIONS),
+}
+
+
+def extra_tables(rm, functions):
     out = []
-    for addr, size, base, r, default in PAL_ES_EXTRA_FUNCTIONS:
+    for addr, size, base, r, default in functions:
         ws = rm.pal.words(addr, size // 4)
         bctr = next(addr + 4 * i for i, w in enumerate(ws) if w == 0x4E800420)
         cmp = ws[2]
@@ -294,6 +358,166 @@ def extra_tables(rm):
         assert all(addr <= l < addr + size for l in labels + [default]), f'{addr:#x}: a label outside the function'
         assert bctr + 4 + 4 * n == min(labels), f'{addr:#x}: the table does not end where the cases begin'
         out.append((addr, size, base, r, default, labels))
+    return out
+
+
+# --- code only the other build has --------------------------------------------
+def is_exit(w):
+    """blr, bctr, or b (no link, relative): nothing after it runs on."""
+    return w in (0x4E800020, 0x4E800420) or (w >> 26 == 18 and w & 3 == 0)
+
+
+def bl_targets(img):
+    out = set()
+    for _, lo, hi, kind in img.sections:
+        if kind != 'code':
+            continue
+        ws = img.words(lo, (hi - lo) // 4) or ()
+        for i, w in enumerate(ws):
+            if w >> 26 == 18 and w & 3 == 1:
+                d = w & 0x03FFFFFC
+                if d & 0x02000000:
+                    d -= 0x04000000
+                out.add(lo + 4 * i + d)
+    return out
+
+
+def decode_jump_table(img, bctr, window=24):
+    """A computed jump through an absolute table, as the compiler writes a
+    switch:
+        cmplwi crN, rX, n-1 ; bgt crN, default   (or: cmplwi rX, n ; bge)
+        lis rT, hi ; addi rT, rT, lo             the table (XenonRecomp's base: the lis)
+        rlwinm rI, rX, 2, 0, 29                  the index times 4
+        lwzx rS, rT, rI ; mtctr rS ; bctr
+    in the `window` instructions before the bctr. A dict, or None for any
+    other bctr (a call through a pointer, a vtable tail call)."""
+    ws = img.words(bctr - 4 * window, window)
+    if ws is None:
+        return None
+    at = lambda i: bctr - 4 * (window - i)
+    mt = ws[-1]
+    if mt & 0xFC1FFFFF != 0x7C0903A6:            # mtctr rS
+        return None
+    rs = (mt >> 21) & 31
+    i_lwzx = next((i for i in range(window - 2, -1, -1) if ws[i] >> 26 == 31 and (ws[i] >> 1) & 0x3FF == 23
+                   and (ws[i] >> 21) & 31 == rs), None)
+    if i_lwzx is None:
+        return None
+    ra, rb = (ws[i_lwzx] >> 16) & 31, (ws[i_lwzx] >> 11) & 31
+    rx = rt = None
+    for i in range(i_lwzx - 1, -1, -1):
+        w = ws[i]
+        if w >> 26 == 21 and (w >> 16) & 31 in (ra, rb) and (w >> 11) & 31 == 2 and (w >> 6) & 31 == 0 and (w >> 1) & 31 == 29:
+            rx = (w >> 21) & 31
+            rt = rb if (w >> 16) & 31 == ra else ra
+            break
+    if rx is None:
+        return None
+    sx = lambda v: (v & 0xFFFF) - 0x10000 if v & 0x8000 else v & 0xFFFF
+    i_addi = next((i for i in range(i_lwzx - 1, -1, -1) if ws[i] >> 26 == 14 and (ws[i] >> 21) & 31 == rt
+                   and (ws[i] >> 16) & 31 == rt), None)
+    if i_addi is None:
+        return None
+    i_lis = next((i for i in range(i_addi - 1, -1, -1) if ws[i] >> 26 == 15 and (ws[i] >> 21) & 31 == rt
+                  and (ws[i] >> 16) & 31 == 0), None)
+    if i_lis is None:
+        return None
+    table = (((ws[i_lis] & 0xFFFF) << 16) + sx(ws[i_addi])) & 0xFFFFFFFF
+    i_cmp = next((i for i in range(i_lwzx - 1, -1, -1) if ws[i] >> 26 == 10 and (ws[i] >> 21) & 1 == 0
+                  and (ws[i] >> 16) & 31 == rx), None)
+    if i_cmp is None:
+        return None
+    bf, imm = (ws[i_cmp] >> 23) & 7, ws[i_cmp] & 0xFFFF
+    n = default = None
+    for i in range(i_cmp + 1, i_lwzx):
+        w = ws[i]
+        if w >> 26 != 16 or w & 3:
+            continue
+        bo, bi = (w >> 21) & 31, (w >> 16) & 31
+        if (bo & 0x1C) == 0x0C and bi == 4 * bf + 1:     # bgt crN
+            n = imm + 1
+        elif (bo & 0x1C) == 0x04 and bi == 4 * bf:       # bge crN (not lt)
+            n = imm
+        else:
+            continue
+        default = at(i) + sx(w & 0xFFFC)
+        break
+    if not n or n > 1024:
+        return None
+    labels = img.words(table, n)
+    if labels is None:
+        return None
+    return {'bctr': bctr, 'base': at(i_lis), 'r': rx, 'default': default, 'table': table, 'labels': list(labels),
+            'first': at(min(i_cmp, i_lis))}
+
+
+def find_extra_functions(rm, sw_text):
+    """The jump tables the other build has and the translated USA tables
+    don't cover, and the leaf functions (no .pdata entry) holding them, which
+    XenonRecomp needs bounds for: [(address, size, base, r, default, labels)],
+    with address and size None for a table inside a .pdata function (it
+    needs only the [[switch]]). Printed, so they can be checked by hand."""
+    img = rm.pal
+    covered = set()
+    for m in re.finditer(r'^base = (0x[0-9A-F]+)$', sw_text, re.M):
+        a = int(m.group(1), 16)
+        for k in range(0, 0x100, 4):
+            ws = img.words(a + k, 1)
+            if ws and ws[0] == 0x4E800420:
+                covered.add(a + k)
+                break
+    # A table the USA build has as well (whether its config lists it or not)
+    # is the USA one moved, not one only the other build has.
+    for _, lo, hi, kind in rm.usa.sections:
+        if kind != 'code':
+            continue
+        ws = rm.usa.words(lo, (hi - lo) // 4) or ()
+        for i, w in enumerate(ws):
+            if w == 0x4E800420 and decode_jump_table(rm.usa, lo + 4 * i):
+                try:
+                    covered.add(rm.code(lo + 4 * i)[0])
+                except ValueError:
+                    pass
+    funcs = img.functions()
+    starts = [f[0] for f in funcs]
+    targets = None
+    found = []
+    for _, lo, hi, kind in img.sections:
+        if kind != 'code':
+            continue
+        ws = img.words(lo, (hi - lo) // 4) or ()
+        for i, w in enumerate(ws):
+            bctr = lo + 4 * i
+            if w != 0x4E800420 or bctr in covered:
+                continue
+            t = decode_jump_table(img, bctr)
+            if t is None or not all(lo <= x < hi for x in t['labels'] + [t['default']]):
+                continue
+            k = bisect.bisect_right(starts, bctr) - 1
+            if k >= 0 and funcs[k][0] <= bctr < funcs[k][0] + funcs[k][1]:
+                found.append((None, None, t, f'in .pdata function {funcs[k][0]:#010x}'))
+                continue
+            floor = funcs[k][0] + funcs[k][1] if k >= 0 else lo
+            a = t['first']
+            while a - 4 >= floor and not is_exit(img.words(a - 4, 1)[0]) and img.words(a - 4, 1)[0] != 0:
+                a -= 4
+            start = a
+            a = max(t['labels'] + [t['default']])
+            while a < hi and not is_exit(img.words(a, 1)[0]):
+                a += 4
+            end = a + 4
+            if not all(start <= x < end for x in t['labels'] + [t['default']]):
+                continue
+            if targets is None:
+                targets = bl_targets(img)
+            found.append((start, end - start, t, 'leaf, ' + ('a bl target' if start in targets else 'NOT a bl target: check by hand')))
+    out = []
+    for start, size, t, note in found:
+        print(f'{"switch only" if start is None else f"function {start:#010x} size {size:#x}"}: jump table at '
+              f'{t["table"]:#010x} for the bctr at {t["bctr"]:#010x} (r{t["r"]}, {len(t["labels"])} entries, '
+              f'default {t["default"]:#010x}; {note})')
+        out.append((start, size, t['base'], t['r'], t['default'], t['labels']))
+    print(f'{len(out)} jump table(s) only the other build has' if out else 'no jump table only the other build has')
     return out
 
 
@@ -322,43 +546,50 @@ def check_function_sizes(rm, toml):
     # A leaf function the config bounds must end where its translation does.
     for m in re.finditer(r'\{ address = (0x[0-9A-F]+), size = (0x[0-9A-F]+) \}', toml):
         a, z = int(m.group(1), 16), int(m.group(2), 16)
-        if rm.code(a + z - 4)[0] - rm.code(a)[0] != z - 4:
+        try:
+            moved = rm.code(a + z - 4)[0] - rm.code(a)[0] != z - 4
+        except ValueError as e:
+            sys.exit(f'function {a:#010x} (size {z:#x}): {e}')
+        if moved:
             sys.exit(f'function {a:#010x} (size {z:#x}): its end moved')
 
 
-def write_toml(rm, check):
-    usa_hash, pal_hash = hook_addresses.USA_XEX_SHA256, hook_addresses.PAL_ES_XEX_SHA256
+def write_toml(rm, check, region):
+    usa_hash, pal_hash = hook_addresses.USA_XEX_SHA256, region.xex_sha256
     main = (ROOT / 'config/nfsmw.toml').read_text()
     assert usa_hash in main
     header = ('# GENERATED by survey/region_map.py from config/nfsmw.toml: do not edit; rerun it.\n'
-              '# The PAL (Spanish) disc\'s default.xex: every address is the USA one moved to\n'
+              f'# The {region.name} disc\'s default.xex: every address is the USA one moved to\n'
               '# where the PAL build has the same code (checked); comments still name the USA\n'
               '# addresses.\n')
-    toml = translate_toml(rm, main.replace(usa_hash, pal_hash).replace('(Xbox 360, USA)', '(Xbox 360, Europe/PAL, Spanish)'),
-                          header, [('"../game/files/default.xex"', '"../../game/files-pal-es/default.xex"'),
-                                   ('"../ppc"', '"../../ppc-pal-es"'),
+    toml = translate_toml(rm, main.replace(usa_hash, pal_hash).replace('(Xbox 360, USA)', f'(Xbox 360, {region.title})'),
+                          header, [('"../game/files/default.xex"', f'"../../game/files-{region.id}/default.xex"'),
+                                   ('"../ppc"', f'"../../ppc-{region.id}"'),
                                    ('"switch_tables.toml"', '"switch_tables.toml"')])
     check_inline_tables(rm)
     check_function_sizes(rm, main)
-    extras = extra_tables(rm)
+    sw = translate_toml(rm, (ROOT / 'config/switch_tables.toml').read_text(),
+                        '# GENERATED by survey/region_map.py from config/switch_tables.toml (PAL addresses).\n', [])
+    if region.extras is None:
+        extras, source = find_extra_functions(rm, sw), 'find_extra_functions'
+    else:
+        extras, source = extra_tables(rm, region.extras), region.extras_name
     # The extra functions join the leaf functions' list.
     marker = '    # manual (see MANUAL in survey/leaf_switch_bounds.py)\n'
     assert toml.count(marker) == 1
-    toml = toml.replace(marker, '    # PAL only (survey/region_map.py PAL_ES_EXTRA_FUNCTIONS)\n' + ''.join(
-        f'    {{ address = 0x{a:08X}, size = 0x{z:X} }},\n' for a, z, *_ in extras) + marker)
-    sw = translate_toml(rm, (ROOT / 'config/switch_tables.toml').read_text(),
-                        '# GENERATED by survey/region_map.py from config/switch_tables.toml (PAL addresses).\n', [])
-    sw = sw.rstrip('\n') + '\n\n# ---- PAL ONLY (survey/region_map.py PAL_ES_EXTRA_FUNCTIONS) ----\n'
+    toml = toml.replace(marker, f'    # PAL only (survey/region_map.py {source})\n' + ''.join(
+        f'    {{ address = 0x{a:08X}, size = 0x{z:X} }},\n' for a, z, *_ in extras if a is not None) + marker)
+    sw = sw.rstrip('\n') + f'\n\n# ---- PAL ONLY (survey/region_map.py {source}) ----\n'
     for a, z, base, r, default, labels in extras:
         sw += f'[[switch]]\nbase = 0x{base:08X}\nr = {r}\ndefault = 0x{default:08X}\nlabels = [\n'
         sw += ''.join(f'    0x{l:08X},\n' for l in labels) + ']\n\n'
 
-    outs = {ROOT / 'config/pal-es/nfsmw.toml': toml, ROOT / 'config/pal-es/switch_tables.toml': sw}
+    outs = {ROOT / f'config/{region.id}/nfsmw.toml': toml, ROOT / f'config/{region.id}/switch_tables.toml': sw}
     return emit(outs, check)
 
 
 # --- the runtime's table -----------------------------------------------------
-def write_table(rm, check):
+def write_table(rm, check, region):
     found = hook_addresses.scan(ROOT)
     rows, bad = [], []
     for addr in sorted(found):
@@ -376,26 +607,26 @@ def write_table(rm, check):
              '// SpeedBreaker runtime. GPL-3.0-or-later (see COPYING).',
              '//',
              '// Every guest address the runtime names (runtime/region/hook_addresses.py finds',
-             '// them) and where the PAL (Spanish) default.xex has the same code or data:',
-             f'// SB_PAL_ES_ADDRESS(USA, PAL). USA default.xex {hook_addresses.USA_XEX_SHA256},',
-             f'// PAL {hook_addresses.PAL_ES_XEX_SHA256}.',
+             f'// them) and where the {region.name} default.xex has the same code or data:',
+             f'// {region.macro}_ADDRESS(USA, PAL). USA default.xex {hook_addresses.USA_XEX_SHA256},',
+             f'// PAL {region.xex_sha256}.',
              '']
     for addr, pal, how, refs in rows:
         files = sorted({r.split(':')[0] for r in refs})
-        lines.append(f'SB_PAL_ES_ADDRESS(0x{addr:08X}, 0x{pal:08X})  // {how}; {", ".join(files)}')
+        lines.append(f'{region.macro}_ADDRESS(0x{addr:08X}, 0x{pal:08X})  // {how}; {", ".join(files)}')
     names = ['// GENERATED by survey/region_map.py table: do not edit; rerun it.',
              '// SpeedBreaker runtime. GPL-3.0-or-later (see COPYING).',
              '//',
-             '// SB_PAL_ES_sub_<USA> -> sub_<PAL>: the PAL (Spanish) recompiled function of each one',
+             f'// {region.macro}_sub_<USA> -> sub_<PAL>: the {region.name} recompiled function of each one',
              '// the runtime names (region.h\'s SB_HOOK and SB_ORIGINAL use it). A function',
-             '// missing here is a build error: rerun survey/region_map.py table.',
+             f'// missing here is a build error: rerun {region.rerun}.',
              '#pragma once',
              '']
     for addr, pal, how, refs in rows:
         if hook_addresses.kind_of(addr, refs) == 'code':
-            names.append(f'#define SB_PAL_ES_sub_{addr:08X} sub_{pal:08X}')
-    return emit({ROOT / 'runtime/region/pal_es_addresses.inc': '\n'.join(lines) + '\n',
-                 ROOT / 'runtime/region/pal_es_names.h': '\n'.join(names) + '\n'}, check)
+            names.append(f'#define {region.macro}_sub_{addr:08X} sub_{pal:08X}')
+    return emit({ROOT / f'runtime/region/{region.stem}_addresses.inc': '\n'.join(lines) + '\n',
+                 ROOT / f'runtime/region/{region.stem}_names.h': '\n'.join(names) + '\n'}, check)
 
 
 def emit(outs, check):
@@ -413,14 +644,22 @@ def emit(outs, check):
 
 
 def main():
-    if len(sys.argv) != 5 or sys.argv[1] not in ('toml', 'table', 'check'):
+    args = sys.argv[1:]
+    region = 'pal-es'
+    if '--region' in args:
+        i = args.index('--region')
+        if i + 1 >= len(args) or args[i + 1] not in REGIONS:
+            sys.exit(f'--region: one of {", ".join(REGIONS)}\n\n{__doc__}')
+        region = args[i + 1]
+        del args[i:i + 2]
+    if len(args) != 4 or args[0] not in ('toml', 'table', 'check'):
         sys.exit(__doc__)
-    rm = RegionMap(*sys.argv[2:5])
+    rm = RegionMap(*args[1:4])
     ok = True
-    if sys.argv[1] in ('toml', 'check'):
-        ok &= write_toml(rm, sys.argv[1] == 'check')
-    if sys.argv[1] in ('table', 'check'):
-        ok &= write_table(rm, sys.argv[1] == 'check')
+    if args[0] in ('toml', 'check'):
+        ok &= write_toml(rm, args[0] == 'check', REGIONS[region])
+    if args[0] in ('table', 'check'):
+        ok &= write_table(rm, args[0] == 'check', REGIONS[region])
     sys.exit(0 if ok else 1)
 
 

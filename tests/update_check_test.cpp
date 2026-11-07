@@ -1,7 +1,10 @@
 // Tests for update/check.h: Check for Updates' logic. Versions (Semantic
-// Versioning), the strict JSON reader for GitHub's release, the HTTP answer
-// as curl prints it, the release notes as plain lines, and the result of
-// every outcome. From the repo root:
+// Versioning), release tags and the Windows beta order, the strict JSON
+// reader for GitHub's release and list of releases, this device's file and
+// whether a release is complete for it, the HTTP answer as curl prints it,
+// the release notes as plain lines, the result of every outcome, and every
+// row of update-now/DESIGN.md's table "Which version is newer". From the
+// repo root:
 //   clang++ -std=c++20 -O2 -Iruntime tests/update_check_test.cpp runtime/update/check.cpp -o build/update_check_test
 //   build/update_check_test
 #include <update/check.h>
@@ -70,7 +73,9 @@ static const char kRelease[] = R"({
   "name": "SpeedBreaker v0.1.2 \u2014 \"Rockport\" \ud83c\udfce",
   "draft": false,
   "prerelease": false,
-  "assets": [ { "name": "SpeedBreaker-macos.dmg", "body": "no", "size": 123 }, [], {}, null, true ],
+  "assets": [ { "name": "SpeedBreaker-macos.dmg", "body": "no", "size": 123, "state": "uploaded",
+                "uploader": { "name": "not the asset", "size": 9, "state": "x" }, "digest": "sha256:ab", "label": null },
+              {}, { "name": "SpeedBreaker-macos.dmg.sha256", "size": 89, "state": "open", "digest": null } ],
   "body": "## What's new\r\n\r\n- Caf\u00e9 \\ path\/x\ttab\n- r\u00e9sum\u00e9 \u20ac10 \uD83D\uDE00\nend",
   "reactions": {"+1": 3}
 })";
@@ -87,6 +92,16 @@ static void Json()
     CHECK(r.body == "## What's new\r\n\r\n- Caf\xC3\xA9 \\ path/x\ttab\n- r\xC3\xA9sum\xC3\xA9 \xE2\x82\xAC" "10 \xF0\x9F\x98\x80\nend",
         "body: '%s'", r.body.c_str());
     CHECK(!r.draft && !r.prerelease, "flags");
+    CHECK(r.assets.size() == 3, "three assets: %zu", r.assets.size());
+    if (r.assets.size() == 3)
+    {
+        CHECK(r.assets[0].name == "SpeedBreaker-macos.dmg" && r.assets[0].size == 123 && r.assets[0].state == "uploaded" &&
+                  r.assets[0].digest == "sha256:ab",
+            "the first asset, not its uploader's members: %s %lld %s", r.assets[0].name.c_str(), (long long)r.assets[0].size,
+            r.assets[0].state.c_str());
+        CHECK(r.assets[1].name.empty() && r.assets[1].size == -1 && r.assets[1].state.empty(), "an empty asset");
+        CHECK(r.assets[2].state == "open" && r.assets[2].digest.empty(), "a null digest, an open state");
+    }
 
     CHECK(ParseRelease(R"({"tag_name":"v1.0.0","name":null,"body":null,"draft":true,"prerelease":true})", r, error) && r.name.empty() &&
               r.body.empty() && r.draft && r.prerelease,
@@ -150,6 +165,26 @@ static void Json()
         { "{\"body\":{}}", "\"body\" of the wrong type" },
         { "{\"tag_name\":\"v1.0.0\",\"tag_name\":\"v9.0.0\"}", "a second \"tag_name\"" },
         { "{\"tag_name\":\"v1.0.0\",\"x\":{\"a\":", "a missing value" },
+        // The assets: an array of objects, each member read of the right type, once.
+        { "{\"assets\":{}}", "\"assets\" of the wrong type" },
+        { "{\"assets\":null}", "\"assets\" of the wrong type" },
+        { "{\"assets\":[],\"assets\":[]}", "a second \"assets\"" },
+        { "{\"assets\":[null]}", "an asset that isn't an object" },
+        { "{\"assets\":[{},[]]}", "an asset that isn't an object" },
+        { "{\"assets\":[{}],}", "a missing member name" },
+        { "{\"assets\":[{} {}]}", "a missing ',' or ']'" },
+        { "{\"assets\":[{\"name\":5}]}", "an asset's \"name\" of the wrong type" },
+        { "{\"assets\":[{\"name\":null}]}", "an asset's \"name\" of the wrong type" },
+        { "{\"assets\":[{\"state\":true}]}", "an asset's \"state\" of the wrong type" },
+        { "{\"assets\":[{\"size\":\"12\"}]}", "an asset's \"size\" of the wrong type" },
+        { "{\"assets\":[{\"size\":-1}]}", "an asset's \"size\" of the wrong type" },
+        { "{\"assets\":[{\"size\":1.5}]}", "an asset's \"size\" of the wrong type" },
+        { "{\"assets\":[{\"size\":1e3}]}", "an asset's \"size\" of the wrong type" },
+        { "{\"assets\":[{\"size\":012}]}", "a missing ',' or '}'" },
+        { "{\"assets\":[{\"size\":99999999999999999999}]}", "an asset's \"size\" of the wrong type" },
+        { "{\"assets\":[{\"digest\":7}]}", "an asset's \"digest\" of the wrong type" },
+        { "{\"assets\":[{\"name\":\"a\",\"name\":\"b\"}]}", "an asset's second \"name\"" },
+        { "{\"assets\":[{\"name\":\"a\"]}", "a missing ',' or '}'" },
     };
     for (const Bad& b : bad)
     {
@@ -351,8 +386,10 @@ static void Outcomes()
         r.headline.c_str(), r.message.c_str());
     CHECK(r.url == "https://github.com/SpeedBreakerProject/speedbreaker/releases/tag/v0.1.2" && r.name == "SpeedBreaker v0.1.2", "page, name");
     CHECK(Dump(r.notes) == "H:Fixed|B:Shadows|", "notes: %s", Dump(r.notes).c_str());
-    CHECK(r.log == "v0.1.2 is available (running v0.1.1): https://github.com/SpeedBreakerProject/speedbreaker/releases/tag/v0.1.2", "log: '%s'",
-        r.log.c_str());
+    CHECK(r.log == "v0.1.2 is available (running v0.1.1): https://github.com/SpeedBreakerProject/speedbreaker/releases/tag/v0.1.2; "
+                   "not complete for this device (no file for this device); a development build",
+        "log: '%s'", r.log.c_str());
+    CHECK(r.latestTag == "v0.1.2" && r.label == "v0.1.2" && !r.complete && r.why == NoUpdateNow::DevBuild, "tag, label, why");
 
     r = Evaluate(Answer(200, ReleaseJson("v0.1.0")), "0.0.9", now);
     CHECK(r.outcome == Outcome::Available && r.headline == "v0.1.0 is available", "NFSMW_TEST_VERSION's case: '%s'", r.headline.c_str());
@@ -444,6 +481,450 @@ static void Outcomes()
     }
 }
 
+
+// --- Release tags and the Windows order ---
+
+static ReleaseTag Tag(const char* text)
+{
+    ReleaseTag t;
+    if (!ParseReleaseTag(text, t))
+        printf("  (test) '%s' isn't a tag\n", text);
+    return t;
+}
+
+static int TagCmp(const char* a, const char* b)
+{
+    ReleaseTag x, y;
+    if (!ParseReleaseTag(a, x) || !ParseReleaseTag(b, y))
+        return 99;
+    return CompareReleaseTags(x, y);
+}
+
+static void Tags()
+{
+    ReleaseTag t;
+    CHECK(ParseReleaseTag("v0.2.4", t) && !t.windowsBeta && t.beta == 0 && FormatSemver(t.version) == "0.2.4", "v0.2.4");
+    CHECK(ParseReleaseTag("v0.2.3-windows-beta.6", t) && t.windowsBeta && t.beta == 6 && FormatSemver(t.version) == "0.2.3",
+        "v0.2.3-windows-beta.6 (the running Windows build)");
+    CHECK(ParseReleaseTag("v10.0.0-windows-beta.123", t) && t.beta == 123, "big numbers");
+    CHECK(FormatReleaseTag(Tag("v0.2.3-windows-beta.6")) == "v0.2.3-windows-beta.6" && FormatReleaseTag(Tag("v0.2.4")) == "v0.2.4", "format");
+    CHECK(ReleaseLabel(Tag("v0.2.3-windows-beta.6")) == "v0.2.3 beta 6" && ReleaseLabel(Tag("v0.2.5")) == "v0.2.5",
+        "labels: '%s'", ReleaseLabel(Tag("v0.2.3-windows-beta.6")).c_str());
+    // Odd tags are never releases: the one that once existed, and its kin.
+    for (const char* odd : { "v0.2.0-test-issue67", "0.2.4", "V0.2.4", "vv0.2.4", "v0.2", "v0.2.4.1", "v0.2.4-rc.1", "v0.2.4+5",
+             "v0.2.4-windows-beta", "v0.2.4-windows-beta.", "v0.2.4-windows-beta.0", "v0.2.4-windows-beta.07", "v0.2.4-windows-beta.1.2",
+             "v0.2.4-windows-beta.x", "v0.2.4-Windows-beta.1", "v0.2.4-windows-beta.1+x", "v0.2.4-linux-beta.1", "v01.2.4", "v0.2.4 ",
+             " v0.2.4", "v0.2.4-windows-beta.-1", "", "v", "latest" })
+        CHECK(!ParseReleaseTag(odd, t), "'%s' isn't a release tag", odd);
+
+    // Version, then beta number; a version's release after all of its betas.
+    const char* order[] = { "v0.2.2", "v0.2.3-windows-beta.5", "v0.2.3-windows-beta.6", "v0.2.3", "v0.2.4-windows-beta.2",
+        "v0.2.4-windows-beta.7", "v0.2.4-windows-beta.10", "v0.2.4", "v0.2.5-windows-beta.1", "v0.10.0-windows-beta.1", "v1.0.0" };
+    for (size_t i = 0; i + 1 < std::size(order); i++)
+        for (size_t j = i + 1; j < std::size(order); j++)
+        {
+            CHECK(TagCmp(order[i], order[j]) == -1, "%s < %s", order[i], order[j]);
+            CHECK(TagCmp(order[j], order[i]) == 1, "%s > %s", order[j], order[i]);
+        }
+    CHECK(TagCmp("v0.2.4-windows-beta.7", "v0.2.4-windows-beta.7") == 0 && TagCmp("v0.2.4", "v0.2.4") == 0, "equal");
+    // Where plain Semantic Versioning goes wrong for the betas.
+    CHECK(Cmp("0.2.4-windows-beta.10", "0.2.4-windows-beta.9") == 1, "SemVer compares the beta numbers as numbers too");
+    CHECK(TagCmp("v0.2.4-windows-beta.10", "v0.2.4-windows-beta.9") == 1, "beta 10 after beta 9");
+}
+
+// --- This device's file, and complete releases ---
+
+static const Device kMac{ Platform::MacOS, Arch::Arm64, "SpeedBreaker" };
+static const Device kDeck{ Platform::Linux, Arch::X86_64, "SpeedBreaker" };
+static const Device kFrame{ Platform::Linux, Arch::Arm64, "SpeedBreaker" };
+static const Device kWindows{ Platform::Windows, Arch::X86_64, "SpeedBreaker" };
+static const Device kPhone{ Platform::IOS, Arch::Arm64, "SpeedBreaker" };
+
+static std::string Names(const std::vector<std::string>& names)
+{
+    std::string out;
+    for (const std::string& n : names)
+        out += (out.empty() ? "" : " ") + n;
+    return out;
+}
+
+static void DeviceFiles()
+{
+    struct Row { Device device; const char* version; bool beta; const char* names; };
+    const Device carbonMac{ Platform::MacOS, Arch::Arm64, "SpeedBreaker-Carbon" };
+    const Device carbonFrame{ Platform::Linux, Arch::Arm64, "SpeedBreaker-Carbon" };
+    const Device carbonWindows{ Platform::Windows, Arch::X86_64, "SpeedBreaker-Carbon" };
+    const Device carbonPhone{ Platform::IOS, Arch::Arm64, "SpeedBreaker-Carbon" };
+    const Row rows[] = {
+        { kMac, "0.2.4", false, "SpeedBreaker-macos.dmg" },
+        { kDeck, "0.2.4", false, "SpeedBreaker-steamos-x86_64.tar.xz" },
+        { kFrame, "0.2.4", false, "SpeedBreaker-steamos-arm64.tar.xz" },
+        { kWindows, "0.2.4", true, "SpeedBreaker-0.2.4-windows-x64-beta.zip" },
+        { kWindows, "0.3.0", false, "SpeedBreaker-0.3.0-windows-x64.zip SpeedBreaker-0.3.0-windows-x64-beta.zip" },
+        { kPhone, "0.2.4", false, "SpeedBreaker-0.2.4-ios.ipa" },
+        { carbonMac, "0.1.3", false, "SpeedBreaker-Carbon-macos.dmg" },
+        { carbonFrame, "0.1.3", false, "SpeedBreaker-Carbon-steamos-arm64.tar.xz" },
+        { carbonWindows, "0.1.3", true, "SpeedBreaker-Carbon-0.1.3-windows-x64-beta.zip" },
+        { carbonPhone, "0.1.3", false, "SpeedBreaker-Carbon-0.1.3-ios.ipa" },
+        // Nothing is made for these.
+        { { Platform::MacOS, Arch::X86_64, "SpeedBreaker" }, "0.2.4", false, "" },  // an Intel Mac (a build from source)
+        { { Platform::Windows, Arch::Arm64, "SpeedBreaker" }, "0.2.4", true, "" },
+        { { Platform::Linux, Arch::Other, "SpeedBreaker" }, "0.2.4", false, "" },
+        { { Platform::Other, Arch::X86_64, "SpeedBreaker" }, "0.2.4", false, "" },
+        // A Windows beta's pre-release holds no file of the others.
+        { kMac, "0.2.4", true, "" },
+        { kDeck, "0.2.4", true, "" },
+        { kPhone, "0.2.4", true, "" },
+    };
+    for (const Row& row : rows)
+    {
+        const std::string got = Names(DeviceAssetNames(row.device, row.version, row.beta));
+        CHECK(got == row.names, "platform %d arch %d %s%s: '%s', expected '%s'", int(row.device.platform), int(row.device.arch), row.version,
+            row.beta ? " beta" : "", got.c_str(), row.names);
+    }
+    const Device here = ThisDevice();
+#if defined(__APPLE__) && defined(__aarch64__)
+    CHECK(here.platform == Platform::MacOS && here.arch == Arch::Arm64, "this Mac");
+#elif defined(__linux__) && defined(__x86_64__)
+    CHECK(here.platform == Platform::Linux && here.arch == Arch::X86_64, "this x86-64 Linux");
+#elif defined(__linux__) && defined(__aarch64__)
+    CHECK(here.platform == Platform::Linux && here.arch == Arch::Arm64, "this arm64 Linux");
+#elif defined(_WIN32)
+    CHECK(here.platform == Platform::Windows && here.arch == Arch::X86_64, "this Windows PC");
+#endif
+    CHECK(here.prefix == SB_ASSET_PREFIX, "this game's prefix: '%.*s'", int(here.prefix.size()), here.prefix.data());
+    CHECK(UpdateListName(kMac) == "SpeedBreaker-update.json" && UpdateListName(carbonMac) == "SpeedBreaker-Carbon-update.json", "update lists");
+}
+
+static Asset A(const char* name, int64_t size = 1000, const char* state = "uploaded")
+{
+    return Asset{ name, state, size, "" };
+}
+
+static void Complete()
+{
+    const std::vector<Asset> full = { A("SpeedBreaker-macos.dmg", 32000596), A("SpeedBreaker-macos.dmg.sha256", 89),
+        A("SpeedBreaker-steamos-x86_64.tar.xz"), A("SpeedBreaker-steamos-x86_64.tar.xz.sha256", 101), A("SpeedBreaker-0.2.4-ios.ipa"),
+        A("SpeedBreaker-0.2.4-ios.ipa.sha256"), A("SpeedBreaker-0.2.4-third-party-source.tar.xz") };
+    Completeness c = CheckComplete(full, kMac, "0.2.4", false);
+    CHECK(c.complete && c.asset == "SpeedBreaker-macos.dmg" && c.missing.empty() && !c.updateList, "the Mac's: %s", c.missing.c_str());
+    c = CheckComplete(full, kDeck, "0.2.4", false);
+    CHECK(c.complete && c.asset == "SpeedBreaker-steamos-x86_64.tar.xz", "the Deck's");
+    c = CheckComplete(full, kPhone, "0.2.4", false);
+    CHECK(c.complete && c.asset == "SpeedBreaker-0.2.4-ios.ipa", "the iPhone's");
+    // A release without the Steam Frame's build.
+    c = CheckComplete(full, kFrame, "0.2.4", false);
+    CHECK(!c.complete && c.asset.empty() && c.missing == "SpeedBreaker-steamos-arm64.tar.xz missing, SpeedBreaker-steamos-arm64.tar.xz.sha256 missing",
+        "no Frame build: '%s'", c.missing.c_str());
+    // Still being uploaded: the file's state is "open", or its .sha256 isn't there yet.
+    c = CheckComplete({ A("SpeedBreaker-macos.dmg", 32000596, "open"), A("SpeedBreaker-macos.dmg.sha256", 89) }, kMac, "0.2.4", false);
+    CHECK(!c.complete && c.asset == "SpeedBreaker-macos.dmg" && c.missing == "SpeedBreaker-macos.dmg \"open\"", "uploading: '%s'", c.missing.c_str());
+    c = CheckComplete({ A("SpeedBreaker-macos.dmg", 32000596) }, kMac, "0.2.4", false);
+    CHECK(!c.complete && c.missing == "SpeedBreaker-macos.dmg.sha256 missing", "no .sha256: '%s'", c.missing.c_str());
+    c = CheckComplete({ A("SpeedBreaker-macos.dmg", 0), A("SpeedBreaker-macos.dmg.sha256", 89) }, kMac, "0.2.4", false);
+    CHECK(!c.complete && c.missing == "SpeedBreaker-macos.dmg empty", "an empty file: '%s'", c.missing.c_str());
+    c = CheckComplete({ A("SpeedBreaker-macos.dmg", -1), A("SpeedBreaker-macos.dmg.sha256", 89) }, kMac, "0.2.4", false);
+    CHECK(!c.complete, "no size given");
+    c = CheckComplete({ A("SpeedBreaker-macos.dmg"), A("SpeedBreaker-macos.dmg.sha256", 89, "") }, kMac, "0.2.4", false);
+    CHECK(!c.complete && c.missing == "SpeedBreaker-macos.dmg.sha256 in no state", "no state: '%s'", c.missing.c_str());
+    // Names are exact: the versioned copy, a case change or another game's file aren't the Mac's.
+    c = CheckComplete({ A("SpeedBreaker-0.2.4-macos.dmg"), A("SpeedBreaker-0.2.4-macos.dmg.sha256"), A("speedbreaker-macos.dmg"),
+                          A("SpeedBreaker-macos.dmg.sha256"), A("SpeedBreaker-Carbon-macos.dmg") },
+        kMac, "0.2.4", false);
+    CHECK(!c.complete && c.missing == "SpeedBreaker-macos.dmg missing", "exact names: '%s'", c.missing.c_str());
+    // The iPhone's file carries the release's version, not the running one's.
+    c = CheckComplete(full, kPhone, "0.2.5", false);
+    CHECK(!c.complete, "the IPA of another version");
+    // Windows: a beta's zip; a release may carry either name.
+    c = CheckComplete({ A("SpeedBreaker-0.2.4-windows-x64-beta.zip"), A("SpeedBreaker-0.2.4-windows-x64-beta.zip.sha256") }, kWindows, "0.2.4", true);
+    CHECK(c.complete && c.asset == "SpeedBreaker-0.2.4-windows-x64-beta.zip", "a beta's zip");
+    c = CheckComplete({ A("SpeedBreaker-0.3.0-windows-x64-beta.zip"), A("SpeedBreaker-0.3.0-windows-x64-beta.zip.sha256") }, kWindows, "0.3.0", false);
+    CHECK(c.complete && c.asset == "SpeedBreaker-0.3.0-windows-x64-beta.zip", "a release's beta-named zip");
+    c = CheckComplete({ A("SpeedBreaker-0.3.0-windows-x64.zip"), A("SpeedBreaker-0.3.0-windows-x64.zip.sha256") }, kWindows, "0.3.0", false);
+    CHECK(c.complete && c.asset == "SpeedBreaker-0.3.0-windows-x64.zip", "a release's zip");
+    c = CheckComplete({ A("SpeedBreaker-0.3.0-windows-x64.zip") }, kWindows, "0.3.0", false);
+    CHECK(!c.complete && c.missing == "SpeedBreaker-0.3.0-windows-x64.zip.sha256 missing", "its .sha256 belongs to the same name: '%s'",
+        c.missing.c_str());
+    c = CheckComplete({}, { Platform::MacOS, Arch::X86_64, "SpeedBreaker" }, "0.2.4", false);
+    CHECK(!c.complete && c.missing == "no file for this device", "no file for an Intel Mac");
+
+    // Phase 2's hook: with the signed update list required, it and its signature must be there too.
+    std::vector<Asset> listed = full;
+    c = CheckComplete(listed, kMac, "0.2.4", false, true);
+    CHECK(!c.complete && c.missing == "SpeedBreaker-update.json missing, SpeedBreaker-update.json.minisig missing", "the list required: '%s'",
+        c.missing.c_str());
+    listed.push_back(A("SpeedBreaker-update.json", 2000));
+    c = CheckComplete(listed, kMac, "0.2.4", false, true);
+    CHECK(!c.complete && c.missing == "SpeedBreaker-update.json.minisig missing" && !c.updateList, "the signature too: '%s'", c.missing.c_str());
+    listed.push_back(A("SpeedBreaker-update.json.minisig", 300));
+    c = CheckComplete(listed, kMac, "0.2.4", false, true);
+    CHECK(c.complete && c.updateList, "the list and its signature");
+    CHECK(CheckComplete(listed, kMac, "0.2.4", false).updateList, "seen (for the log) when not required");
+    CHECK(!kUpdateListRequired, "Phase 1: the list isn't required yet (Phase 2 turns this on with the release side)");
+}
+
+// --- Answers with assets, lists of releases, and the design's table ---
+
+struct Rel
+{
+    const char* tag;
+    bool prerelease = false;
+    std::vector<const char*> files = {};  // each with its .sha256
+    bool draft = false;
+};
+
+static std::string RelJson(const Rel& rel)
+{
+    std::string assets;
+    for (const char* f : rel.files)
+        for (std::string name : { std::string(f), std::string(f) + ".sha256" })
+            assets += std::string(assets.empty() ? "" : ",") + R"({"name":")" + name +
+                      R"(","state":"uploaded","size":4096,"digest":"sha256:00","uploader":{"login":"x"}})";
+    // This game's repository (release_names.h), so the page is used as is in either game's build.
+    return std::string(R"({"tag_name":")") + rel.tag + R"(","name":"SpeedBreaker )" + rel.tag +
+           R"(","html_url":"https://github.com/)" SB_GITHUB_REPO R"(/releases/tag/)" + rel.tag +
+           R"(","body":"## What's new\n- Things","draft":)" + (rel.draft ? "true" : "false") + R"(,"prerelease":)" +
+           (rel.prerelease ? "true" : "false") + R"(,"assets":[)" + assets + "]}";
+}
+
+static std::string ListJson(const std::vector<Rel>& rels)
+{
+    std::string out = "[";
+    for (const Rel& r : rels)
+        out += (out.size() > 1 ? "," : "") + RelJson(r);
+    return out + "]";
+}
+
+static Running Run(Device device, const char* version, const char* tag)
+{
+    Running r;
+    r.device = device;
+    r.version = version;
+    r.tag = tag;
+    r.devBuild = !*tag;
+    return r;
+}
+
+static const char* kMacFiles[] = { "SpeedBreaker-macos.dmg", "SpeedBreaker-steamos-x86_64.tar.xz", "SpeedBreaker-steamos-arm64.tar.xz" };
+
+static Rel Stable(const char* tag, bool windowsZip = false)
+{
+    Rel r{ tag };
+    r.files = { kMacFiles[0], kMacFiles[1], kMacFiles[2] };
+    if (windowsZip)
+    {
+        static std::string zip;  // one at a time in these tests
+        zip = std::string("SpeedBreaker-") + (tag + 1) + "-windows-x64-beta.zip";
+        r.files.push_back(zip.c_str());
+    }
+    return r;
+}
+
+static Rel Beta(const char* tag, const char* version)
+{
+    static std::string zips[8];
+    static int next = 0;
+    std::string& zip = zips[next++ % 8];
+    zip = std::string("SpeedBreaker-") + version + "-windows-x64-beta.zip";
+    Rel r{ tag, true };
+    r.files = { zip.c_str() };
+    return r;
+}
+
+static void DesignTable()
+{
+    const int64_t now = 1700000000;
+    Result r;
+    // Row 1: Windows beta 3 (v0.2.1-windows-beta.3, built before this feature) can't check at all: the
+    // stub's answer. (Its code is gone; what it said was Transport::Unavailable.)
+    {
+        Fetched f;
+        f.transport = Transport::Unavailable;
+        f.detail = "Checking for updates isn't available on Windows yet. The releases page has every version.";
+        r = Evaluate(f, Run(kWindows, "0.2.1", ""), now);
+        CHECK(r.outcome == Outcome::Unavailable, "row 1: the stub can't check");
+    }
+    // Read every version one step later than the design's v0.2.2 examples: the running Windows build is
+    // v0.2.3-windows-beta.6.
+    const Running beta6 = Run(kWindows, "0.2.3", "v0.2.3-windows-beta.6");
+    // Row 2: the latest stable v0.2.3 has no Windows zip: up to date, not a Windows release.
+    r = Evaluate(Answer(200, ListJson({ Stable("v0.2.3"), Beta("v0.2.3-windows-beta.6", "0.2.3") })), beta6, now);
+    CHECK(r.outcome == Outcome::UpToDate && r.headline == "You're up to date (v0.2.3 beta 6)", "row 2: '%s' / %s", r.headline.c_str(),
+        r.log.c_str());
+    CHECK(r.log == "up to date: running v0.2.3-windows-beta.6, the newest Windows release is v0.2.3-windows-beta.6 (1 of 2 not Windows releases: ignored)",
+        "row 2 log: '%s'", r.log.c_str());
+    r = Evaluate(Answer(200, ListJson({ Stable("v0.2.4") })), beta6, now);
+    CHECK(r.outcome == Outcome::UpToDate, "row 2: a newer stable release without a Windows zip either: %s", r.log.c_str());
+    // Row 3: the same version, a newer beta: a Windows fix.
+    r = Evaluate(Answer(200, ListJson({ Stable("v0.2.3"), Beta("v0.2.3-windows-beta.7", "0.2.3"), Beta("v0.2.3-windows-beta.6", "0.2.3") })),
+        beta6, now);
+    CHECK(r.outcome == Outcome::Available && r.latestTag == "v0.2.3-windows-beta.7" && r.headline == "v0.2.3 beta 7 is available" &&
+              r.message == "You have v0.2.3 beta 6." && r.complete && r.asset == "SpeedBreaker-0.2.3-windows-x64-beta.zip" &&
+              r.why == NoUpdateNow::NotYet,
+        "row 3: '%s' '%s' %s", r.headline.c_str(), r.message.c_str(), r.log.c_str());
+    CHECK(r.url == "https://github.com/" SB_GITHUB_REPO "/releases/tag/v0.2.3-windows-beta.7" && r.label == "v0.2.3 beta 7",
+        "row 3: its page '%s'", r.url.c_str());
+    // Row 4: a newer version's beta.
+    r = Evaluate(Answer(200, ListJson({ Beta("v0.2.4-windows-beta.7", "0.2.4"), Stable("v0.2.3"), Beta("v0.2.3-windows-beta.6", "0.2.3") })),
+        beta6, now);
+    CHECK(r.outcome == Outcome::Available && r.latestTag == "v0.2.4-windows-beta.7" && r.latest == "0.2.4", "row 4: %s", r.log.c_str());
+    // Row 5: a stable release with a Windows zip (Windows out of beta), after the betas of its version.
+    r = Evaluate(Answer(200, ListJson({ Stable("v0.2.4", true), Beta("v0.2.4-windows-beta.9", "0.2.4"), Beta("v0.2.3-windows-beta.6", "0.2.3") })),
+        beta6, now);
+    CHECK(r.outcome == Outcome::Available && r.latestTag == "v0.2.4" && r.label == "v0.2.4" && r.complete &&
+              r.asset == "SpeedBreaker-0.2.4-windows-x64-beta.zip",
+        "row 5: %s", r.log.c_str());
+    // Row 6: a Mac sees nothing of a Windows pre-release ("latest" never returns one; checked anyway).
+    const Running mac = Run(kMac, "0.2.3", "v0.2.3");
+    Rel winOnly = Beta("v0.2.4-windows-beta.7", "0.2.4");
+    r = Evaluate(Answer(200, RelJson(winOnly)), mac, now);
+    CHECK(r.outcome == Outcome::UpToDate && r.latest.empty(), "row 6: %s", r.log.c_str());
+    winOnly.prerelease = false;  // even published by mistake as a release
+    r = Evaluate(Answer(200, RelJson(winOnly)), mac, now);
+    CHECK(r.outcome == Outcome::UpToDate, "row 6, not marked pre-release: %s", r.log.c_str());
+    // Row 7: Mac v0.2.3, latest v0.2.4: offered.
+    r = Evaluate(Answer(200, RelJson(Stable("v0.2.4"))), mac, now);
+    CHECK(r.outcome == Outcome::Available && r.latestTag == "v0.2.4" && r.complete && r.asset == "SpeedBreaker-macos.dmg" &&
+              r.why == NoUpdateNow::NotYet && r.headline == "v0.2.4 is available" && r.message == "You have v0.2.3.",
+        "row 7: %s", r.log.c_str());
+    CHECK(r.log == "v0.2.4 is available (running v0.2.3): https://github.com/" SB_GITHUB_REPO "/releases/tag/v0.2.4; "
+                   "complete for this device (SpeedBreaker-macos.dmg); no update list yet",
+        "row 7 log: '%s'", r.log.c_str());
+    // Row 8: SteamOS v0.2.4, the latest moved back to v0.2.3 by hand: up to date, never a downgrade.
+    r = Evaluate(Answer(200, RelJson(Stable("v0.2.3"))), Run(kDeck, "0.2.4", "v0.2.4"), now);
+    CHECK(r.outcome == Outcome::UpToDate && r.message == "The newest release is v0.2.3; this build is newer.", "row 8: %s", r.log.c_str());
+    // Row 9: a development, test or dirty build (no tag): the link, no Update Now.
+    r = Evaluate(Answer(200, RelJson(Stable("v0.2.4"))), Run(kMac, "0.2.3", ""), now);
+    CHECK(r.outcome == Outcome::Available && r.why == NoUpdateNow::DevBuild &&
+              r.whyLine == "This is a development build, so it doesn't update itself: get v0.2.4 from the download page.",
+        "row 9: '%s'", r.whyLine.c_str());
+    Running dirty = Run(kMac, "0.2.3", "v0.2.3");
+    dirty.devBuild = true;  // tagged, but built with uncommitted changes
+    r = Evaluate(Answer(200, RelJson(Stable("v0.2.4"))), dirty, now);
+    CHECK(r.why == NoUpdateNow::DevBuild && r.log.ends_with("; a development build"), "row 9, dirty: %s", r.log.c_str());
+
+    // "Complete for this device": a release without the Frame's build is still available, with the link only.
+    Rel noFrame = Stable("v0.2.4");
+    noFrame.files.pop_back();
+    r = Evaluate(Answer(200, RelJson(noFrame)), Run(kFrame, "0.2.3", "v0.2.3"), now);
+    CHECK(r.outcome == Outcome::Available && !r.complete && r.why == NoUpdateNow::Incomplete &&
+              r.whyLine == "This device's download isn't in the release yet: see the download page.",
+        "no Frame build: %s", r.log.c_str());
+    r = Evaluate(Answer(200, RelJson(noFrame)), Run(kDeck, "0.2.3", "v0.2.3"), now);
+    CHECK(r.complete, "the same release is complete for the Deck");
+    // iPhone and iPad: a notice and a link.
+    Rel withIpa = Stable("v0.2.4");
+    withIpa.files.push_back("SpeedBreaker-0.2.4-ios.ipa");
+    r = Evaluate(Answer(200, RelJson(withIpa)), Run(kPhone, "0.2.3", "v0.2.3"), now);
+    CHECK(r.outcome == Outcome::Available && r.complete && r.why == NoUpdateNow::Phone &&
+              r.whyLine == "Install it with the app you used to install " SB_APP_NAME ", over this one. Deleting the app deletes its saves.",
+        "iPhone: '%s'", r.whyLine.c_str());
+}
+
+static void WindowsLists()
+{
+    const int64_t now = 1700000000;
+    const Running beta6 = Run(kWindows, "0.2.3", "v0.2.3-windows-beta.6");
+    Result r;
+    // Never a downgrade, whatever order GitHub lists them in.
+    r = Evaluate(Answer(200, ListJson({ Beta("v0.2.3-windows-beta.5", "0.2.3"), Beta("v0.2.2-windows-beta.5", "0.2.2"), Stable("v0.2.2", true) })),
+        beta6, now);
+    CHECK(r.outcome == Outcome::UpToDate && r.message == "The newest Windows release is v0.2.3 beta 5; this build is newer.", "older betas: '%s'",
+        r.message.c_str());
+    // The newest wins wherever it is in the list.
+    r = Evaluate(Answer(200, ListJson({ Beta("v0.2.3-windows-beta.7", "0.2.3"), Beta("v0.2.3-windows-beta.10", "0.2.3"),
+                                     Beta("v0.2.3-windows-beta.8", "0.2.3") })),
+        beta6, now);
+    CHECK(r.latestTag == "v0.2.3-windows-beta.10", "beta 10 over 8 and 7: %s", r.latestTag.c_str());
+    // Ignored: odd tags, drafts, a beta not marked pre-release, a stable one marked pre-release.
+    Rel odd = Beta("v0.2.0-test-issue67", "0.2.0");
+    Rel draft = Beta("v0.2.9-windows-beta.1", "0.2.9");
+    draft.draft = true;
+    Rel unmarked = Beta("v0.2.8-windows-beta.1", "0.2.8");
+    unmarked.prerelease = false;
+    Rel marked = Stable("v0.2.7", true);
+    marked.prerelease = true;
+    Rel oddWin = Beta("v0.2.6-windows-beta.01", "0.2.6");
+    Rel rc = Beta("v0.2.5-rc.1", "0.2.5");
+    r = Evaluate(Answer(200, ListJson({ odd, draft, unmarked, marked, oddWin, rc, Beta("v0.2.3-windows-beta.6", "0.2.3") })), beta6, now);
+    CHECK(r.outcome == Outcome::UpToDate && r.log.ends_with("(6 of 7 not Windows releases: ignored)"), "odd ones ignored: %s", r.log.c_str());
+    // A newer beta without its zip is still offered, as the link only.
+    Rel bare{ "v0.2.4-windows-beta.7", true };
+    r = Evaluate(Answer(200, ListJson({ bare })), beta6, now);
+    CHECK(r.outcome == Outcome::Available && !r.complete && r.why == NoUpdateNow::Incomplete, "a beta without its zip: %s", r.log.c_str());
+    // An empty list, a list of nothing Windows.
+    r = Evaluate(Answer(200, "[]"), beta6, now);
+    CHECK(r.outcome == Outcome::UpToDate && r.log == "up to date: running v0.2.3-windows-beta.6; no Windows release among the 0 newest", "empty: %s",
+        r.log.c_str());
+    // Untagged builds: a development build (its version before every beta of it), NFSMW_TEST_VERSION's.
+    r = Evaluate(Answer(200, ListJson({ Beta("v0.2.3-windows-beta.6", "0.2.3") })), Run(kWindows, "0.2.3", ""), now);
+    CHECK(r.outcome == Outcome::Available && r.why == NoUpdateNow::DevBuild, "a dev build of 0.2.3 sees 0.2.3's beta 6 (link only): %s",
+        r.log.c_str());
+    r = Evaluate(Answer(200, ListJson({ Beta("v0.2.3-windows-beta.6", "0.2.3") })), Run(kWindows, "0.2.3-windows-beta.5", ""), now);
+    CHECK(r.outcome == Outcome::Available, "NFSMW_TEST_VERSION=0.2.3-windows-beta.5");
+    r = Evaluate(Answer(200, ListJson({ Beta("v0.2.3-windows-beta.6", "0.2.3") })), Run(kWindows, "0.2.3-windows-beta.6", ""), now);
+    CHECK(r.outcome == Outcome::UpToDate, "NFSMW_TEST_VERSION=0.2.3-windows-beta.6");
+    r = Evaluate(Answer(200, ListJson({ Beta("v0.2.3-windows-beta.6", "0.2.3") })), Run(kWindows, "0.2.3-rc.1", ""), now);
+    CHECK(r.outcome == Outcome::Unreadable, "a version of no Windows shape: %s", r.log.c_str());
+    // A list answer that isn't one.
+    for (const std::string& bad : { std::string("{}"), RelJson(Stable("v0.2.4")), std::string("[1]"), std::string("[{}"), std::string("[{},]"),
+             std::string("[] []"), std::string(""), std::string("[null]") })
+    {
+        r = Evaluate(Answer(200, bad), beta6, now);
+        CHECK(r.outcome == Outcome::Unreadable && r.headline == "Couldn't check for updates", "'%s' isn't a list: %s", bad.c_str(), r.log.c_str());
+    }
+    // The list's failures are the latest's: a rate limit, a 404.
+    r = Evaluate(Answer(403, R"({"message":"API rate limit exceeded"})", { { "x-ratelimit-remaining", "0" } }), beta6, now);
+    CHECK(r.outcome == Outcome::RateLimited, "rate-limited list");
+    r = Evaluate(Answer(404, R"({"message":"Not Found"})"), beta6, now);
+    CHECK(r.outcome == Outcome::ServerError, "404 list");
+}
+
+static void Lists()
+{
+    std::vector<Release> list;
+    std::string error;
+    CHECK(ParseReleases("[]", list, error) && list.empty(), "an empty list");
+    CHECK(ParseReleases(" [ " + std::string(kRelease) + " , {\"tag_name\":\"v0.0.1\"} ] ", list, error) && list.size() == 2 &&
+              list[0].tag == "v0.1.2" && list[0].assets.size() == 3 && list[1].tag == "v0.0.1" && list[1].assets.empty(),
+        "two releases: %s", error.c_str());
+    struct Bad { const char* json; const char* why; };
+    const Bad bad[] = {
+        { "", "empty" },
+        { "{}", "not a JSON array" },
+        { "[1]", "a release that isn't an object" },
+        { "[[]]", "a release that isn't an object" },
+        { "[{}", "a missing ',' or ']'" },
+        { "[{},]", "a release that isn't an object" },
+        { "[{}] x", "more after the JSON" },
+        { "[{\"tag_name\":1}]", "\"tag_name\" of the wrong type" },
+        { "[{\"assets\":[{\"size\":\"x\"}]}]", "an asset's \"size\" of the wrong type" },
+    };
+    for (const Bad& b : bad)
+    {
+        error.clear();
+        list = { Release{} };
+        CHECK(!ParseReleases(b.json, list, error) && error.find(b.why) != std::string::npos && list.size() == 1, "%s: '%s', expected '%s'", b.json,
+            error.c_str(), b.why);
+    }
+    // Real-size: ten releases with many assets and long notes, as Windows' answer is (295 KB measured).
+    std::string big = "[";
+    for (int i = 0; i < 10; i++)
+    {
+        std::string assets;
+        for (int a = 0; a < 40; a++)
+            assets += std::string(a ? "," : "") + R"({"url":"https://api.github.com/x","id":1,"node_id":"RA","name":"f)" + std::to_string(a) +
+                      R"(","label":null,"uploader":{"login":"u","id":2,"site_admin":false},"content_type":"application/zip","state":"uploaded","size":123456,"digest":"sha256:)" +
+                      std::string(64, 'a') + R"(","download_count":7,"created_at":"2026-11-05T00:00:00Z"})";
+        big += std::string(i ? "," : "") + R"({"tag_name":"v0.2.)" + std::to_string(i) + R"(","prerelease":false,"draft":false,"body":")" +
+               std::string(12000, 'n') + R"(","assets":[)" + assets + "]}";
+    }
+    big += "]";
+    CHECK(big.size() > 250000 && big.size() < kMaxResponseBytes, "%zu bytes", big.size());
+    CHECK(ParseReleases(big, list, error) && list.size() == 10 && list[9].assets.size() == 40 && list[9].assets[39].size == 123456,
+        "a real-size list: %s", error.c_str());
+}
+
 int main()
 {
     Versions();
@@ -451,6 +932,12 @@ int main()
     Http();
     NotesCleanup();
     Outcomes();
+    Tags();
+    DeviceFiles();
+    Complete();
+    Lists();
+    DesignTable();
+    WindowsLists();
     printf("%s (%d failures)\n", g_failures ? "FAILED" : "passed", g_failures);
     return g_failures ? 1 : 0;
 }

@@ -81,6 +81,23 @@ VERSION="$(define VERSION)"
 [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "make_bundle.sh: no version in $BUILD (project() in CMakeLists.txt)" >&2; exit 1; }
 COMMIT="$(define COMMIT)"
 [ "$(define DIRTY)" = 1 ] && COMMIT="$COMMIT-dirty"
+# The release tag it is published as (NFSMW_BUILD_TAG: the update check's
+# identity, -DSB_RELEASE_TAG): v<version>. A release bundle without it
+# would be a development build forever (it never updates itself), one with
+# another version's would compare wrongly. SB_UNTAGGED=1 makes a bundle of an
+# untagged build anyway, to try it (never a release).
+TAG="$(define TAG)"
+if [ -n "$TAG" ] && [ "$TAG" != "v$VERSION" ]; then
+    echo "make_bundle.sh: the build is tagged $TAG, not v$VERSION (its version on SteamOS): reconfigure with -DSB_RELEASE_TAG=v$VERSION" >&2
+    exit 1
+fi
+if [ -z "$TAG" ]; then
+    if [ "${SB_UNTAGGED:-0}" != 1 ]; then
+        echo "make_bundle.sh: a release bundle needs the build's release tag: reconfigure with -DSB_RELEASE_TAG=v$VERSION and build again (SB_UNTAGGED=1: a bundle to try, never a release)" >&2
+        exit 1
+    fi
+    echo "make_bundle.sh: warning: an untagged build (SB_UNTAGGED=1): a development bundle, not for release" >&2
+fi
 case "$COMMIT" in
     "" | unknown*) echo "make_bundle.sh: warning: the build doesn't know its commit" >&2 ;;
     *-dirty) echo "make_bundle.sh: warning: the build is $COMMIT (uncommitted changes): not for release" >&2 ;;

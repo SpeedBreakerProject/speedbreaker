@@ -58,6 +58,9 @@ sb_test(split_views_test ARGS ${RT}/gpu/renderer.cpp)
 # header only) and the game's split-screen test (game/split_screen.h);
 # input.cpp is read to check users 1-3 follow it.
 sb_test(player_slots_test ARGS ${RT}/hid/input.cpp)
+# Player 1 follows the controller last pressed (hid/last_pad.h, header only;
+# GitHub #66); input.cpp is read to check it follows the rule.
+sb_test(last_pad_test ARGS ${RT}/hid/input.cpp)
 # The police vid-cam's side bars, the intro's black frames, the results
 # screen's backdrop and what fills the screen round them (gpu/edge_bars.h,
 # header only).
@@ -128,6 +131,8 @@ sb_test(sharp_ui_test SOURCES ${RT}/video/fsr1.cpp ARGS ${RT} ${CMAKE_CURRENT_BI
 target_include_directories(sharp_ui_test PRIVATE ${CMAKE_BINARY_DIR}/runtime/generated)
 # Anisotropic Filtering's Auto: 16x on a Mac at 1x at every screen shape (gpu/anisotropy_auto.h), as GetSampler applies it.
 sb_test(anisotropy_auto_test SOURCES ${RT}/video/picture_fit.cpp ARGS ${RT}/gpu/renderer.cpp)
+# Shadow Resolution's Auto: 2x while the scene renders at 2x or more (gpu/shadow_auto.h), as the renderer applies it (GitHub #90).
+sb_test(shadow_auto_test SOURCES ${RT}/video/picture_fit.cpp ${RT}/video/scale_budget.cpp ARGS ${RT}/gpu/renderer.cpp ${RT}/user/settings.cpp)
 if(SB_GLSLANG_VALIDATOR)
     foreach(shader sharp_premultiplied.frag sharp_straight.frag ui_easu.frag)
         add_test(NAME sharp_ui_glsl_check_${shader} COMMAND ${SB_GLSLANG_VALIDATOR} -V --target-env vulkan1.1
@@ -214,6 +219,10 @@ sb_test(swapchain_policy_test SOURCES ${RT}/video/swapchain_policy.cpp)
 # pointer-keyed matrix cache and the hook's resend (game/front_end_matrix.h,
 # header only; the "EVENT HANDLER" label above the boot PSA).
 sb_test(front_end_matrix_test)
+# Quick Race's Cops row: where a race type's cops byte is beside the game's
+# own rows' bytes, and when the row is offered (game/quick_race_cops.h, header
+# part only).
+sb_test(quick_race_cops_test)
 # Settings > Display > Fullscreen against the window's own state
 # (video/fullscreen_policy.h, header only): the green button and other system
 # changes never change the saved setting, the menu does; presenter.cpp is read
@@ -313,10 +322,22 @@ if(NOT WIN32)
         ${RT}/install/manifest.cpp ${RT}/install/result.cpp ${RT}/install/disc_source.cpp ${RT}/install/sha256.cpp
         ${RT}/user/portable.cpp ${RT}/platform/posix/file_io.cpp
         ARGS ${CMAKE_BINARY_DIR}/region_manifest_scratch)
+    # The same with the German code linked (SB_PAL_DE): three regions, and the
+    # German disc's installs.
+    add_executable(region_manifest_test_pal_de ${CMAKE_CURRENT_SOURCE_DIR}/region_manifest_test.cpp
+        ${RT}/install/placement.cpp ${RT}/install/installer.cpp ${RT}/install/locate.cpp
+        ${RT}/install/manifest.cpp ${RT}/install/result.cpp ${RT}/install/disc_source.cpp ${RT}/install/sha256.cpp
+        ${RT}/user/portable.cpp ${RT}/platform/posix/file_io.cpp)
+    target_include_directories(region_manifest_test_pal_de PRIVATE ${RT})
+    target_link_libraries(region_manifest_test_pal_de PRIVATE Threads::Threads)
+    target_compile_options(region_manifest_test_pal_de PRIVATE -O2 -UNDEBUG)
+    target_compile_definitions(region_manifest_test_pal_de PRIVATE SB_PAL_DE=1)
+    add_test(NAME region_manifest_test_pal_de COMMAND region_manifest_test_pal_de ${CMAKE_BINARY_DIR}/region_manifest_pal_de_scratch)
     if(APPLE AND NOT IOS)
         target_link_libraries(install_folder_test PRIVATE "-framework CoreFoundation")  # placement.cpp's iCloud check
         target_link_libraries(portable_test PRIVATE "-framework CoreFoundation")
         target_link_libraries(region_manifest_test PRIVATE "-framework CoreFoundation")
+        target_link_libraries(region_manifest_test_pal_de PRIVATE "-framework CoreFoundation")
     endif()
 endif()
 # The PAL (Spanish) release's hook addresses (runtime/region/region.h):
@@ -342,6 +363,20 @@ if(Python3_Interpreter_FOUND)
     # differences. A fix made for the USA disc can't miss a region quietly.
     add_test(NAME region_parity_check COMMAND Python3::Interpreter -I ${CMAKE_CURRENT_SOURCE_DIR}/region_parity_check.py ${ROOT})
     set_tests_properties(region_parity_check PROPERTIES SKIP_RETURN_CODE 77)  # Python < 3.11 (no tomllib)
+    # The same for the German disc's tables (-DSB_REGION_SURVEY with mw_de/:
+    # image.bin, xexsurvey.txt, funcmap.tsv beside mw_usa/ checks the bytes
+    # too).
+    if(SB_REGION_SURVEY AND EXISTS ${SB_REGION_SURVEY}/mw_de/funcmap.tsv)
+        add_test(NAME region_addresses_check_pal_de COMMAND Python3::Interpreter -I ${CMAKE_CURRENT_SOURCE_DIR}/region_addresses_check.py
+            ${ROOT} ${SB_REGION_SURVEY}/mw_usa ${SB_REGION_SURVEY}/mw_de ${SB_REGION_SURVEY}/mw_de/funcmap.tsv --region pal-de)
+    else()
+        add_test(NAME region_addresses_check_pal_de COMMAND Python3::Interpreter -I ${CMAKE_CURRENT_SOURCE_DIR}/region_addresses_check.py
+            ${ROOT} --region pal-de)
+    endif()
+    # survey/func_map.py (the function map region_map.py takes) and
+    # region_map.py's search for jump tables only another build has, on two
+    # made-up images.
+    add_test(NAME func_map_test COMMAND Python3::Interpreter -I ${CMAKE_CURRENT_SOURCE_DIR}/func_map_test.py ${ROOT})
     # scripts/region_ppc.py on both forms of XenonRecomp's output (a Mac's
     # wrapper form; Linux's and clang-cl's alias form, with LF or CRLF): the
     # same namespaced files from each.
@@ -364,6 +399,11 @@ sb_test(code_signature_test SOURCES ${RT}/platform/code_signature.cpp)
 # (an iOS copy without Extended Virtual Addressing) and the low-memory notice
 # (kernel/memory_status.h).
 sb_test(memory_status_test SOURCES ${RT}/kernel/memory_status.cpp ${RT}/platform/code_signature.cpp)
+# It reads its own signature, and Apple's linkers sign only arm64 output by
+# default: an x86-64 Mac's copy is signed ad hoc too (PR #58, vorno-crole).
+if(APPLE)
+    target_link_options(memory_status_test PRIVATE -Wl,-adhoc_codesign)
+endif()
 # The version line in the log, and when the "What's new" note shows
 # (user/version_check.h, header only).
 sb_test(version_check_test)
@@ -398,9 +438,26 @@ sb_test(key_map_test)
 # pedals, the steering curve, the pedals' travel, the buttons and paddles,
 # NFSMW_WHEEL_BUTTONS, and the force-feedback levels.
 sb_test(wheel_map_test)
-# Check for Updates' logic: versions, GitHub's JSON, curl's output and the
-# release notes (update/check.cpp, self-contained).
+# Check for Updates' logic: versions, release tags and the Windows beta
+# order, GitHub's JSON (a release and a list of them), this device's file and
+# complete releases, curl's output, the release notes, and every row of
+# update-now's "Which version is newer" table (update/check.cpp, self-contained).
 sb_test(update_check_test SOURCES ${RT}/update/check.cpp)
+# The startup check's toast, frame by frame: once per version, not over a
+# panel, and taken down for good once Settings opens (update/startup_toast.h).
+sb_test(startup_toast_test)
+# The transport by hand (not a test: it goes online; point it at a local
+# stand-in): Windows' WinHTTP, Linux's curl. update_fetch_probe.cpp says how.
+if(WIN32)
+    add_executable(update_fetch_probe ${CMAKE_CURRENT_SOURCE_DIR}/update_fetch_probe.cpp ${RT}/update/check.cpp ${RT}/update/fetch_windows.cpp)
+    target_link_libraries(update_fetch_probe PRIVATE winhttp)
+elseif(NOT APPLE)
+    add_executable(update_fetch_probe ${CMAKE_CURRENT_SOURCE_DIR}/update_fetch_probe.cpp ${RT}/update/check.cpp ${RT}/update/fetch_curl.cpp)
+    target_link_libraries(update_fetch_probe PRIVATE Threads::Threads)
+endif()
+if(TARGET update_fetch_probe)
+    target_include_directories(update_fetch_probe PRIVATE ${RT})
+endif()
 # Settings > Quit Game: where it is offered (not on iPhone or iPad) and its
 # confirmation (ui/quit_game.h, header only); the runtime's code around it
 # is read: the button and prompt gated, the focus on Cancel, B and Escape

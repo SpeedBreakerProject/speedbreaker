@@ -4,8 +4,8 @@
 // apart from SDL so tests/player_slots_test.cpp can drive it alone; header
 // only. hid/input.cpp keeps the SDL side. Pads are SDL joystick ids. Player
 // 1 is XInput user 0: the keyboard and the controller that has been driving
-// the game (input.cpp's first gamepad, as in single player), never one of
-// these.
+// the game (the one pressed last before split screen, hid/last_pad.h),
+// never one of these.
 //
 //   - Split mode follows the game's own predicate: on the moment the game
 //     says split screen (Quick Race > Split Screen chosen, before "Player 2

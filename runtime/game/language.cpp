@@ -112,7 +112,7 @@ namespace
                     zdir.assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
                 }
             for (size_t i = 0; i < std::size(kLanguages); i++)
-                out.files[i] = Scan(kLanguages[i], movies, zdir, region::IsPalEs());
+                out.files[i] = Scan(kLanguages[i], movies, zdir, region::IsPal());
             return out;
         }();
         return installed;
@@ -150,7 +150,7 @@ SB_HOOK(sub_822BCBC8)
         const int32_t chosen = Chosen();
         if (const Language* l = Find(chosen))
             fprintf(stderr, "%s\n", LogLine(*l, *FilesOf(chosen)).c_str());
-        if (const int32_t r3 = BootLanguageFor(kBootCall, ctx.r3.s32, chosen, region::IsPalEs()); r3 != ctx.r3.s32)
+        if (const int32_t r3 = BootLanguageFor(kBootCall, ctx.r3.s32, chosen, region::IsPal()); r3 != ctx.r3.s32)
             ctx.r3.s64 = r3;
     }
     SB_ORIGINAL(sub_822BCBC8)(ctx, base);
@@ -164,9 +164,9 @@ SB_HOOK(sub_82282A58)
         if (const uint32_t r9 = MovieSuffix(kMovieNameCall, ctx.r9.u32, f && f->pal); r9 != ctx.r9.u32)
             ctx.r9.u64 = r9;
         // r8: "_<LANGUAGE>" (a buffer on the caller's stack). A language
-        // the disc has no movies for, nor English's (the PAL disc), gets the
+        // the disc has no movies for, nor English's (a PAL disc), gets the
         // disc's own (Files::movieRedirect).
-        if (region::IsPalEs() && ctx.r8.u32)
+        if (region::IsPal() && ctx.r8.u32)
         {
             char* name = reinterpret_cast<char*>(base + ctx.r8.u32);
             const size_t n = strnlen(name, 32);

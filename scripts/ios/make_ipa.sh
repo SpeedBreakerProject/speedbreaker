@@ -25,7 +25,9 @@
 #     identifier with one of the player's own.
 #   - The license notices in SpeedBreaker.app/licenses (COPYING, NOTICE,
 #     THIRD_PARTY_NOTICES.md, LICENSES/), as the other downloads carry them.
-#   - The version is CMakeLists.txt's project(): --app must have it too.
+#   - The version is CMakeLists.txt's project(): --app must have it too, and
+#     the build (build/ios, or IOS_BUILD) its release tag, v<version>
+#     (SB_RELEASE_TAG=v<version> build.sh; SB_UNTAGGED=1 for a test IPA).
 #   - Checked before it's written: no team ID, provisioning profile, device ID
 #     or home folder path anywhere in the payload. IPA_SCAN_EXTRA="a|b|c"
 #     adds strings of your own to look for (your team ID, name, devices).
@@ -65,6 +67,17 @@ fi
     || fail "$APP isn't built for iPhone and iPad devices (DTPlatformName iphoneos)"
 APP_VERSION=$(plutil -extract CFBundleShortVersionString raw "$APP/Info.plist")
 [ "$APP_VERSION" = "$VERSION" ] || fail "$APP is v$APP_VERSION, CMakeLists.txt says $VERSION: build it again"
+# The release tag (NFSMW_BUILD_TAG, -DSB_RELEASE_TAG: the update check's
+# identity for it) of the build the app was linked from (build/ios, or
+# IOS_BUILD): v<version>. SB_UNTAGGED=1 makes an IPA of an untagged build
+# anyway, to try one (never a release).
+INFO=${IOS_BUILD:-$ROOT/build/ios}/runtime/generated/build_info.inc
+TAG=$(sed -n 's/^#define NFSMW_BUILD_TAG "\([^"]*\)"$/\1/p' "$INFO" 2>/dev/null || true)
+[ -z "$TAG" ] || [ "$TAG" = "v$VERSION" ] || fail "the build ($INFO) is tagged $TAG, not v$VERSION: SB_RELEASE_TAG=v$VERSION build.sh"
+if [ -z "$TAG" ]; then
+    [ "${SB_UNTAGGED:-0}" = 1 ] || fail "the build ($INFO) has no release tag: SB_RELEASE_TAG=v$VERSION build.sh (SB_UNTAGGED=1: an IPA to try, never a release)"
+    echo "make_ipa.sh: warning: an untagged build (SB_UNTAGGED=1): not for release" >&2
+fi
 [ "$(lipo -archs "$APP/SpeedBreaker")" = arm64 ] || fail "the executable isn't arm64 alone ($(lipo -archs "$APP/SpeedBreaker"))"
 
 STAGE=$(mktemp -d "${TMPDIR:-/tmp}/make_ipa.XXXXXX")

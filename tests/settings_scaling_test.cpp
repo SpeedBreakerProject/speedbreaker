@@ -89,19 +89,29 @@ int main(int argc, char** argv)
     CHECK(settings::StepValue(Id::Scaling, double(ScalingMode::Fsr1), -1) == double(ScalingMode::Linear), "FSR 1, left: Bilinear");
 
     const settings::Option& shadows = settings::Info(Id::ShadowResolution);
-    CHECK(shadows.entries.size() == 3, "%zu shadow-resolution entries", shadows.entries.size());
-    if (shadows.entries.size() == 3)
+    CHECK(shadows.entries.size() == 4, "%zu shadow-resolution entries", shadows.entries.size());
+    if (shadows.entries.size() == 4)
     {
-        CHECK(shadows.entries[0].value == 2 && std::string(shadows.entries[0].token) == "1x", "first shadow option: 1x");
-        CHECK(shadows.entries[1].value == 3 && std::string(shadows.entries[1].token) == "1.5x", "second shadow option: 1.5x");
-        CHECK(shadows.entries[2].value == 4 && std::string(shadows.entries[2].token) == "2x", "third shadow option: 2x");
+        CHECK(shadows.entries[0].value == settings::kShadowResolutionAuto && std::string(shadows.entries[0].token) == "auto",
+            "first shadow option: Auto");
+        CHECK(shadows.entries[1].value == 2 && std::string(shadows.entries[1].token) == "1x", "second shadow option: 1x");
+        CHECK(shadows.entries[2].value == 3 && std::string(shadows.entries[2].token) == "1.5x", "third shadow option: 1.5x");
+        CHECK(shadows.entries[3].value == 4 && std::string(shadows.entries[3].token) == "2x", "fourth shadow option: 2x");
     }
     CHECK(std::string(shadows.table) == "video" && std::string(shadows.key) == "shadow_resolution", "stored in [video].shadow_resolution");
-    CHECK(settings::DefaultValue(Id::ShadowResolution) == settings::kShadowResolutionDefault, "shadow-resolution default is 1x");
+    CHECK(settings::kShadowResolutionDefault == settings::kShadowResolutionAuto &&
+            settings::DefaultValue(Id::ShadowResolution) == settings::kShadowResolutionAuto,
+        "shadow-resolution default is Auto (GitHub #90)");
     CHECK(settings::FormatValue(Id::ShadowResolution, 3) == "1.5x (2400x2400)", "1.5x label: %s",
         settings::FormatValue(Id::ShadowResolution, 3).c_str());
+    CHECK(settings::FormatValue(Id::ShadowResolution, settings::kShadowResolutionAuto) == "Auto", "Auto label: %s",
+        settings::FormatValue(Id::ShadowResolution, settings::kShadowResolutionAuto).c_str());
     CHECK(settings::StepValue(Id::ShadowResolution, 2, 1) == 3 && settings::StepValue(Id::ShadowResolution, 4, 1) == 4,
         "shadow-resolution steps stop at 2x");
+    CHECK(settings::StepValue(Id::ShadowResolution, settings::kShadowResolutionAuto, 1) == 2 &&
+            settings::StepValue(Id::ShadowResolution, 2, -1) == settings::kShadowResolutionAuto &&
+            settings::StepValue(Id::ShadowResolution, settings::kShadowResolutionAuto, -1) == settings::kShadowResolutionAuto,
+        "Auto is left of 1x, and the left end");
 
     // No file: the defaults.
     CHECK(settings::Load(file), "load without a file: %s", settings::LastError().c_str());
@@ -122,6 +132,67 @@ int main(int argc, char** argv)
     CHECK(settings::Set(Id::ShadowResolution, 2) == settings::SetResult::Applied, "set shadow resolution 1x");
     CHECK(settings::Load(file) && Scaling() == int32_t(ScalingMode::Fsr1), "read back: %d", Scaling());
     CHECK(ShadowResolution() == 3, "shadow resolution read back: %d", ShadowResolution());
+    CHECK(settings::Set(Id::ShadowResolution, settings::kShadowResolutionAuto) == settings::SetResult::Applied, "set shadow resolution Auto");
+    CHECK(settings::Save(file) && Read(file).find("shadow_resolution = \"auto\"") != std::string::npos, "Auto saved as \"auto\":\n%s",
+        Read(file).c_str());
+
+    // From an earlier version (GitHub #90): loading keeps a file's value, as
+    // for every option (a save writes every option, so the old default can't
+    // be told from a choice); one without the key (no option ever saved, or
+    // from before v0.2.1) takes Auto. Then MigrateShadowResolution, once: a
+    // 1x from before 0.2.4 becomes Auto, saved at once with the hidden mark.
+    using settings::kShadowResolutionAuto;
+    auto Migrate = [&](const std::string& text) {
+        Write(file, text);
+        CHECK(settings::Load(file), "load: %s", settings::LastError().c_str());
+        return settings::MigrateShadowResolution();
+    };
+    for (auto [token, value] : { std::pair{ "1x", 2 }, std::pair{ "1.5x", 3 }, std::pair{ "2x", 4 } })
+    {
+        Write(file, std::string("[video]\nshadow_resolution = \"") + token + "\"\n\n[app]\nlast_version = \"0.2.3\"\n");
+        CHECK(settings::Load(file) && ShadowResolution() == value, "a v0.2.3 file's %s, as loaded: %d", token, ShadowResolution());
+    }
+    // v0.2.3's 1x: Auto, marked, in the file at once, the version untouched.
+    CHECK(Migrate("[video]\nshadow_resolution = \"1x\"\n\n[app]\nlast_version = \"0.2.3\"\n"), "v0.2.3's 1x migrates");
+    CHECK(ShadowResolution() == kShadowResolutionAuto && settings::GetInt(Id::ShadowResolutionVersion) == 1, "now Auto, marked: %d", ShadowResolution());
+    {
+        const std::string text = Read(file);
+        CHECK(text.find("shadow_resolution = \"auto\"") != std::string::npos && text.find("shadow_resolution_version = 1") != std::string::npos &&
+                text.find("last_version = \"0.2.3\"") != std::string::npos,
+            "saved at once (Auto, the mark, the old version until the launch records its own):\n%s", text.c_str());
+        CHECK(!settings::Dirty(), "nothing left to save");
+    }
+    // Once: the same file again does nothing, and a 1x chosen since (still
+    // under a 0.2.3 last_version, as in a build not yet at 0.2.4) stays 1x.
+    CHECK(settings::Load(file) && !settings::MigrateShadowResolution() && ShadowResolution() == kShadowResolutionAuto, "again: nothing");
+    CHECK(settings::Set(Id::ShadowResolution, 2) == settings::SetResult::Applied && settings::Save(file), "1x chosen after the migration");
+    CHECK(settings::Load(file) && !settings::MigrateShadowResolution() && ShadowResolution() == 2, "the marked file's 1x stays: %d",
+        ShadowResolution());
+    // Older versions too (v0.2.1 brought the option, a hand edit an older one).
+    CHECK(Migrate("[video]\nshadow_resolution = \"1x\"\n\n[app]\nlast_version = \"0.2.1\"\n") && ShadowResolution() == kShadowResolutionAuto,
+        "v0.2.1's 1x migrates");
+    // Left as they are: 1.5x and 2x; 0.2.4 and later; no version; Auto; no key; no file.
+    CHECK(!Migrate("[video]\nshadow_resolution = \"1.5x\"\n\n[app]\nlast_version = \"0.2.3\"\n") && ShadowResolution() == 3, "1.5x kept");
+    CHECK(!Migrate("[video]\nshadow_resolution = \"2x\"\n\n[app]\nlast_version = \"0.2.3\"\n") && ShadowResolution() == 4, "2x kept");
+    CHECK(!Migrate("[video]\nshadow_resolution = \"1x\"\n\n[app]\nlast_version = \"0.2.4\"\n") && ShadowResolution() == 2, "0.2.4's 1x kept");
+    CHECK(!Migrate("[video]\nshadow_resolution = \"1x\"\n\n[app]\nlast_version = \"0.3.0\"\n") && ShadowResolution() == 2, "0.3.0's 1x kept");
+    CHECK(!Migrate("[video]\nshadow_resolution = \"1x\"\n") && ShadowResolution() == 2, "no version: 1x kept");
+    CHECK(!Migrate("[video]\nshadow_resolution = \"1x\"\nshadow_resolution_version = 1\n\n[app]\nlast_version = \"0.2.3\"\n") &&
+            ShadowResolution() == 2,
+        "marked: 1x kept");
+    CHECK(!Migrate("[video]\nshadow_resolution = \"auto\"\n\n[app]\nlast_version = \"0.2.3\"\n") && ShadowResolution() == kShadowResolutionAuto,
+        "Auto: nothing to do");
+    CHECK(!Migrate("[video]\ninternal_resolution = \"auto\"\n\n[app]\nlast_version = \"0.2.3\"\n") && ShadowResolution() == kShadowResolutionAuto,
+        "a file without the key: Auto, nothing to do");
+    CHECK(!Migrate("[app]\nlast_version = \"0.2.3\"\n") && ShadowResolution() == kShadowResolutionAuto, "a file with only the version: Auto");
+    std::filesystem::remove(file);
+    CHECK(settings::Load(file) && !settings::MigrateShadowResolution() && ShadowResolution() == kShadowResolutionAuto, "no file: Auto");
+    // NFSMW_SHADOW_RESOLUTION=2x for the run: the stored 1x migrates, the run keeps 2x.
+    setenv("NFSMW_SHADOW_RESOLUTION", "2x", 1);
+    CHECK(Migrate("[video]\nshadow_resolution = \"1x\"\n\n[app]\nlast_version = \"0.2.3\"\n") && ShadowResolution() == 4 &&
+            settings::GetStoredValue(Id::ShadowResolution) == kShadowResolutionAuto && Read(file).find("shadow_resolution = \"auto\"") != std::string::npos,
+        "under the environment: stored Auto, in effect 2x");
+    unsetenv("NFSMW_SHADOW_RESOLUTION");
 
     // Each token by hand.
     for (auto [token, value] : { std::pair{ "bicubic", ScalingMode::Bicubic }, std::pair{ "linear", ScalingMode::Linear }, std::pair{ "fsr1", ScalingMode::Fsr1 } })
@@ -154,6 +225,8 @@ int main(int argc, char** argv)
     CHECK(settings::GetStoredValue(Id::ShadowResolution) == 3, "stored shadow resolution: %g", settings::GetStoredValue(Id::ShadowResolution));
     CHECK(settings::Save(file) && Read(file).find("shadow_resolution = \"1.5x\"") != std::string::npos,
         "environment override does not replace the file value:\n%s", Read(file).c_str());
+    setenv("NFSMW_SHADOW_RESOLUTION", "auto", 1);
+    CHECK(settings::Load(file) && ShadowResolution() == settings::kShadowResolutionAuto, "NFSMW_SHADOW_RESOLUTION=auto: %d", ShadowResolution());
     unsetenv("NFSMW_SHADOW_RESOLUTION");
 
     // Sharper UI (gpu/sharp_ui.h): on by default, live, [video].sharper_ui,

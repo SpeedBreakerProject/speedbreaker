@@ -164,9 +164,31 @@ set(SB_BUILD_LABEL "" CACHE STRING "A label for a build that goes to other peopl
 if(NOT SB_BUILD_LABEL STREQUAL "" AND NOT SB_BUILD_LABEL MATCHES "^[A-Za-z0-9]+( [A-Za-z0-9]+)*$")
     message(FATAL_ERROR "SB_BUILD_LABEL: letters, digits and single spaces only (it goes into file names): \"${SB_BUILD_LABEL}\"")
 endif()
+# -DSB_RELEASE_TAG=<tag>: the exact tag a release build is published as
+# (NFSMW_BUILD_TAG, the update check's identity for it: update/check.h): its
+# version's "v<version>", and on Windows, whose releases are betas for now,
+# "v<version>-windows-beta.<n>" (or "v<version>" the day Windows leaves beta).
+# Anything else is refused here, and the release scripts (make_app.py,
+# make_bundle.sh, make_zip.py, make_ipa.sh) refuse a release package of a
+# build whose tag doesn't match it. Without one the build is a development
+# build: Check for Updates shows a newer release's page, never Update Now.
+set(SB_RELEASE_TAG "" CACHE STRING "The tag this release build is published as (v<version>; Windows: v<version>-windows-beta.<n>); empty for a development build")
+if(NOT SB_RELEASE_TAG STREQUAL "")
+    string(REPLACE "." "[.]" sb_version_re "${CMAKE_PROJECT_VERSION}")
+    if(WIN32)
+        set(sb_tag_re "^v${sb_version_re}(-windows-beta[.][1-9][0-9]*)?$")
+        set(sb_tag_want "v${CMAKE_PROJECT_VERSION}-windows-beta.<n> (or v${CMAKE_PROJECT_VERSION})")
+    else()
+        set(sb_tag_re "^v${sb_version_re}$")
+        set(sb_tag_want "v${CMAKE_PROJECT_VERSION}")
+    endif()
+    if(NOT SB_RELEASE_TAG MATCHES "${sb_tag_re}")
+        message(FATAL_ERROR "SB_RELEASE_TAG \"${SB_RELEASE_TAG}\" doesn't match this build's version and platform: expected ${sb_tag_want}")
+    endif()
+endif()
 add_custom_target(nfsmw_build_info
     COMMAND ${CMAKE_COMMAND} -DSOURCE_DIR=${CMAKE_SOURCE_DIR} -DOUTPUT=${CMAKE_CURRENT_BINARY_DIR}/generated/build_info.inc
-        -DVERSION=${CMAKE_PROJECT_VERSION} -DBUILD_TYPE=${CMAKE_BUILD_TYPE} "-DLABEL=${SB_BUILD_LABEL}" -P ${CMAKE_CURRENT_SOURCE_DIR}/report/build_info.cmake
+        -DVERSION=${CMAKE_PROJECT_VERSION} -DBUILD_TYPE=${CMAKE_BUILD_TYPE} "-DLABEL=${SB_BUILD_LABEL}" "-DTAG=${SB_RELEASE_TAG}" -P ${CMAKE_CURRENT_SOURCE_DIR}/report/build_info.cmake
     BYPRODUCTS ${CMAKE_CURRENT_BINARY_DIR}/generated/build_info.inc
     VERBATIM)
 add_dependencies(SpeedBreaker nfsmw_build_info)
@@ -174,6 +196,10 @@ add_dependencies(SpeedBreaker nfsmw_build_info)
 if(SB_HAVE_PAL_ES)
     target_link_libraries(SpeedBreaker PRIVATE NfsmwRecompPalEsLib)
     target_compile_definitions(SpeedBreaker PRIVATE SB_PAL_ES=1)
+endif()
+if(SB_HAVE_PAL_DE)
+    target_link_libraries(SpeedBreaker PRIVATE NfsmwRecompPalDeLib)
+    target_compile_definitions(SpeedBreaker PRIVATE SB_PAL_DE=1)
 endif()
 target_link_libraries(SpeedBreaker PRIVATE NfsmwRecompLib XenonUtilsLite o1heap imgui SDL3::SDL3 Vulkan::Vulkan glslang::glslang glslang::glslang-default-resource-limits ${AVCODEC_LIBRARY} ${AVUTIL_LIBRARY})
 # glslang before 15 (the Steam Frame's 14) keeps the C API's SPIR-V
@@ -241,7 +267,8 @@ if(WIN32)
     # The timer resolution (winmm), crash reports (dbghelp), WaitOnAddress
     # (synchronization), and the shell's known folders (shell32, ole32);
     # FFmpeg's own (avcodec: ole32, user32; avutil: user32, bcrypt).
-    target_link_libraries(SpeedBreaker PRIVATE winmm dbghelp synchronization bcrypt user32 shell32 ole32 advapi32)
+    # winhttp: the update check's transport (update/fetch_windows.cpp).
+    target_link_libraries(SpeedBreaker PRIVATE winmm dbghelp synchronization bcrypt user32 shell32 ole32 advapi32 winhttp)
 endif()
 if(IOS)
     # The CPU level both the iPad Pro (M2) and the iPhone 15 Pro (A17 Pro)

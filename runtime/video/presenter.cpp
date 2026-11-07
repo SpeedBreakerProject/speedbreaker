@@ -29,6 +29,7 @@
 #include "vblank_lock.h"
 #include "refresh_multiple.h"
 #include "refresh_notice.h"
+#include "steam_device.h"
 #include "display_tone.h"
 #include "hdr_output.h"
 #include "fsr1.h"
@@ -6289,21 +6290,8 @@ void main()
         // operator chose a steady 60 there (v020/smooth-steamos/INDEX.txt says how
         // to try it again, e.g. on a later Deck). NFSMW_HFR_DECK=1 offers it anyway.
         static const bool deck = [] {
-            auto read = [](const char* path) {
-                std::string v;
-                if (FILE* f = fopen(path, "r"))
-                {
-                    char buf[64] = {};
-                    if (fgets(buf, sizeof buf, f))
-                        v = buf;
-                    fclose(f);
-                }
-                while (!v.empty() && (v.back() == '\n' || v.back() == ' '))
-                    v.pop_back();
-                return v;
-            };
-            const std::string vendor = read("/sys/class/dmi/id/sys_vendor"), product = read("/sys/class/dmi/id/product_name");
-            const bool isDeck = vendor == "Valve" && (product == "Jupiter" || product == "Galileo");
+            const std::string vendor = ReadDmiLine("/sys/class/dmi/id/sys_vendor"), product = ReadDmiLine("/sys/class/dmi/id/product_name");
+            const bool isDeck = IsSteamDeckDmi(vendor, product);  // video/steam_device.h
             const char* v = std::getenv("NFSMW_HFR_DECK");
             if (isDeck)
                 fprintf(stderr, "[hfr] a Steam Deck (%s): Smooth Motion %s\n", product.c_str(),

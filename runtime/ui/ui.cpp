@@ -9,6 +9,7 @@
 #include <gpu/renderer.h>
 #include <kernel/xam.h>
 #include <report/report.h>
+#include <update/updater.h>  // Tick: the startup check
 #include <user/settings.h>
 #include <video/swapchain_policy.h>
 
@@ -160,6 +161,23 @@ namespace ui
             return false;
         }
 
+        // The menus navigate with player 1's controller (hid/input.h: the
+        // one pressed last), not the backend's own pick (SDL's first, which
+        // on a docked Steam Deck is its built-in controls: GitHub #66). Set
+        // before each of the backend's frames, as hid's events and Update
+        // may have changed or closed it since.
+        void FollowPlayerOne()
+        {
+            static SDL_Gamepad* s_navPad = nullptr;
+            static bool s_set = false;
+            SDL_Gamepad* pad = hid::PlayerOneGamepad();
+            if (s_set && pad == s_navPad)
+                return;
+            s_set = true;
+            s_navPad = pad;
+            ImGui_ImplSDL3_SetGamepadMode(ImGui_ImplSDL3_GamepadMode_Manual, pad ? &s_navPad : nullptr, pad ? 1 : 0);
+        }
+
         // A steering wheel's buttons as the menus' navigation. ImGui takes
         // gamepad keys only while its backend says a gamepad is there
         // (ImGuiBackendFlags_HasGamepad), and the SDL3 backend clears that
@@ -167,8 +185,8 @@ namespace ui
         // with a wheel alone ImGui dropped every key it was fed (its NewFrame
         // zeroes the gamepad keys without the flag). So while a wheel is
         // plugged in the flag is set here, after the backend's frame, and
-        // each key is the wheel's OR the controller's (the backend's first
-        // gamepad, read from SDL as it reads it), every frame.
+        // each key is the wheel's OR the controller's (player 1's, the
+        // backend's, read from SDL as it reads it), every frame.
         //
         // The backend has already queued the controller's change for this
         // frame, if there is one: that event is amended rather than followed
@@ -199,14 +217,7 @@ namespace ui
             ImGuiIO& io = ImGui::GetIO();
             io.BackendFlags |= ImGuiBackendFlags_HasGamepad;
             const uint16_t held = hid::wheel::HeldButtons();
-            SDL_Gamepad* pad = nullptr;
-            int count = 0;
-            if (SDL_JoystickID* ids = SDL_GetGamepads(&count))
-            {
-                if (count > 0)
-                    pad = SDL_GetGamepadFromID(ids[0]);  // the one the backend opened (its AutoFirst), or none
-                SDL_free(ids);
-            }
+            SDL_Gamepad* pad = hid::PlayerOneGamepad();  // the backend's (FollowPlayerOne), or none
             ImVector<ImGuiInputEvent>& queue = ImGui::GetCurrentContext()->InputEventsQueue;
             for (const Key& k : keys)
             {
@@ -1071,6 +1082,8 @@ namespace ui
         // setting changed).
         if (!s_heldPress.empty() && s_pollAt > s_heldPress.front().common.timestamp + kTapLandNs)
             NotATap();
+        // The update check at startup: due yet? Its toast, once no panel is up.
+        update::Tick();
         bool perf = settings::GetBool(settings::Id::PerformanceOverlay);
         std::string toastText;
         {
@@ -1081,6 +1094,7 @@ namespace ui
         if (!s_modal && !s_settingsOpen && !perf && !toast)
             return false;
         ImGui_ImplVulkan_NewFrame();
+        FollowPlayerOne();
         ImGui_ImplSDL3_NewFrame();
         FeedWheelNav();  // after the backend's gamepads: a wheel's keys merged with the controller's
         // SDL gave the window's size and pixels; the UI is drawn into the

@@ -22,6 +22,7 @@
 #include "shadow_lend.h"
 #include "sharp_ui.h"
 #include "anisotropy_auto.h"
+#include "shadow_auto.h"
 #include "split_views.h"
 #include "xenos/registers.h"
 
@@ -2274,6 +2275,27 @@ namespace gpu::renderer
             return !(v && v[0] == '0');
         }();
 
+        // The shadow map's scale for Shadow Resolution's `setting`: Auto
+        // (gpu/shadow_auto.h) follows the scene's current scale, so it moves
+        // with Internal Resolution (ApplyLiveSettings).
+        gpu::RenderScale WantedShadowScale(int32_t setting)
+        {
+            return gpu::ShadowScale(setting == settings::kShadowResolutionAuto ? gpu::AutoShadowHalves(s_renderScale, video::ThisSteamDevice()) : uint32_t(setting));
+        }
+
+        // For the log: "2x", "Auto: 2x2 (the scene at 2x2)", or on a Steam
+        // Deck or Frame "Auto: 1x1 (Steam Deck; the scene at 2x2)".
+        std::string ShadowResolutionName()
+        {
+            if (s_shadowResolutionSetting != settings::kShadowResolutionAuto)
+                return gpu::ScaleName(s_shadowScale);
+            const video::SteamDevice device = video::ThisSteamDevice();
+            if (device != video::SteamDevice::Other)
+                return std::format("Auto: {} ({}; the scene at {})", gpu::ScaleName(s_shadowScale),
+                    video::SteamDeviceName(device), gpu::ScaleName(s_renderScale));
+            return std::format("Auto: {} (the scene at {})", gpu::ScaleName(s_shadowScale), gpu::ScaleName(s_renderScale));
+        }
+
         // What the Internal Resolution setting asks for with the picture
         // covering `regionW` x `regionH` of the swapchain.
         // The setting's value is the scale in half steps (settings.h: 2 is
@@ -2407,12 +2429,13 @@ namespace gpu::renderer
                 s_renderScale = WantedRenderScale(setting, regionW, regionH);
             }
             s_shadowResolutionSetting = settings::GetInt(settings::Id::ShadowResolution);
-            s_shadowScale = gpu::ShadowScale(uint32_t(s_shadowResolutionSetting));
+            s_shadowScale = WantedShadowScale(s_shadowResolutionSetting);
             if (const char* v = std::getenv("NFSMW_SCALE_PITCH"))
                 sscanf(v, "%u-%u", &s_scalePitchMin, &s_scalePitchMax);
             fprintf(stderr, "[renderer] internal resolution %s (%ux%u, %s; surface pitches %u-%u)\n", gpu::ScaleName(s_renderScale).c_str(),
                 s_renderScale.x.Size(1280), s_renderScale.y.Size(720), ScaleReason(setting, regionW, regionH).c_str(), s_scalePitchMin,
                 s_scalePitchMax);
+            fprintf(stderr, "[renderer] shadow resolution %s\n", ShadowResolutionName().c_str());
         }
 
         bool ScaledPitch(uint32_t pitch)
@@ -8340,7 +8363,16 @@ void main()
             bci.pNext = &embci;
             bci.size = kSharedSize;
             bci.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
-            Check(vkCreateBuffer(s_dev, &bci, nullptr, &s_shared), "vkCreateBuffer(shared)");
+            if (VkResult r = vkCreateBuffer(s_dev, &bci, nullptr, &s_shared); r != VK_SUCCESS)
+            {
+                // (MoltenVK 1.2 on a discrete GPU, an Intel Mac's AMD card,
+                // takes the host pointer above and then refuses a buffer for
+                // it: VK_ERROR_FEATURE_NOT_PRESENT; 1.4.2 imports. The copy
+                // comes next.)
+                fprintf(stderr, "[renderer] importing guest memory failed: the driver refuses a buffer of host memory (%d)\n", int(r));
+                s_shared = VK_NULL_HANDLE;
+                return false;
+            }
             VkMemoryRequirements req;
             vkGetBufferMemoryRequirements(s_dev, s_shared, &req);
 
@@ -8855,9 +8887,15 @@ void main()
         {
             const auto start = std::chrono::steady_clock::now();
             const gpu::RenderScale old = s_shadowScale;
-            Flush();
             s_shadowResolutionSetting = setting;
-            s_shadowScale = gpu::ShadowScale(uint32_t(setting));
+            if (WantedShadowScale(setting) == old)
+            {
+                // Auto at the scale it had (1x <-> Auto at 1x): nothing to replace.
+                fprintf(stderr, "[renderer] shadow resolution %s\n", ShadowResolutionName().c_str());
+                return;
+            }
+            Flush();
+            s_shadowScale = WantedShadowScale(setting);
             s_shadowTargetsByResolve.clear();
             PrewarmResolvePipelines(s_shadowScale);
             size_t targets = 0;
@@ -8897,8 +8935,16 @@ void main()
             DrainDepthPool();
             ResetScaledMemory(!s_renderScale.IsOne());
             fprintf(stderr, "[renderer] shadow resolution %s: %zu targets and %zu shadow textures replaced in %.1f ms\n",
-                gpu::ScaleName(s_shadowScale).c_str(), targets, textures,
+                ShadowResolutionName().c_str(), targets, textures,
                 std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count());
+        }
+
+        // The setting changed, or Auto's scale did with the scene's.
+        void UpdateShadowResolution()
+        {
+            const int32_t setting = settings::GetInt(settings::Id::ShadowResolution);
+            if (setting != s_shadowResolutionSetting || !(WantedShadowScale(setting) == s_shadowScale))
+                ApplyShadowResolution(setting);
         }
 
         void ApplyMipmaps(bool mips)
@@ -8930,9 +8976,7 @@ void main()
                 if (mips != s_loadMips)
                     ApplyMipmaps(mips);
             }
-            const int32_t shadowSetting = settings::GetInt(settings::Id::ShadowResolution);
-            if (shadowSetting != s_shadowResolutionSetting)
-                ApplyShadowResolution(shadowSetting);
+            UpdateShadowResolution();
             if (s_scaleFixed)
                 return;
             int32_t setting = settings::GetInt(settings::Id::InternalResolution);
@@ -8970,6 +9014,7 @@ void main()
             s_resolutionSetting = setting;
             s_autoSeen = 0;
             ApplyRenderScale(want, ScaleReason(setting, regionW, regionH) + (splitCapped ? ", split screen: at most Auto's" : ""));
+            UpdateShadowResolution();  // Auto follows the new scale
         }
 
         // ---------------------------------------------------------------

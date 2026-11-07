@@ -90,6 +90,14 @@ namespace report
     // "" for every other build.
     const char* ReleaseName();
     const char* ReleaseFileTag();
+    // The exact tag the build is published as (SB_RELEASE_TAG at configure
+    // time, checked against the version and platform there and by the
+    // release scripts): "v0.2.4", "v0.2.4-windows-beta.7". "" for an
+    // untagged build. The update check treats an untagged or dirty build
+    // as a development build (update/check.h Running).
+    const char* ReleaseTag();
+    // Built with uncommitted changes (BuildId's "-dirty").
+    bool Dirty();
 
     // --- System summary (system_info.cpp) ---
 

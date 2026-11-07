@@ -72,10 +72,13 @@ and a settings menu you can open mid-race.
   a 120 Hz screen, and on a SteamOS or Linux PC with a 120 Hz or 90 Hz one, *Smooth Motion* draws
   up to 120 fps (off by default; not on the Steam Deck).
 - **Two-player split screen** (Quick Race > Split Screen), with two controllers.
+- **Cops in Quick Race (new).** A Cops row in Custom Race's race options (Off by default) puts the
+  police in Circuit, Sprint, Lap Knockout and Speedtrap races, in single player.
 - **USB steering wheels (experimental).** Tested with a Logitech G29 on a Mac, force feedback
   included; the steering feel is still being tuned.
 - **Two discs: USA and European (PAL) Spanish.** One app plays either; the PAL disc brings its
   Spanish movies and police radio, and installs beside a USA install, each with its own saves.
+  The German (PAL) disc plays in a [build from source](#building-from-source) (new).
 - **Ten languages.** English, French, German, Italian, Spanish, Dutch, Swedish, Danish, Polish
   and Finnish, from the disc's own text (Settings > Game > Language). On the USA disc the movies
   and the speech stay in English; on the PAL disc they're Spanish.
@@ -92,16 +95,18 @@ and a settings menu you can open mid-race.
 - **A guided installer.** It finds your disc image, checks that it is the right game, and
   verifies all 49 files as it copies them. An interrupted install never leaves a broken game.
 - **Your controller, or the keyboard.** Controllers work as an Xbox 360 pad, with hot-plugging
-  and rumble support. Every keyboard control can be reassigned in the settings.
+  and rumble support; with more than one connected, the one you last pressed is player 1. Every
+  keyboard control can be reassigned in the settings.
 - **A settings menu that pauses the game.** Open it with F1, Back + Start, or a three-finger
   tap. Every change applies at once, and *Quit Game* leaves the game from a controller too.
 - **Suspend and resume on iPhone and iPad.** Switch away and the game freezes; come back and it
   carries on where it stopped.
 - **One-button bug reports.** Logs, settings and a screenshot go into one zip file. Nothing is
   uploaded, and you decide what to send.
-- **Check for Updates.** One press in the settings asks GitHub whether a newer release is out,
-  shows what changed and opens the download page (or shows it as a QR code for your phone).
-  Nothing is checked online unless you press Check for Updates.
+- **Update notices.** Once at each launch, SpeedBreaker asks GitHub whether a newer release is
+  out; if so, a short notice says so, and the settings show what changed and open the download
+  page (or show it as a QR code for your phone). Only the question goes out. Turn it off with
+  Settings > Advanced > Check for Updates at Startup; Check for Updates still works by hand.
 
 <table>
   <tr>
@@ -130,9 +135,9 @@ belongs to its owners.</sub>
 | **Steam Deck** and **Steam Machine** (SteamOS) | [Download][dl-steamos-x86_64]<br>`SpeedBreaker-steamos-x86_64.tar.xz` | Steam Deck OLED (SteamOS 3.9.2). Steam Machine (SteamOS 3.8) on a 3440x1440 ultrawide. The Steam Deck LCD hasn't been tested yet. |
 | **Steam Frame** (SteamOS, arm64) | [Download][dl-steamos-arm64]<br>`SpeedBreaker-steamos-arm64.tar.xz` | Steam Frame (SteamOS 0.3.0). It plays as a big flat screen in the headset; it is not a VR mode. |
 | **Linux** (x86-64) | [Download][dl-steamos-x86_64] the x86-64 SteamOS build, `SpeedBreaker-steamos-x86_64.tar.xz`, or [build from source](#building-from-source) | Tested here on SteamOS. Players reported v0.1.1 working on Fedora 44 (GeForce GTX 1080 Ti) and Ubuntu 24.04 (Intel Arc 140T). Other setups: reports welcome. |
-| **Mac** (Apple silicon) | [Download][dl-macos]<br>`SpeedBreaker-macos.dmg` | MacBook Pro (M1 Pro) on macOS 27 and Mac Studio (M4 Max) on macOS 26; macOS 15.6 (Sequoia) in a virtual machine. There is no Intel Mac build. |
+| **Mac** (Apple silicon) | [Download][dl-macos]<br>`SpeedBreaker-macos.dmg` | MacBook Pro (M1 Pro) on macOS 27 and Mac Studio (M4 Max) on macOS 26; macOS 15.6 (Sequoia) in a virtual machine. There is no Intel Mac download; an Intel Mac can [build from source](#building-from-source), with MoltenVK 1.4.2 (the Khronos release, or Homebrew's `molten-vk` 1.4.2). Intel Macs are community-tested: a player's Core i7-9700K and Radeon RX 6600 XT on macOS 15.4. |
 | **iPhone** and **iPad** | [Sideload the IPA](#iphone-and-ipad) (experimental), `SpeedBreaker-<version>-ios.ipa` on the [release page][releases], or [build it yourself](#iphone-and-ipad) with Xcode | iPhone 15 Pro Max and iPhone 18 Pro Max (iOS 27). iPad Pro 12.9-inch (M2, iPadOS 27) with a Backbone Pro. Not on the App Store. Those were Xcode-signed builds: the IPA itself hasn't been installed on a device yet. |
-| **Windows** (beta) | [Download][all-releases] `SpeedBreaker-0.2.3-windows-x64-beta.zip` from the Releases page; see [Windows (beta)](#windows-beta) | Here: a laptop with Intel UHD Graphics (60 Hz). Players have reported it running on NVIDIA GeForce (GTX 1070, RTX 4090, RTX 5070 Ti) and AMD Radeon (RX 6700 XT, RX 6750 XT) graphics. Intel Arc graphics and 120/144 Hz monitors haven't been tested yet: [reports welcome](#reporting-a-bug). |
+| **Windows** (beta) | [Download][all-releases] `SpeedBreaker-0.2.4-windows-x64-beta.zip` from the Releases page; see [Windows (beta)](#windows-beta) | Here: a laptop with Intel UHD Graphics (60 Hz). Players have reported it running on NVIDIA GeForce (GTX 1070, RTX 4090, RTX 5070 Ti) and AMD Radeon (RX 6700 XT, RX 6750 XT) graphics. Intel Arc graphics and 120/144 Hz monitors haven't been tested yet: [reports welcome](#reporting-a-bug). |
 | **Android** | Coming soon | |
 
 Each link downloads the newest release. Every file and its `.sha256` checksum file are on the
@@ -164,7 +169,10 @@ should say OK. What changed in each release is in [CHANGELOG.md](CHANGELOG.md).
 - **Windows (beta):** Windows 10 or 11, 64-bit; a CPU with AVX2 (Intel Haswell from 2013 or
   newer, or any AMD Ryzen); a Vulkan 1.2 graphics card with a current driver.
 - **Mac:** Apple silicon and **macOS 15** (Sequoia) or later. The app won't open on older
-  versions of macOS, and there is no Intel Mac build.
+  versions of macOS. There is no Intel Mac download. An Intel Mac with macOS 15 or later and a CPU
+  with AVX2 (Haswell or newer) can [build it from source](#building-from-source), with MoltenVK
+  1.4.2 (the Khronos release, or Homebrew's `molten-vk` 1.4.2). Intel Macs are community-tested: a player runs it on one with an
+  AMD Radeon RX 6600 XT, and we have no Intel Mac to test on. Intel graphics haven't been tested.
 - **iPhone and iPad:** iOS or iPadOS 17 or later, on an A15-class chip or newer (iPhone 13 and
   later, M-series iPads), and a controller or keyboard. Devices with less memory than the tested
   ones are untested.
@@ -194,7 +202,7 @@ should say OK. What changed in each release is in [CHANGELOG.md](CHANGELOG.md).
 - **Mac:** drag the new SpeedBreaker into Applications, choose **Replace**, then allow it once more with **Open Anyway** (see [Mac setup](#mac)).
 - **Steam Deck, Steam Machine, Steam Frame and Linux:** unpack the new download over the old folder (`~/Games/SpeedBreaker`); your Steam shortcut keeps working.
 - **Windows (beta):** extract the new zip into a new folder, run it from there, then delete the old folder.
-- **Everywhere:** your saves, settings and the installed game are kept, and no disc image is needed. Settings > Advanced > **Check for Updates** says when there's a new release, and so does GitHub's **Watch > Custom > Releases**.
+- **Everywhere:** your saves, settings and the installed game are kept, and no disc image is needed. SpeedBreaker says when there's a new release as it starts (Settings > Advanced > **Check for Updates at Startup**; **Check for Updates** asks by hand), and so does GitHub's **Watch > Custom > Releases**.
 
 ## Setup by platform
 
@@ -313,7 +321,7 @@ its name>`, e.g. `NFSMW_GPU=intel %command%` in Steam's launch options.
 
 The Windows version is a **beta**: here it has been tested on one laptop with Intel UHD
 Graphics and a 60 Hz screen, and players have reported it on NVIDIA and AMD graphics cards.
-Download `SpeedBreaker-0.2.3-windows-x64-beta.zip` from the [Releases page][all-releases],
+Download `SpeedBreaker-0.2.4-windows-x64-beta.zip` from the [Releases page][all-releases],
 right-click it, choose **Extract All**, and double-click
 `SpeedBreaker.exe` in the extracted folder (not inside the zip). SpeedBreaker isn't signed, so
 Windows may say **"Windows protected your PC"**: click **More info**, then **Run anyway**.
@@ -321,7 +329,8 @@ Windows may say **"Windows protected your PC"**: click **More info**, then **Run
 other platforms: it looks for your `.iso` in your user folder, Downloads, Desktop, Documents and
 Games and on your other drives, or takes one (or an extracted disc folder) you browse for, and
 puts the game in `%LOCALAPPDATA%\SpeedBreaker`, where your saves, settings and logs go too.
-`README.txt` in the zip has the details. **Check for Updates** isn't available on Windows yet.
+`README.txt` in the zip has the details. **Check for Updates** works on Windows too (new): it
+tells you about the next beta as well.
 
 Please [report](#reporting-a-bug) how it runs, especially on NVIDIA, AMD and Intel Arc
 graphics and on 120 or 144 Hz monitors, with "Windows beta" in the issue's title. Windows
@@ -406,10 +415,13 @@ is B, Square is X and Triangle is Y.
 | Right stick | Right stick | O / L up and down, K / ; left and right |
 | Stick clicks | Press a stick in | Z (left), C (right) |
 
-- One player, one controller: the first one connected is used, and you can plug one in at any
-  time. The keyboard always works as well.
+- One player: with more than one controller connected, the one you last pressed (a button, a
+  trigger or a stick) is player 1, so a docked Steam Deck answers the pad in your hands. Drift and
+  a resting trigger never count. You can plug one in at any time, and the keyboard always works
+  as well.
 - **Split screen** (Quick Race > Split Screen): the second controller joins at "Player 2 press
-  START" and drives the second half of the screen. If a player's controller disconnects, the
+  START" and drives the second half of the screen; player 1 keeps the controller used before
+  split screen began. If a player's controller disconnects, the
   game pauses and says so until it's back. It renders at most what Internal Resolution's Auto
   would for your screen, so it holds 60 fps; single player keeps your setting.
 - **A steering wheel** (experimental) is used instead of a controller while both are plugged in:
@@ -481,7 +493,7 @@ then Yes, puts it back.
 | Anisotropic Filtering | Auto / Off / 2x / 4x / 8x / 16x / Original | Auto: 16x on dedicated graphics cards and M-series iPads, and on a Mac at 1x Internal Resolution; 4x elsewhere. Original uses each texture's own setting, as on the 360. |
 | Mipmaps | On / Off | On, so distant textures don't shimmer |
 | Internal Resolution | Auto / 1x / 1.5x / 2x / 3x | Each entry shows the size it renders on your screen (1x (1280x720) on a 16:9 screen, 1x (1280x800) on a Steam Deck with Fill Screen), and Auto the one it picked. Auto: enough to cover your screen, within what the device can afford: the screen's own shape when that fits (a Steam Deck's 1280x800), otherwise whole scales (1x, 2x, 3x, or 3x2 on an ultrawide). On iPhone and iPad, Auto always picks 1x. With Fill Screen, the rows count the screen's shape: 1x on a 16:10 screen is 1280x800. |
-| Shadow Resolution | 1x / 1.5x / 2x | 1x (1600x1600), the Xbox 360's map size, now spread over the whole picture so shadows reach its sides (a little softer than on the 360). 1.5x and 2x draw the sun's shadow map larger for sharper shadow edges, at more GPU time and memory. |
+| Shadow Resolution | Auto / 1x / 1.5x / 2x | Auto: 2x when Internal Resolution renders at 2x or more, otherwise 1x; always 1x on Steam Deck and Steam Frame. 1x (1600x1600) is the Xbox 360's map size, now spread over the whole picture so shadows reach its sides (a little softer than on the 360). 1.5x and 2x draw the sun's shadow map larger for sharper shadow edges, at more GPU time and memory. A 1x saved by an earlier version becomes Auto once, after the update. |
 | Sharper UI | On / Off | On. Above 1x Internal Resolution, the menus' and the HUD's text, icons and panels are enlarged with a sharper filter instead of a blur, so they look crisper on 1440p and 4K screens. Where the finished picture is then enlarged to the screen by an uneven factor (for example 1440p to 4K), the UI's pixels also take FSR 1's edge-aware upscale and skip the anti-aliasing pass. The art, layout and colors are the game's own; at 1x on a 16:9 screen it changes nothing. |
 | Movie Upscaling | Original / Sharper | Sharper: the game's 720p movies (the intro and the cutscenes) are enlarged with a sharper, edge-aware filter: FSR 1's upscale where the movie reaches the screen at 1x, the same filter as Sharper UI above 1x, and a Lanczos filter on iPhone and iPad at 1x. Original keeps the movies as before. |
 
@@ -510,8 +522,10 @@ other than the G29: both ends of its turn, each pedal, then a button for each co
 
 **Advanced:** Asynchronous Shaders (On: an object is skipped for a frame or two while its shader
 compiles, instead of the game stuttering), Performance Overlay (Off: fps, frame times, and CPU
-and GPU time per frame), **Save Bug Report**, and **Check for Updates** (the only thing that goes
-online, and only when you press it). The page also shows which build you're running.
+and GPU time per frame), **Save Bug Report**, Check for Updates at Startup (On: once at each
+launch the game asks GitHub whether a newer release is out; only the question goes out), and
+**Check for Updates** (the same question, when you press it). Nothing else goes online. The page
+also shows which build you're running.
 
 </details>
 
@@ -551,8 +565,10 @@ your own disc, and SpeedBreaker checks it file by file.
 **Which version of the game do I need?**
 The Xbox 360 **USA release (NTSC-U, English)** or the **European (PAL) release with Spanish
 movies and speech** (since v0.2.0). The installer checks your image and tells you which one it
-found, or that it's a different version. Other PAL discs (German and the rest), Japanese discs and
-re-releases have different code, so the installer refuses them for now. Installing one disc
+found, or that it's a different version. The **German (PAL) disc** runs in a build made from source
+with its code (`ppc-pal-de/`, [Building from source](#building-from-source) step 2); the downloads don't
+include it yet, and their installer says so. Other PAL discs, Japanese discs and re-releases have
+different code, so the installer refuses them for now. Installing one disc
 beside the other keeps both installs. Both discs hold the game's text in ten languages: pick one
 in Settings > Game > Language. Games on Demand packages aren't supported, and no title update is
 used.
@@ -577,6 +593,7 @@ No. Xbox 360 saves can't be imported, so your career starts fresh.
 It always says what to do. The usual causes:
 
 - *Another game, or an unsupported version:* it isn't the USA or the European (PAL) Spanish disc.
+  The German disc is refused by a build without its code (see above).
 - *Truncated image:* most often a copy cut off at 4 GB by a FAT32 drive. Copy it again from your
   own backup, onto a drive that can hold files over 4 GB.
 - *Not a disc image,* a Games on Demand package, or a video-only DVD image.
@@ -649,7 +666,7 @@ SpeedBreaker folder instead: `data/`, `data/game` and `cache/`.
 2. A notice says where the zip file went: your **Desktop** (on SteamOS, pick it up in Desktop
    Mode, or in the Desktop app on a Steam Frame), the **SpeedBreaker** folder in the Files app on
    iPhone and iPad, or the data folder above when there is no Desktop. Its name says which
-   version you were running, for example `speedbreaker-bug-report-v0.2.3-<date>_<time>.zip`.
+   version you were running, for example `speedbreaker-bug-report-v0.2.4-<date>_<time>.zip`.
 3. Open an [issue][issues], attach the zip, and say what you were doing, what you expected, what
    happened, and roughly how long into the session it happened.
 
@@ -667,8 +684,9 @@ pull requests are handled.
 - **Languages:** the movies and the speech (the police radio, the voices in the scenes) stay in
   the disc's language in every language: English on the USA disc, Spanish on the PAL one. Fan
   translations aren't supported.
-- **Discs:** only the USA and the European (PAL) Spanish discs install; German and the other PAL
-  discs are still to come.
+- **Discs:** only the USA and the European (PAL) Spanish discs install with the downloads; the
+  German one needs a build from source with its code ([Building from source](#building-from-source) step 2), and the
+  other PAL discs are still to come.
 - **Smooth Motion on SteamOS and Linux:** offered only at 120 Hz and 90 Hz, and not on the Steam
   Deck, where busy scenes can't keep up and it would ghost.
 - **Steering wheels are experimental:** the steering feel is still being tuned; see
@@ -746,6 +764,12 @@ The supported executable is 3,936,256 bytes, with SHA-256
   `scripts/macos/build_deps.sh`, for macOS 15 like the release (step 3). Homebrew's bottles of
   them (`brew install sdl3 vulkan-loader vulkan-headers glslang spirv-tools`) also work, for an
   app that runs only on the macOS you build on (step 3).
+- **Intel Mac** (community-tested): `build_deps.sh` builds for Apple silicon only, so use
+  Homebrew's libraries (Homebrew is in `/usr/local` there): `brew install llvm lld cmake ninja
+  nasm sdl3 vulkan-loader vulkan-headers glslang spirv-tools`. Take MoltenVK 1.4.2 from the
+  [Khronos release](https://github.com/KhronosGroup/MoltenVK/releases); Homebrew's `molten-vk`
+  works too when `brew info molten-vk` says 1.4.2 or newer. With MoltenVK 1.2.x the movies play
+  solid green. In step 2, run `LLVM=/usr/local/opt/llvm/bin scripts/setup_tools.sh`.
 - **SteamOS:** build inside an Arch Linux distrobox (podman and distrobox ship with SteamOS). The
   development launcher, `scripts/steamos/speedbreaker.sh`, expects the container to be called
   `nfsmw-build`:
@@ -793,6 +817,15 @@ shasum -a 256 game/files-pal-es/default.xex
 # must print aad15fc218d034de3131f746e0b763dd8049a40dd676efc87667fcaf4fc72694
 tools/XenonRecomp/build/XenonRecomp/XenonRecomp config/pal-es/nfsmw.toml tools/XenonRecomp/XenonUtils/ppc_context.h
 python3 scripts/region_ppc.py ppc-pal-es pal_es
+
+# Optional, for the German (PAL) disc too, the same way (ppc-pal-de/; without it the build refuses
+# that disc). docs/REGION_PAL_DE.md says how its tables were made.
+mkdir -p game/files-pal-de ppc-pal-de
+tools/extract-xiso/build/extract-xiso -d game/files-pal-de -x /path/to/your-german-backup.iso
+shasum -a 256 game/files-pal-de/default.xex
+# must print 23ece29d18724ea28971d52f936964d127148bd2359ff24795da7442b9069bf4
+tools/XenonRecomp/build/XenonRecomp/XenonRecomp config/pal-de/nfsmw.toml tools/XenonRecomp/XenonUtils/ppc_context.h
+python3 scripts/region_ppc.py ppc-pal-de pal_de
 ```
 
 #### 3. Build
@@ -812,6 +845,14 @@ cmake -S . -B build/main -G Ninja -DCMAKE_BUILD_TYPE=Release \
 # (or, with Homebrew's libraries instead of build_deps.sh, an app for your own macOS only: the
 #  same cmake line with -DCMAKE_OSX_DEPLOYMENT_TARGET=<your macOS, e.g. 26.0> instead of the last
 #  two options; make_app.py names the version if it's wrong)
+
+# Intel Mac (Homebrew's LLVM and libraries in /usr/local; on a macOS newer than 15, add
+# -DCMAKE_OSX_DEPLOYMENT_TARGET=<your macOS>; SB_MOLTENVK names the Khronos release's
+# libMoltenVK.dylib, or Homebrew's as here)
+cmake -S . -B build/main -G Ninja -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_C_COMPILER=/usr/local/opt/llvm/bin/clang \
+  -DCMAKE_CXX_COMPILER=/usr/local/opt/llvm/bin/clang++ \
+  -DCMAKE_PREFIX_PATH=/usr/local -DSB_MOLTENVK=/usr/local/opt/molten-vk/lib/libMoltenVK.dylib
 
 ninja -C build/main SpeedBreaker
 ```

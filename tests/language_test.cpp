@@ -399,6 +399,44 @@ namespace
     }
 }
 
+namespace
+{
+    // The European (PAL, German) disc: every language's text, German speech
+    // only (COPSPEECH_GE), and its 33 movies as <name>_german_pal.wmv. German
+    // is its own language, every other one gets its text and the German movies
+    // and speech. And each disc's default language (main.cpp).
+    void TestGermanDisc()
+    {
+        CHECK(DiscLanguage("pal-de") == kGerman && DiscLanguage("pal-es") == kSpanish && DiscLanguage("usa") == -1
+            && DiscLanguage("") == -1, "DiscLanguage");
+        CHECK(Find(kGerman) && std::string_view(Find(kGerman)->speech) == "ge", "German has its own speech bank");
+        std::vector<uint8_t> index;
+        PutHash(index, ArchiveHash("SOUND\\SPEECH\\COPSPEECH_GE.BIG"));
+        for (const Language& l : kLanguages)
+            PutHash(index, ArchiveHash(std::string("LANGUAGES\\") + l.disc + ".BIN"));
+        std::vector<std::string> movies;
+        for (const std::string& m : UsaMovies())
+            movies.push_back(m.substr(0, m.size() - std::string("_english_ntsc.wmv").size()) + "_german_pal.wmv");
+
+        Files de = Scan(L(kGerman), movies, index, true);
+        CHECK(de.text && de.pal && de.ownMovies && de.speech && !de.movieRedirect && !de.speechRedirect, "German on the German disc");
+        CHECK(Note(L(kGerman), de) == "Menus, race text, movies and speech in German.", "%s", Note(L(kGerman), de).c_str());
+        for (const Language& l : kLanguages)
+        {
+            if (l.id == kGerman)
+                continue;
+            Files f = Scan(l, movies, index, true);
+            CHECK(f.text && !f.ownMovies && f.movieRedirect && f.movieRedirect->id == kGerman, "%s: German movies", l.token);
+            CHECK(!f.speech && f.speechRedirect && f.speechRedirect->id == kGerman, "%s: German speech", l.token);
+            CHECK(SpeechIndexTo(kSpeechPickBegin + 0xE0, kSpeechCollection, 0, f.speechRedirect->id) == 2, "%s: record 2", l.token);
+        }
+        // Its boot passes 2 (German): the chosen language applies, English too.
+        for (uint32_t lr : kCallers)
+            for (const Language& l : kLanguages)
+                CHECK(BootLanguageFor(lr, kGerman, l.id, true) == (lr == kBootCall ? l.id : kGerman), "German boot %s lr %08X", l.token, lr);
+    }
+}
+
 int main()
 {
     TestTable();
@@ -408,6 +446,7 @@ int main()
     TestArchiveHash();
     TestFiles();
     TestPalDisc();
+    TestGermanDisc();
 
 #ifdef _WIN32
     // Windows has no mkdtemp (settings_keys_test's way): a folder named

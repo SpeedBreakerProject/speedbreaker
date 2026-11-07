@@ -1,6 +1,6 @@
 # SpeedBreaker. GPL-3.0-or-later (see COPYING).
 #
-#   cmake -DSOURCE_DIR=<repo> -DOUTPUT=<file> -DVERSION=<x.y.z> [-DBUILD_TYPE=Release] [-DLABEL=<label>] -P build_info.cmake
+#   cmake -DSOURCE_DIR=<repo> -DOUTPUT=<file> -DVERSION=<x.y.z> [-DBUILD_TYPE=Release] [-DLABEL=<label>] [-DTAG=<tag>] -P build_info.cmake
 #
 # Writes the build's identity for report/build_info.cpp: the version (the
 # top-level project(), passed in), the git commit, whether tracked files
@@ -12,6 +12,10 @@
 # build that goes to other people: "<label> <the build machine's local
 # date>", which the runtime prints after the version as "SpeedBreaker v0.1.3
 # Windows beta 2026-10-11 (59d1ef3)". Without it the file is as the release's.
+# TAG (SB_RELEASE_TAG, checked against the version and platform by
+# runtime/CMakeLists.txt) is the exact tag a release build is published as,
+# NFSMW_BUILD_TAG: the update check's identity for it ("" untagged: a
+# development build, which never updates itself).
 if(NOT VERSION)
     set(VERSION "0.0.0")
 endif()
@@ -42,6 +46,9 @@ set(identity "${VERSION} ${commit} ${dirty} ${diff_hash} ${BUILD_TYPE}")
 if(LABEL)
     set(identity "${identity} ${LABEL}")
 endif()
+if(TAG)
+    set(identity "${identity} tag=${TAG}")
+endif()
 if(EXISTS ${OUTPUT})
     file(STRINGS ${OUTPUT} previous REGEX "^// identity: ")
     if(previous STREQUAL "// identity: ${identity}")
@@ -63,4 +70,5 @@ file(WRITE ${OUTPUT}
 #define NFSMW_BUILD_DIRTY ${dirty}
 #define NFSMW_BUILD_DATE \"${date}\"
 #define NFSMW_BUILD_TYPE \"${BUILD_TYPE}\"
-${release}")
+${release}#define NFSMW_BUILD_TAG \"${TAG}\"
+")

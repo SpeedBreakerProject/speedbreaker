@@ -3,6 +3,7 @@
 #include <stdafx.h>
 #include "input.h"
 #include "key_map.h"
+#include "last_pad.h"
 #include "player_slots.h"
 #include "rumble_note.h"
 #include "wheel.h"
@@ -79,6 +80,11 @@ namespace
     };
     std::vector<OtherPad> s_others;
     hid::PlayerSlots s_slots;
+    // Main thread: outside split screen, the controllers other than
+    // s_gamepad, open so that a press on one makes it player 1's
+    // (hid/last_pad.h; in split screen s_others has them instead).
+    std::vector<OtherPad> s_idle;
+    hid::LastPad s_lastPad;
     // NFSMW_OTHER_PADS=always, a diagnostic: the other controllers are users
     // 1-3 in single player too (what a second pad would do there).
     const bool s_otherPadsAlways = [] {
@@ -670,75 +676,172 @@ namespace
         fprintf(stderr, "[input] rumble note for %s: shown (%s)\n", pad.name.c_str(), d.reason);
     }
 
+    // A controller may be player 1's: not a wheel's (one device, one owner:
+    // hid/wheel.h), and with virtual pads only theirs (a real controller
+    // nearby must not rumble).
+    bool MayPlay(SDL_JoystickID id)
+    {
+        return id && !hid::wheel::Owns(id) && (!s_virtualOnly || IsVirtualPad(id));
+    }
+
+    // s_gamepad is now `g` (open): its line in the log, its player lights,
+    // the rumble the game asks for, the rumble note judged for it.
+    void BecomePlayerOne(SDL_Gamepad* g, const char* why)
+    {
+        s_gamepad = g;
+        // What it can do: a pad without motors takes rumble and ignores it.
+        SDL_PropertiesID props = SDL_GetGamepadProperties(g);
+        // How SDL reaches it (a wired Xbox Series pad on a Mac takes no rumble while the
+        // same pad over Bluetooth does): the GUID's driver byte ('h' HIDAPI, 'm' Apple's GameController,
+        // 0 the system's HID), the connection and the device path.
+        SDL_GUID guid = SDL_GetJoystickGUID(SDL_GetGamepadJoystick(g));
+        char guidText[33];
+        SDL_GUIDToString(guid, guidText, sizeof(guidText));
+        const char* path = SDL_GetGamepadPath(g);
+        SDL_JoystickConnectionState conn = SDL_GetGamepadConnectionState(g);
+        fprintf(stderr, "[input] gamepad: %s (rumble %s, trigger rumble %s; %s, driver '%c', guid %s, path %s)%s\n",
+            SDL_GetGamepadName(g),
+            SDL_GetBooleanProperty(props, SDL_PROP_GAMEPAD_CAP_RUMBLE_BOOLEAN, false) ? "yes" : "no",
+            SDL_GetBooleanProperty(props, SDL_PROP_GAMEPAD_CAP_TRIGGER_RUMBLE_BOOLEAN, false) ? "yes" : "no",
+            conn == SDL_JOYSTICK_CONNECTION_WIRED ? "wired" : conn == SDL_JOYSTICK_CONNECTION_WIRELESS ? "wireless" : "connection unknown",
+            guid.data[14] ? char(guid.data[14]) : '0', guidText, path ? path : "none", why);
+        const char* name = SDL_GetGamepadName(g);
+        s_rumbleNotePad = { g, char(guid.data[14]),
+            conn == SDL_JOYSTICK_CONNECTION_WIRED ? hid::RumbleNote::Connection::Wired
+                : conn == SDL_JOYSTICK_CONNECTION_WIRELESS ? hid::RumbleNote::Connection::Wireless
+                : hid::RumbleNote::Connection::Unknown,
+            SDL_GetGamepadVendor(g), name ? name : "" };
+        SDL_SetGamepadPlayerIndex(g, 0);  // a DualSense's player lights
+        std::lock_guard lock(s_mutex);
+        s_rumbleDirty = true;  // the game's last request, on this pad now
+    }
+
+    // Player 1 has no controller (at start, or its own went): the one
+    // pressed last of those that may take it (hid/last_pad.h), else the
+    // first SDL lists.
     void OpenFirstGamepad()
     {
         if (s_gamepad)
             return;
-        if (s_virtualOnly)
-        {
-            // Only the test's pad: a real controller nearby must not rumble.
-            if (s_vpads[0].id)
-                s_gamepad = SDL_OpenGamepad(s_vpads[0].id);
-            if (s_gamepad)
-                fprintf(stderr, "[input] gamepad: %s\n", SDL_GetGamepadName(s_gamepad));
-            return;
-        }
         int count = 0;
         SDL_JoystickID* ids = SDL_GetGamepads(&count);
+        std::vector<uint32_t> candidates;
+        if (s_virtualOnly && s_vpads[0].id)
+            candidates.push_back(s_vpads[0].id);  // the test's first pad, whatever SDL's order
         for (int i = 0; ids && i < count; i++)
         {
             // In split screen, never another player's controller (one that
             // isn't a player yet may take over player 1's).
             if (s_slots.UserOf(ids[i]) != 0)
                 continue;
-            // A wheel SDL happens to have a gamepad mapping for belongs to the
-            // wheel, not to this path: one device, one owner (hid/wheel.h).
-            if (hid::wheel::Owns(ids[i]))
-                continue;
-            auto other = std::find_if(s_others.begin(), s_others.end(), [&](const OtherPad& o) { return o.id == ids[i]; });
-            if (other != s_others.end())
-            {
-                s_gamepad = other->gamepad;  // already open: player 1's now
-                s_others.erase(other);
-                s_slots.Remove(ids[i]);
-            }
-            else
-                s_gamepad = SDL_OpenGamepad(ids[i]);
-            if (s_gamepad)
-            {
-                // What it can do: a pad without motors takes rumble and ignores it.
-                SDL_PropertiesID props = SDL_GetGamepadProperties(s_gamepad);
-                // How SDL reaches it (a wired Xbox Series pad on a Mac takes no rumble while the
-                // same pad over Bluetooth does): the GUID's driver byte ('h' HIDAPI, 'm' Apple's GameController,
-                // 0 the system's HID), the connection and the device path.
-                SDL_GUID guid = SDL_GetJoystickGUID(SDL_GetGamepadJoystick(s_gamepad));
-                char guidText[33];
-                SDL_GUIDToString(guid, guidText, sizeof(guidText));
-                const char* path = SDL_GetGamepadPath(s_gamepad);
-                SDL_JoystickConnectionState conn = SDL_GetGamepadConnectionState(s_gamepad);
-                fprintf(stderr, "[input] gamepad: %s (rumble %s, trigger rumble %s; %s, driver '%c', guid %s, path %s)\n",
-                    SDL_GetGamepadName(s_gamepad),
-                    SDL_GetBooleanProperty(props, SDL_PROP_GAMEPAD_CAP_RUMBLE_BOOLEAN, false) ? "yes" : "no",
-                    SDL_GetBooleanProperty(props, SDL_PROP_GAMEPAD_CAP_TRIGGER_RUMBLE_BOOLEAN, false) ? "yes" : "no",
-                    conn == SDL_JOYSTICK_CONNECTION_WIRED ? "wired" : conn == SDL_JOYSTICK_CONNECTION_WIRELESS ? "wireless" : "connection unknown",
-                    guid.data[14] ? char(guid.data[14]) : '0', guidText, path ? path : "none");
-                const char* name = SDL_GetGamepadName(s_gamepad);
-                s_rumbleNotePad = { s_gamepad, char(guid.data[14]),
-                    conn == SDL_JOYSTICK_CONNECTION_WIRED ? hid::RumbleNote::Connection::Wired
-                        : conn == SDL_JOYSTICK_CONNECTION_WIRELESS ? hid::RumbleNote::Connection::Wireless
-                        : hid::RumbleNote::Connection::Unknown,
-                    SDL_GetGamepadVendor(s_gamepad), name ? name : "" };
-            }
-            break;
+            if (MayPlay(ids[i]) && std::find(candidates.begin(), candidates.end(), ids[i]) == candidates.end())
+                candidates.push_back(ids[i]);
         }
         SDL_free(ids);
+        const SDL_JoystickID id = s_lastPad.Fallback(candidates);
+        if (!id)
+            return;
+        SDL_Gamepad* g = nullptr;
+        for (std::vector<OtherPad>* list : { &s_others, &s_idle })
+        {
+            auto open = std::find_if(list->begin(), list->end(), [&](const OtherPad& o) { return o.id == id; });
+            if (open != list->end())
+            {
+                g = open->gamepad;  // already open: player 1's now
+                list->erase(open);
+                s_slots.Remove(id);
+            }
+        }
+        if (!g)
+            g = SDL_OpenGamepad(id);
+        if (g)
+            BecomePlayerOne(g, "");
+    }
+
+    // Outside split screen: open a controller that isn't player 1's, so a
+    // press on it can make it player 1's.
+    void OpenIdlePad(SDL_JoystickID id)
+    {
+        if (!MayPlay(id) || (s_gamepad && SDL_GetGamepadID(s_gamepad) == id) ||
+            std::any_of(s_idle.begin(), s_idle.end(), [&](const OtherPad& o) { return o.id == id; }))
+            return;
+        if (SDL_Gamepad* g = SDL_OpenGamepad(id))
+        {
+            SDL_SetGamepadPlayerIndex(g, -1);  // no player's lights: it isn't one
+            s_idle.push_back(OtherPad{ id, g });
+            fprintf(stderr, "[input] %s open: player 1's once it's pressed\n", SDL_GetGamepadName(g) ? SDL_GetGamepadName(g) : "a controller");
+        }
+    }
+
+    void OpenIdlePads()
+    {
+        int count = 0;
+        SDL_JoystickID* ids = SDL_GetGamepads(&count);
+        for (int i = 0; ids && i < count; i++)
+            OpenIdlePad(ids[i]);
+        SDL_free(ids);
+    }
+
+    // Split screen beginning (s_others has them open by then: SDL counts
+    // each open, so a controller stays open across), or `only` removed.
+    void CloseIdlePads(SDL_JoystickID only = 0)
+    {
+        for (size_t i = 0; i < s_idle.size();)
+            if (!only || s_idle[i].id == only)
+            {
+                SDL_CloseGamepad(s_idle[i].gamepad);
+                s_idle.erase(s_idle.begin() + std::ptrdiff_t(i));
+            }
+            else
+                i++;
+    }
+
+    // Once a frame, before player 1's controller is read: outside split
+    // screen a press on another makes it player 1's, the press included (the
+    // keyboard stays player 1's either way). The game sees one controller
+    // all along, so nothing reads as disconnected.
+    void FollowLastPressed()
+    {
+        auto sample = [](SDL_Gamepad* g) {
+            hid::LastPad::Sample s;
+            for (auto& [button, bit] : kButtonMap)
+                if (SDL_GetGamepadButton(g, button))
+                    s.buttons |= bit;
+            auto axis = [&](SDL_GamepadAxis a) { return float(SDL_GetGamepadAxis(g, a)) / 32767.0f; };
+            s.lx = axis(SDL_GAMEPAD_AXIS_LEFTX);
+            s.ly = axis(SDL_GAMEPAD_AXIS_LEFTY);
+            s.rx = axis(SDL_GAMEPAD_AXIS_RIGHTX);
+            s.ry = axis(SDL_GAMEPAD_AXIS_RIGHTY);
+            s.lt = axis(SDL_GAMEPAD_AXIS_LEFT_TRIGGER);
+            s.rt = axis(SDL_GAMEPAD_AXIS_RIGHT_TRIGGER);
+            return s;
+        };
+        const SDL_JoystickID current = s_gamepad ? SDL_GetGamepadID(s_gamepad) : 0;
+        if (s_gamepad)
+            s_lastPad.Note(current, sample(s_gamepad));
+        for (const OtherPad& o : s_idle)
+            s_lastPad.Note(o.id, sample(o.gamepad));
+        const SDL_JoystickID pick = s_lastPad.Choose(current, s_slots.Split());
+        auto next = std::find_if(s_idle.begin(), s_idle.end(), [&](const OtherPad& o) { return o.id == pick; });
+        if (pick == current || next == s_idle.end())
+            return;
+        SDL_Gamepad* g = next->gamepad;
+        s_idle.erase(next);
+        if (s_gamepad)
+        {
+            SDL_RumbleGamepad(s_gamepad, 0, 0, 0);
+            SDL_SetGamepadPlayerIndex(s_gamepad, -1);
+            s_idle.push_back(OtherPad{ current, s_gamepad });
+        }
+        s_backState = BackState::Idle;  // (the last pad's Back, if it was held, is not replayed)
+        BecomePlayerOne(g, ": player 1's now (pressed last)");
     }
 
     // Split screen: open a controller as a possible other player (not player
     // 1's, not one already open; with virtual pads, only theirs).
     void OpenOtherPad(SDL_JoystickID id)
     {
-        if (!id || hid::wheel::Owns(id) || (s_gamepad && SDL_GetGamepadID(s_gamepad) == id) || (s_virtualOnly && (!IsVirtualPad(id) || id == s_vpads[0].id)))
+        if (!MayPlay(id) || (s_gamepad && SDL_GetGamepadID(s_gamepad) == id))
             return;
         if (std::any_of(s_others.begin(), s_others.end(), [&](const OtherPad& o) { return o.id == id; }))
             return;
@@ -887,6 +990,7 @@ namespace
             if (split)
             {
                 OpenOtherPads();
+                CloseIdlePads();  // (player 1 keeps the controller it has: hid/last_pad.h)
                 fprintf(stderr, "[input] split screen%s: player 1 is the keyboard and %s; another controller is player 2 once it's "
                                 "used (%zu other open)\n",
                     s_otherPadsAlways ? " (NFSMW_OTHER_PADS=always)" : " on (the game's Quick Race > Split Screen)",
@@ -894,6 +998,7 @@ namespace
             }
             else
             {
+                OpenIdlePads();  // (before their split-screen opens close: SDL counts each)
                 CloseOtherPads("closed: split screen is over");
                 {
                     // (The players were forgotten before their pads closed:
@@ -1050,6 +1155,7 @@ namespace hid
         if (!s_virtualOnly)
             wheel::Initialize();
         OpenFirstGamepad();
+        OpenIdlePads();
         std::lock_guard lock(s_mutex);
         s_deviceConnected = true;  // the keyboard always counts as controller 0
     }
@@ -1069,6 +1175,8 @@ namespace hid
             OpenFirstGamepad();
             if (s_slots.Split())
                 OpenOtherPad(e.gdevice.which);  // (unless it just became player 1's)
+            else
+                OpenIdlePad(e.gdevice.which);  // (likewise)
 #if defined(__APPLE__) && TARGET_OS_IOS
             if (s_gamepad || wheel::Playing())
                 WithdrawNoControllerNotice();
@@ -1078,8 +1186,9 @@ namespace hid
         {
             SDL_CloseGamepad(s_gamepad);
             s_gamepad = nullptr;
+            s_lastPad.Remove(e.gdevice.which);
             fprintf(stderr, "[input] gamepad removed\n");
-            OpenFirstGamepad();
+            OpenFirstGamepad();  // (another one pressed last, if there is one: player 1's now)
             if (!s_gamepad && s_slots.Split())
                 s_p1Lost = true;  // (Update's notices)
 #if defined(__APPLE__) && TARGET_OS_IOS
@@ -1088,7 +1197,11 @@ namespace hid
 #endif
         }
         else if (e.type == SDL_EVENT_GAMEPAD_REMOVED)
+        {
             CloseOtherPad(e.gdevice.which, "removed");  // (split screen: another player's)
+            CloseIdlePads(e.gdevice.which);
+            s_lastPad.Remove(e.gdevice.which);
+        }
 #if defined(__APPLE__) && TARGET_OS_IOS
         else if (e.type == SDL_EVENT_KEYBOARD_ADDED)
             WithdrawNoControllerNotice();  // (a keyboard counts as a controller here)
@@ -1110,6 +1223,12 @@ namespace hid
             SDL_CloseGamepad(o.gamepad);
         }
         s_others.clear();
+        CloseIdlePads();
+    }
+
+    SDL_Gamepad* PlayerOneGamepad()
+    {
+        return s_gamepad;
     }
 
     bool IsOtherPlayersPad(SDL_JoystickID id)
@@ -1164,6 +1283,7 @@ namespace hid
         const std::string& padSteps = padTaken[0];
         const float deadzone = settings::GetFloat(settings::Id::StickDeadzone);
         const float triggerDeadzone = settings::GetFloat(settings::Id::TriggerDeadzone);
+        FollowLastPressed();  // (outside split screen, a press on another controller makes it player 1's)
         // A steering wheel first, while one is plugged in and Settings >
         // Wheel has it on: it brings its own steering curve and its pedals
         // their own calibration (hid/wheel_map.h), so the stick's radial

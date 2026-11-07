@@ -30,6 +30,7 @@
 #include <report/report.h>
 #include <ui/installer_screen.h>
 #include <ui/ui.h>
+#include <update/updater.h>  // the startup check: --after-update, NoteWindowUp
 #include <user/paths.h>
 #include <user/settings.h>
 #include <user/version_check.h>
@@ -258,6 +259,9 @@ namespace
 #if defined(__APPLE__) && defined(__aarch64__)
         // ESR_EL1 data abort, ISS bit 6: WnR.
         isWrite = (static_cast<ucontext_t*>(context)->uc_mcontext->__es.__esr >> 6) & 1;
+#elif defined(__APPLE__) && defined(__x86_64__)
+        // Page-fault error code, bit 1: the access was a write.
+        isWrite = (static_cast<ucontext_t*>(context)->uc_mcontext->__es.__err & 2) != 0;
 #elif defined(__linux__) && defined(__x86_64__)
         // Page-fault error code, bit 1: the access was a write.
         isWrite = (static_cast<ucontext_t*>(context)->uc_mcontext.gregs[REG_ERR] & 2) != 0;
@@ -268,6 +272,8 @@ namespace
 #endif
 #if defined(__APPLE__) && defined(__aarch64__)
         writewatch::t_faultPc = reinterpret_cast<const void*>(static_cast<ucontext_t*>(context)->uc_mcontext->__ss.__pc);
+#elif defined(__APPLE__) && defined(__x86_64__)
+        writewatch::t_faultPc = reinterpret_cast<const void*>(static_cast<ucontext_t*>(context)->uc_mcontext->__ss.__rip);
 #elif defined(__linux__) && defined(__x86_64__)
         writewatch::t_faultPc = reinterpret_cast<const void*>(static_cast<ucontext_t*>(context)->uc_mcontext.gregs[REG_RIP]);
 #elif defined(__linux__) && defined(__aarch64__)
@@ -283,8 +289,8 @@ namespace
 #endif
 }
 
-// The installed disc's release, before settings load: the PAL (Spanish)
-// disc's own language, Spanish, is the Language row's default there (a
+// The installed disc's release, before settings load: a PAL disc's own
+// language (Spanish, German) is the Language row's default there (a
 // settings.toml a save wrote keeps the language it holds). Cheap: the
 // installs' default.xex sizes (install/locate.h).
 static void SetReleaseDefaults(int argc, char** argv)
@@ -298,9 +304,10 @@ static void SetReleaseDefaults(int argc, char** argv)
     }
     else if (std::optional<install::GameInstall> game = install::FindGameInstall())
         manifest = game->manifest;
-    if (manifest && manifest->region == "pal-es")
-        settings::SetDeviceDefault(settings::Id::GameLanguage, game::language::kSpanish,
-            "the European (PAL, Spanish) disc's language");
+    if (!manifest)
+        return;
+    if (const int32_t language = game::language::DiscLanguage(manifest->region); language >= 0)
+        settings::SetDeviceDefault(settings::Id::GameLanguage, language, std::format("the language of the {} disc", manifest->regionName));
 }
 
 int main(int argc, char** argv)
@@ -418,6 +425,18 @@ int main(int argc, char** argv)
         ~ClearMarkerOnReturn() { report::ClearCrashMarker(); }
     } clearMarkerOnReturn;
 
+    // --after-update [<pid>]: this start is an update's restart (the
+    // updater's relaunch, update/updater.h): no startup check, the update
+    // just checked. The rest of the command line is as without it.
+    if (argc > 1 && std::strcmp(argv[1], "--after-update") == 0)
+    {
+        int skip = argc > 2 && argv[2][0] >= '0' && argv[2][0] <= '9' ? 2 : 1;
+        fprintf(stderr, "[runtime] started after an update%s%s\n", skip == 2 ? " from pid " : "", skip == 2 ? argv[2] : "");
+        update::NoteAfterUpdate();
+        argv[skip] = argv[0];
+        argv += skip;
+        argc -= skip;
+    }
     // Anything else starting with '-' is a mistake, not a XEX path.
     if (argc > 1 && argv[1][0] == '-')
     {
@@ -455,6 +474,8 @@ int main(int argc, char** argv)
     std::string lastVersion;  // the last session's ("": not known)
     if (settingsLoaded)
     {
+        // Before the version is recorded: it reads the last one (GitHub #90).
+        settings::MigrateShadowResolution();
         std::string last = lastVersion = settings::LastVersion();
         versionChange = version::Classify(last, settings::FileFound(), report::Version());
         fprintf(stderr, "[version] %s\n", version::Describe(versionChange, last, report::Version()).c_str());
@@ -612,23 +633,24 @@ int main(int argc, char** argv)
             if (!region::Available(release))
             {
                 fprintf(stderr, "[runtime] %s is the %.*s release's default.xex, and this build has no recompiled code "
-                    "for it (built without ppc-pal-es/)\n", xexPath.string().c_str(), int(known->regionName.size()),
-                    known->regionName.data());
+                    "for it (built without ppc-%.*s/)\n", xexPath.string().c_str(), int(known->regionName.size()),
+                    known->regionName.data(), int(known->region.size()), known->region.data());
                 return 1;
             }
             region::Select(release);
             report::RefreshGuestSymbols();
-            // A first run that installed the PAL disc just now loaded the
-            // settings before the disc was known: its language, Spanish,
-            // becomes the default and this run's (SetReleaseDefaults does it
-            // before loading on later runs).
-            if (release == region::Release::PalEs && settings::IsDefault(settings::Id::GameLanguage)
-                && !settings::EnvOverride(settings::Id::GameLanguage) && settings::GetInt(settings::Id::GameLanguage) != game::language::kSpanish)
+            // A first run that installed a PAL disc just now loaded the
+            // settings before the disc was known: its language (Spanish,
+            // German) becomes the default and this run's (SetReleaseDefaults
+            // does it before loading on later runs).
+            const int32_t language = game::language::DiscLanguage(known->region);
+            if (language >= 0 && settings::IsDefault(settings::Id::GameLanguage)
+                && !settings::EnvOverride(settings::Id::GameLanguage) && settings::GetInt(settings::Id::GameLanguage) != language)
             {
-                settings::SetDeviceDefault(settings::Id::GameLanguage, game::language::kSpanish,
-                    "the European (PAL, Spanish) disc's language, installed this run");
+                settings::SetDeviceDefault(settings::Id::GameLanguage, language,
+                    std::format("the language of the {} disc, installed this run", known->regionName));
                 settings::Reset(settings::Id::GameLanguage);
-                game::language::SetLaunchLanguage(game::language::kSpanish);
+                game::language::SetLaunchLanguage(language);
             }
         }
     }
@@ -684,6 +706,8 @@ int main(int argc, char** argv)
     // iOS: the "needs a controller" notice, a few seconds into the game
     // (not over the installer).
     hid::NoteGameStarting();
+    // The update check at startup, a few seconds from now (update/updater.h).
+    update::NoteWindowUp();
     while (video::RunFrame())
         ;
     if (int sig = quitsignals::Requested())

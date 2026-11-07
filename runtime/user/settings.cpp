@@ -1,6 +1,7 @@
 // SpeedBreaker runtime. GPL-3.0-or-later (see COPYING). See settings.h.
 #include "settings.h"
 #include <user/paths.h>
+#include <user/version_check.h>  // MigrateShadowResolution: last_version against 0.2.4
 #include <game/language.h>  // Settings > Game > Language: the languages
 
 #include <algorithm>
@@ -178,6 +179,7 @@ namespace settings
         };
 
         constexpr EnumEntry kShadowResolutionEntries[] = {
+            { kShadowResolutionAuto, "auto", "Auto" },
             { 2, "1x", "1x (1600x1600)" },
             { 3, "1.5x", "1.5x (2400x2400)" },
             { 4, "2x", "2x (3200x3200)" },
@@ -358,7 +360,7 @@ namespace settings
               .env = "NFSMW_RESOLUTION", .defaultValue = kResolutionAuto, .entries = kResolutionEntries },
             { .id = Id::ShadowResolution, .category = Category::Graphics, .type = Type::Enum, .apply = Apply::Live,
               .table = "video", .key = "shadow_resolution", .label = "Shadow Resolution",
-              .description = "Sharper sun shadows: draw the game's 1600x1600 shadow map at 1.5x or 2x. 1x is the 360's map, spread over the whole picture so shadows reach its sides, which makes them a little softer than on the 360. Higher settings use more GPU time and memory.",
+              .description = "Sharper sun shadows: draw the game's 1600x1600 shadow map at 1.5x or 2x. 1x is the 360's map, spread over the whole picture so shadows reach its sides, which makes them a little softer than on the 360. Higher settings use more GPU time and memory. Auto: 2x when Internal Resolution renders at 2x or more, otherwise 1x; always 1x on Steam Deck and Steam Frame.",
               .env = "NFSMW_SHADOW_RESOLUTION", .defaultValue = kShadowResolutionDefault, .entries = kShadowResolutionEntries },
             // Sharper UI (gpu/sharp_ui.h): front-end draws only, above 1x.
             { .id = Id::SharpUi, .category = Category::Graphics, .type = Type::Bool, .apply = Apply::Live,
@@ -380,6 +382,10 @@ namespace settings
               .table = "video", .key = "window_height", .label = "Window Height",
               .description = "The window's height when the game starts.",
               .env = "NFSMW_WINDOW", .envField = 2, .defaultValue = 720, .min = 200, .max = 16384, .step = 1, .unit = "px" },
+            { .id = Id::ShadowResolutionVersion, .category = Category::Graphics, .type = Type::Int, .apply = Apply::Live, .hidden = true,
+              .table = "video", .key = "shadow_resolution_version", .label = "Shadow Resolution Version",
+              .description = "1 once a Shadow Resolution of 1x from before v0.2.4 (then the default) became Auto; 0 otherwise.",
+              .env = "NFSMW_SHADOW_RESOLUTION_VERSION", .defaultValue = 0, .min = 0, .max = 1, .step = 1 },
             // Audio
             { .id = Id::MasterVolume, .category = Category::Audio, .type = Type::Int, .apply = Apply::Live,
               .table = "audio", .key = "master_volume", .label = "Master Volume",
@@ -527,6 +533,10 @@ namespace settings
               .table = "advanced", .key = "performance_overlay", .label = "Performance Overlay",
               .description = "Show the frame rate and frame time in a corner of the screen.",
               .env = "NFSMW_PERF_OVERLAY", .defaultValue = 0 },
+            { .id = Id::UpdateCheck, .category = Category::Advanced, .type = Type::Bool, .apply = Apply::Live,
+              .table = "advanced", .key = "check_for_updates_at_startup", .label = "Check for Updates at Startup",
+              .description = "Ask GitHub once at each launch whether a newer SpeedBreaker is out. Only the question goes out: nothing about you or this device. Off: only Check for Updates asks.",
+              .env = "NFSMW_UPDATE_CHECK", .defaultValue = 1 },
             // Game
             { .id = Id::GameLanguage, .category = Category::Game, .type = Type::Enum, .apply = Apply::Restart, .hidden = kLanguageHidden,
               .table = "game", .key = "language", .label = "Language",
@@ -1770,6 +1780,23 @@ namespace settings
     {
         std::lock_guard lock(s_mutex);
         return LastVersionText();
+    }
+
+    bool MigrateShadowResolution()
+    {
+        const std::string last = LastVersion();
+        if (last.empty() || version::Compare(last, "0.2.4") >= 0 || GetStoredValue(Id::ShadowResolutionVersion) >= 1 ||
+            GetStoredValue(Id::ShadowResolution) != 2)
+            return false;
+        Set(Id::ShadowResolution, kShadowResolutionAuto);
+        Set(Id::ShadowResolutionVersion, 1);
+        // At once: the launch records its version next, and a run that ended
+        // before its own save would leave the 1x in a file that no longer
+        // reads as one from before 0.2.4.
+        const bool saved = Save();
+        fprintf(stderr, "[settings] Shadow Resolution 1x from v%s (the default before v0.2.4) is now Auto, once%s\n", last.c_str(),
+            saved ? "" : ": not saved, so it may be asked again");
+        return true;
     }
 
     bool FileFound()

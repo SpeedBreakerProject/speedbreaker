@@ -64,6 +64,9 @@ namespace settings
         MovieUpscaling,  // how movies are enlarged while they play at 1x (video/upscale.h MoviePass)
         WindowWidth,   // hidden: the window's size, remembered between runs
         WindowHeight,  // hidden
+        // Hidden: 1 once MigrateShadowResolution turned a pre-v0.2.4 file's
+        // Shadow Resolution 1x into Auto (0 in every other file).
+        ShadowResolutionVersion,
         // Audio
         MasterVolume,
         Mute,
@@ -141,6 +144,7 @@ namespace settings
         // Advanced
         AsyncShaders,
         PerformanceOverlay,
+        UpdateCheck,  // Check for Updates at Startup (update/updater.h); the menu shows it after Check for Updates
         // Game (the [game] table)
         GameLanguage,  // game/language.cpp: the game's language, game::language's ids (English = 0)
         Count
@@ -167,8 +171,11 @@ namespace settings
     // screen area the picture covers (see renderer).
     constexpr int32_t kResolutionAuto = 0;
     // Shadow Resolution: the independent scale of the 1600x1600 sun shadow map,
-    // in half steps (2: 1x, 3: 1.5x, 4: 2x).
-    constexpr int32_t kShadowResolutionDefault = 2;
+    // in half steps (2: 1x, 3: 1.5x, 4: 2x); Auto (the default since v0.2.4,
+    // GitHub #90) is 2x while the scene renders at 2x or more, else 1x
+    // (gpu/shadow_auto.h).
+    constexpr int32_t kShadowResolutionAuto = 0;
+    constexpr int32_t kShadowResolutionDefault = kShadowResolutionAuto;
     // Auto: a screen of another shape is filled (video/picture_fit), the HUD
     // kept in a centred 16:9 block: a wider one with a wider view (Hor+), a
     // narrower one (16:10: the Steam Deck, 1280x800 Macs; 3:2, 4:3) with a
@@ -347,6 +354,15 @@ namespace settings
     // (user/version_check.h). "" when the file has none (a new player, or a
     // build from before versions were recorded).
     std::string LastVersion();
+    // Once, after Load and before the launch records its version (GitHub
+    // #90): a file whose last_version is before 0.2.4 and that holds Shadow
+    // Resolution 1x, the default before Auto (a save writes every option, so
+    // the old default reads as a choice), takes Auto, is marked with the
+    // hidden ShadowResolutionVersion 1 and is saved at once. 1.5x and 2x,
+    // files at 0.2.4 or later, files without a version and a marked file
+    // are left as they are, so a 1x chosen since stays 1x. True when it
+    // changed the file's value (logged).
+    bool MigrateShadowResolution();
     // The last Load() found a settings.toml (whether or not it loaded).
     bool FileFound();
     // Main thread, after Load(): records `version` as the one that ran last,

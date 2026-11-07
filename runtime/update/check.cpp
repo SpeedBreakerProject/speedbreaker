@@ -1,7 +1,7 @@
 // SpeedBreaker runtime. GPL-3.0-or-later (see COPYING). See check.h.
 //
-// Self-contained (no runtime headers but user/version_check.h) so the test
-// can build it alone. Formats: Semantic Versioning 2.0.0, RFC 8259 (JSON),
+// Self-contained (no runtime headers but user/version_check.h and
+// update/release_names.h) so the test can build it alone. Formats: Semantic Versioning 2.0.0, RFC 8259 (JSON),
 // RFC 3629 (UTF-8), RFC 9112 (HTTP/1.1 messages, as curl prints them),
 // GitHub's REST API for releases.
 #include "check.h"
@@ -9,6 +9,10 @@
 #include <algorithm>
 #include <cstring>
 #include <format>
+
+#ifdef __APPLE__
+#include <TargetConditionals.h>  // ThisDevice: TARGET_OS_IOS
+#endif
 
 namespace update
 {
@@ -240,8 +244,11 @@ namespace update
 
         enum class Kind : uint8_t { String, Number, True, False, Null, Object, Array };
 
-        enum Field : int { kTag, kName, kUrl, kBody, kMessage, kDraft, kPrerelease, kFields };
-        constexpr std::string_view kFieldNames[kFields] = { "tag_name", "name", "html_url", "body", "message", "draft", "prerelease" };
+        enum Field : int { kTag, kName, kUrl, kBody, kMessage, kDraft, kPrerelease, kAssets, kFields };
+        constexpr std::string_view kFieldNames[kFields] = { "tag_name", "name", "html_url", "body", "message", "draft", "prerelease", "assets" };
+        // An asset's (each object in "assets").
+        enum AssetField : int { kAssetName, kAssetState, kAssetSize, kAssetDigest, kAssetFields };
+        constexpr std::string_view kAssetFieldNames[kAssetFields] = { "name", "state", "size", "digest" };
         constexpr int kMaxDepth = 64;
 
         struct JsonReader
@@ -367,7 +374,18 @@ namespace update
                 return true;
             }
 
-            bool Number()
+            // `out`, if any, gets the number's text.
+            bool Number(std::string* out = nullptr)
+            {
+                const size_t start = i;
+                if (!NumberText())
+                    return false;
+                if (out)
+                    *out = s.substr(start, i - start);
+                return true;
+            }
+
+            bool NumberText()
             {
                 if (Peek('-'))
                     i++;
@@ -423,7 +441,7 @@ namespace update
                 else if (c == 'n')
                     k = Kind::Null, ok = Literal("null");
                 else if (c == '-' || IsDigit(c))
-                    k = Kind::Number, ok = Number();
+                    k = Kind::Number, ok = Number(text);
                 else
                     return Fail(c >= 0x20 && c < 0x7F ? std::format("an unexpected '{}'", c) : std::format("an unexpected byte 0x{:02x}", uint8_t(c)));
                 if (ok && kind)
@@ -484,7 +502,18 @@ namespace update
                     for (int f = 0; top && f < kFields; f++)
                         if (key == kFieldNames[f])
                             field = f;
-                    if (field >= 0)
+                    if (field == kAssets)
+                    {
+                        if (seen & (1u << field))
+                            return Fail(std::format("a second \"{}\"", key));
+                        seen |= 1u << field;
+                        Space();
+                        if (!Peek('['))
+                            return Fail("\"assets\" of the wrong type");
+                        if (!Assets(depth + 1, top->assets))
+                            return false;
+                    }
+                    else if (field >= 0)
                     {
                         if (seen & (1u << field))
                             return Fail(std::format("a second \"{}\"", key));
@@ -499,6 +528,126 @@ namespace update
                         {
                             i = at;
                             return Fail(std::format("\"{}\" of the wrong type", key));
+                        }
+                    }
+                    else if (!Value(depth, nullptr, nullptr))
+                        return false;
+                    Space();
+                    if (Peek(','))
+                    {
+                        i++;
+                        continue;
+                    }
+                    if (Peek('}'))
+                    {
+                        i++;
+                        return true;
+                    }
+                    return Fail("a missing ',' or '}'");
+                }
+            }
+
+            // At the '[' of "assets": objects only.
+            bool Assets(int depth, std::vector<Asset>& out)
+            {
+                if (depth > kMaxDepth)
+                    return Fail("nesting deeper than 64 levels");
+                i++;
+                Space();
+                if (Peek(']'))
+                {
+                    i++;
+                    return true;
+                }
+                while (true)
+                {
+                    Space();
+                    if (!Peek('{'))
+                        return Fail("an asset that isn't an object");
+                    Asset asset;
+                    if (!AssetObject(depth + 1, asset))
+                        return false;
+                    out.push_back(std::move(asset));
+                    Space();
+                    if (Peek(','))
+                    {
+                        i++;
+                        continue;
+                    }
+                    if (Peek(']'))
+                    {
+                        i++;
+                        return true;
+                    }
+                    return Fail("a missing ',' or ']'");
+                }
+            }
+
+            // At an asset's '{': its name, state, size and digest; the rest
+            // (its uploader, its URLs) checked, not kept.
+            bool AssetObject(int depth, Asset& a)
+            {
+                if (depth > kMaxDepth)
+                    return Fail("nesting deeper than 64 levels");
+                i++;
+                Space();
+                if (Peek('}'))
+                {
+                    i++;
+                    return true;
+                }
+                uint32_t seen = 0;
+                while (true)
+                {
+                    Space();
+                    if (!Peek('"'))
+                        return Fail("a missing member name");
+                    std::string key;
+                    if (!String(&key))
+                        return false;
+                    Space();
+                    if (!Peek(':'))
+                        return Fail("a missing ':'");
+                    i++;
+                    int field = -1;
+                    for (int f = 0; f < kAssetFields; f++)
+                        if (key == kAssetFieldNames[f])
+                            field = f;
+                    if (field >= 0)
+                    {
+                        if (seen & (1u << field))
+                            return Fail(std::format("an asset's second \"{}\"", key));
+                        seen |= 1u << field;
+                        Space();
+                        const size_t at = i;
+                        Kind kind = Kind::Null;
+                        std::string text;
+                        if (!Value(depth, &kind, &text))
+                            return false;
+                        bool ok = false;
+                        switch (field)
+                        {
+                        case kAssetName: ok = kind == Kind::String; a.name = std::move(text); break;
+                        case kAssetState: ok = kind == Kind::String; a.state = std::move(text); break;
+                        case kAssetDigest:
+                            ok = kind == Kind::String || kind == Kind::Null;
+                            if (kind == Kind::String)
+                                a.digest = std::move(text);
+                            break;
+                        case kAssetSize:
+                        {
+                            // A whole number of bytes, at most 2^53 (JSON's exact range).
+                            uint64_t v = 0;
+                            ok = kind == Kind::Number && ::update::Number(text, v) && v <= (uint64_t(1) << 53);
+                            if (ok)
+                                a.size = int64_t(v);
+                            break;
+                        }
+                        }
+                        if (!ok)
+                        {
+                            i = at;
+                            return Fail(std::format("an asset's \"{}\" of the wrong type", key));
                         }
                     }
                     else if (!Value(depth, nullptr, nullptr))
@@ -1212,122 +1361,527 @@ namespace update
         return std::string(url);
     }
 
-    Result Evaluate(const Fetched& fetched, std::string_view current, int64_t now)
-    {
-        Result r;
-        Semver running;
-        const bool runningOk = ParseSemver(current, running);
-        r.current = runningOk ? FormatSemver(running) : CleanLine(current, 40);
-        r.url = kReleasesPage;
-        auto fail = [&r](Outcome outcome, std::string message, std::string log) {
-            r.outcome = outcome;
-            r.headline = "Couldn't check for updates";
-            r.message = std::move(message);
-            r.log = "check failed: " + log;
-            return r;
-        };
-        const std::string detail = fetched.detail.empty() ? std::string() : " (" + CleanLine(fetched.detail, 200) + ")";
-        switch (fetched.transport)
-        {
-        case Transport::Ok:
-            break;
-        case Transport::Offline:
-            return fail(Outcome::Offline, "No connection to GitHub. Check that this device is online.", "offline" + detail);
-        case Transport::Timeout:
-            return fail(Outcome::Timeout, std::format("GitHub didn't answer within {} seconds. Try again later.", int(kTimeoutSeconds)),
-                "timed out" + detail);
-        case Transport::Secure:
-            return fail(Outcome::Offline, "Couldn't connect to GitHub securely. Check the date and time.",
-                "secure connection failed" + detail);
-        case Transport::TooLarge:
-            return fail(Outcome::Unreadable, "GitHub's answer was too large to read. Try again later.", "answer too large" + detail);
-        case Transport::Garbled:
-            return fail(Outcome::Unreadable, "GitHub's answer couldn't be read. Try again later.", "unreadable answer" + detail);
-        case Transport::Unavailable:
-            return fail(Outcome::Unavailable,
-                fetched.detail.empty() ? "Checking for updates isn't available here yet." : CleanLine(fetched.detail, 200), "not available" + detail);
-        case Transport::Failed:
-            return fail(Outcome::Offline, std::format("The check couldn't be made{}. Try again later.", detail), "failed" + detail);
-        }
+    // --- Release tags ---
 
-        const HttpResponse& response = fetched.response;
-        // GitHub allows 60 unauthenticated requests an hour per address:
-        // past that, 403 (or 429) with x-ratelimit-remaining: 0 and the
-        // reset time (Unix seconds) in x-ratelimit-reset.
-        if (response.status == 403 || response.status == 429)
+    bool ParseReleaseTag(std::string_view tag, ReleaseTag& out)
+    {
+        if (!tag.starts_with('v'))
+            return false;
+        ReleaseTag t;
+        constexpr std::string_view kBeta = "-windows-beta.";
+        std::string_view version = tag.substr(1);
+        if (size_t dash = version.find('-'); dash != std::string_view::npos)
         {
-            if (response.status == 429 || Header(response, "x-ratelimit-remaining") == "0" || ContainsNoCase(response.body, "rate limit"))
+            std::string_view rest = version.substr(dash);
+            if (!rest.starts_with(kBeta) || !Number(rest.substr(kBeta.size()), t.beta) || t.beta == 0)
+                return false;
+            t.windowsBeta = true;
+            version = version.substr(0, dash);
+        }
+        // Three plain numbers: no pre-release (handled above) and no build part.
+        if (version.find('+') != std::string_view::npos || !ParseSemver(version, t.version) || !t.version.pre.empty() ||
+            version.starts_with('v') || version.starts_with('V'))
+            return false;
+        out = std::move(t);
+        return true;
+    }
+
+    int CompareReleaseTags(const ReleaseTag& a, const ReleaseTag& b)
+    {
+        auto cmp = [](auto x, auto y) { return x < y ? -1 : x > y ? 1 : 0; };
+        Semver va = a.version, vb = b.version;
+        va.pre.clear(), vb.pre.clear();
+        if (int c = CompareSemver(va, vb); c)
+            return c;
+        // A version's release comes after every beta of it.
+        if (a.windowsBeta != b.windowsBeta)
+            return a.windowsBeta ? -1 : 1;
+        return cmp(a.beta, b.beta);
+    }
+
+    std::string FormatReleaseTag(const ReleaseTag& t)
+    {
+        Semver v = t.version;
+        v.pre.clear();
+        return "v" + FormatSemver(v) + (t.windowsBeta ? std::format("-windows-beta.{}", t.beta) : std::string());
+    }
+
+    std::string ReleaseLabel(const ReleaseTag& t)
+    {
+        Semver v = t.version;
+        v.pre.clear();
+        if (t.windowsBeta && t.beta > 0)
+            return std::format("v{} beta {}", FormatSemver(v), t.beta);
+        return "v" + FormatSemver(v);
+    }
+
+    bool ParseReleases(std::string_view json, std::vector<Release>& out, std::string& error)
+    {
+        JsonReader reader;
+        reader.s = json;
+        std::vector<Release> releases;
+        reader.Space();
+        bool ok = false;
+        if (reader.i >= json.size())
+            reader.error = "an empty answer";
+        else if (!reader.Peek('['))
+            reader.Fail("not a JSON array");
+        else
+        {
+            reader.i++;
+            reader.Space();
+            if (reader.Peek(']'))
             {
-                int64_t minutes = -1;
-                auto seconds = [](std::string_view text, int64_t& out) {
-                    uint64_t v = 0;
-                    if (!Number(text, v))
-                        return false;
-                    out = int64_t(v);
-                    return true;
-                };
-                int64_t reset = 0, retry = 0;
-                if (seconds(Header(response, "x-ratelimit-reset"), reset) && reset > now)
-                    minutes = (reset - now + 59) / 60;
-                else if (seconds(Header(response, "retry-after"), retry) && retry > 0)
-                    minutes = (retry + 59) / 60;
-                minutes = std::min<int64_t>(minutes, 24 * 60);
-                std::string when = minutes > 0 ? std::format("in {} minute{}", minutes, minutes == 1 ? "" : "s") : "later";
-                return fail(Outcome::RateLimited,
-                    std::format("GitHub's limit of 60 checks an hour is used up. Try again {}.", when),
-                    std::format("rate-limited (HTTP {}, try again {})", response.status, when));
+                reader.i++;
+                ok = true;
+            }
+            else
+                while (true)
+                {
+                    reader.Space();
+                    if (!reader.Peek('{'))
+                    {
+                        reader.Fail("a release that isn't an object");
+                        break;
+                    }
+                    Release release;
+                    if (!reader.Object(2, &release))
+                        break;
+                    releases.push_back(std::move(release));
+                    reader.Space();
+                    if (reader.Peek(','))
+                    {
+                        reader.i++;
+                        continue;
+                    }
+                    if (reader.Peek(']'))
+                    {
+                        reader.i++;
+                        ok = true;
+                        break;
+                    }
+                    reader.Fail("a missing ',' or ']'");
+                    break;
+                }
+            if (ok)
+            {
+                reader.Space();
+                if (reader.i != json.size())
+                    reader.Fail("more after the JSON");
             }
         }
-        if (response.status != 200)
+        if (!reader.error.empty())
         {
-            Release answer;
-            std::string ignored;
-            ParseRelease(response.body, answer, ignored);
-            std::string said = answer.message.empty() ? "" : ": " + CleanLine(answer.message, 160);
-            return fail(Outcome::ServerError,
-                response.status == 404 ? "GitHub found no release of SpeedBreaker (HTTP 404)."
-                                       : std::format("GitHub answered with an error (HTTP {}). Try again later.", response.status),
-                std::format("HTTP {}{}", response.status, said));
+            error = std::move(reader.error);
+            return false;
         }
+        out = std::move(releases);
+        return true;
+    }
+
+    // --- This device's file ---
+
+    Device ThisDevice()
+    {
+        Device d;
+#if defined(__APPLE__) && TARGET_OS_IOS
+        d.platform = Platform::IOS;
+#elif defined(__APPLE__)
+        d.platform = Platform::MacOS;
+#elif defined(_WIN32)
+        d.platform = Platform::Windows;
+#elif defined(__linux__)
+        d.platform = Platform::Linux;
+#endif
+#if defined(__aarch64__) || defined(_M_ARM64)
+        d.arch = Arch::Arm64;
+#elif defined(__x86_64__) || defined(_M_X64)
+        d.arch = Arch::X86_64;
+#endif
+        return d;
+    }
+
+    std::vector<std::string> DeviceAssetNames(const Device& d, std::string_view version, bool windowsBeta)
+    {
+        const std::string prefix(d.prefix);
+        switch (d.platform)
+        {
+        case Platform::MacOS:
+            if (d.arch == Arch::Arm64 && !windowsBeta)
+                return { prefix + "-macos.dmg" };
+            break;
+        case Platform::Linux:
+            if (windowsBeta)
+                break;
+            if (d.arch == Arch::X86_64)
+                return { prefix + "-steamos-x86_64.tar.xz" };
+            if (d.arch == Arch::Arm64)
+                return { prefix + "-steamos-arm64.tar.xz" };
+            break;
+        case Platform::Windows:
+            if (d.arch != Arch::X86_64)
+                break;
+            if (windowsBeta)
+                return { std::format("{}-{}-windows-x64-beta.zip", prefix, version) };
+            return { std::format("{}-{}-windows-x64.zip", prefix, version), std::format("{}-{}-windows-x64-beta.zip", prefix, version) };
+        case Platform::IOS:
+            if (!windowsBeta)
+                return { std::format("{}-{}-ios.ipa", prefix, version) };
+            break;
+        case Platform::Other:
+            break;
+        }
+        return {};
+    }
+
+    std::string UpdateListName(const Device& device)
+    {
+        return std::string(device.prefix) + "-update.json";
+    }
+
+    Completeness CheckComplete(const std::vector<Asset>& assets, const Device& device, std::string_view version, bool windowsBeta,
+        bool requireUpdateList)
+    {
+        Completeness c;
+        auto find = [&](const std::string& name) -> const Asset* {
+            for (const Asset& a : assets)
+                if (a.name == name)
+                    return &a;
+            return nullptr;
+        };
+        auto whole = [](const Asset* a) { return a && a->state == "uploaded" && a->size > 0; };
+        auto describe = [&](const std::string& name) {
+            const Asset* a = find(name);
+            if (!a)
+                return name + " missing";
+            if (a->state != "uploaded")
+                return std::format("{} {}", name, a->state.empty() ? std::string("in no state") : "\"" + CleanLine(a->state, 20) + "\"");
+            return name + " empty";
+        };
+        const std::vector<std::string> names = DeviceAssetNames(device, version, windowsBeta);
+        if (names.empty())
+        {
+            c.missing = "no file for this device";
+            return c;
+        }
+        // The first name the release has (a Windows release may carry either zip).
+        std::string file = names.front();
+        for (const std::string& n : names)
+            if (find(n))
+            {
+                file = n;
+                break;
+            }
+        c.asset = find(file) ? file : "";
+        std::vector<std::string> wanted = { file, file + ".sha256" };
+        const std::string list = UpdateListName(device);
+        c.updateList = whole(find(list)) && whole(find(list + ".minisig"));
+        if (requireUpdateList)
+        {
+            wanted.push_back(list);
+            wanted.push_back(list + ".minisig");
+        }
+        for (const std::string& name : wanted)
+            if (!whole(find(name)))
+                c.missing += (c.missing.empty() ? "" : ", ") + describe(name);
+        c.complete = c.missing.empty();
+        return c;
+    }
+
+    // --- The outcome ---
+
+    namespace
+    {
+        // The transport's and HTTP's failures (true: `r` says which), before
+        // the answer is read.
+        bool Failed(const Fetched& fetched, int64_t now, Result& r)
+        {
+            auto fail = [&r](Outcome outcome, std::string message, std::string log) {
+                r.outcome = outcome;
+                r.headline = "Couldn't check for updates";
+                r.message = std::move(message);
+                r.log = "check failed: " + log;
+                return true;
+            };
+            const std::string detail = fetched.detail.empty() ? std::string() : " (" + CleanLine(fetched.detail, 200) + ")";
+            switch (fetched.transport)
+            {
+            case Transport::Ok:
+                break;
+            case Transport::Offline:
+                return fail(Outcome::Offline, "No connection to GitHub. Check that this device is online.", "offline" + detail);
+            case Transport::Timeout:
+                return fail(Outcome::Timeout, std::format("GitHub didn't answer within {} seconds. Try again later.", int(kTimeoutSeconds)),
+                    "timed out" + detail);
+            case Transport::Secure:
+                return fail(Outcome::Offline, "Couldn't connect to GitHub securely. Check the date and time.",
+                    "secure connection failed" + detail);
+            case Transport::TooLarge:
+                return fail(Outcome::Unreadable, "GitHub's answer was too large to read. Try again later.", "answer too large" + detail);
+            case Transport::Garbled:
+                return fail(Outcome::Unreadable, "GitHub's answer couldn't be read. Try again later.", "unreadable answer" + detail);
+            case Transport::Unavailable:
+                return fail(Outcome::Unavailable,
+                    fetched.detail.empty() ? "Checking for updates isn't available here yet." : CleanLine(fetched.detail, 200),
+                    "not available" + detail);
+            case Transport::Failed:
+                return fail(Outcome::Offline, std::format("The check couldn't be made{}. Try again later.", detail), "failed" + detail);
+            }
+
+            const HttpResponse& response = fetched.response;
+            // GitHub allows 60 unauthenticated requests an hour per address:
+            // past that, 403 (or 429) with x-ratelimit-remaining: 0 and the
+            // reset time (Unix seconds) in x-ratelimit-reset.
+            if (response.status == 403 || response.status == 429)
+            {
+                if (response.status == 429 || Header(response, "x-ratelimit-remaining") == "0" || ContainsNoCase(response.body, "rate limit"))
+                {
+                    int64_t minutes = -1;
+                    auto seconds = [](std::string_view text, int64_t& out) {
+                        uint64_t v = 0;
+                        if (!Number(text, v))
+                            return false;
+                        out = int64_t(v);
+                        return true;
+                    };
+                    int64_t reset = 0, retry = 0;
+                    if (seconds(Header(response, "x-ratelimit-reset"), reset) && reset > now)
+                        minutes = (reset - now + 59) / 60;
+                    else if (seconds(Header(response, "retry-after"), retry) && retry > 0)
+                        minutes = (retry + 59) / 60;
+                    minutes = std::min<int64_t>(minutes, 24 * 60);
+                    std::string when = minutes > 0 ? std::format("in {} minute{}", minutes, minutes == 1 ? "" : "s") : "later";
+                    return fail(Outcome::RateLimited, std::format("GitHub's limit of 60 checks an hour is used up. Try again {}.", when),
+                        std::format("rate-limited (HTTP {}, try again {})", response.status, when));
+                }
+            }
+            if (response.status != 200)
+            {
+                Release answer;
+                std::string ignored;
+                ParseRelease(response.body, answer, ignored);
+                std::string said = answer.message.empty() ? "" : ": " + CleanLine(answer.message, 160);
+                return fail(Outcome::ServerError,
+                    response.status == 404 ? "GitHub found no release of " SB_APP_NAME " (HTTP 404)."
+                                           : std::format("GitHub answered with an error (HTTP {}). Try again later.", response.status),
+                    std::format("HTTP {}{}", response.status, said));
+            }
+            return false;
+        }
+
+        constexpr const char* kUnreadable = "GitHub's answer couldn't be read. Try again later.";
+
+        bool Unreadable(Result& r, std::string log)
+        {
+            r.outcome = Outcome::Unreadable;
+            r.headline = "Couldn't check for updates";
+            r.message = kUnreadable;
+            r.log = "check failed: unreadable answer: " + log;
+            return true;
+        }
+
+        // An available release: what the dialog says, and whether it is complete here.
+        void Offer(Result& r, const Release& release, const ReleaseTag& tag, const Running& running)
+        {
+            Semver v = tag.version;
+            v.pre.clear();
+            r.outcome = Outcome::Available;
+            r.latest = FormatSemver(v);
+            r.latestTag = FormatReleaseTag(tag);
+            r.label = ReleaseLabel(tag);
+            r.url = SafePageUrl(release.url);
+            r.name = CleanLine(release.name, 120);
+            r.notes = CleanNotes(release.body);
+            r.headline = r.label + " is available";
+            const Completeness c = CheckComplete(release.assets, running.device, r.latest, tag.windowsBeta);
+            r.complete = c.complete;
+            r.asset = c.asset;
+            if (running.devBuild)
+            {
+                r.why = NoUpdateNow::DevBuild;
+                r.whyLine = "This is a development build, so it doesn't update itself: get " + r.label + " from the download page.";
+            }
+            else if (!c.complete)
+            {
+                r.why = NoUpdateNow::Incomplete;
+                r.whyLine = "This device's download isn't in the release yet: see the download page.";
+            }
+            else if (running.device.platform == Platform::IOS)
+            {
+                r.why = NoUpdateNow::Phone;
+                r.whyLine = "Install it with the app you used to install " SB_APP_NAME ", over this one. Deleting the app deletes its saves.";
+            }
+            else
+            {
+                r.why = NoUpdateNow::NotYet;
+                r.whyLine = "Download it from the download page and install it over this one. Your saves and settings stay.";
+            }
+            std::string state = c.complete ? "complete for this device (" + c.asset + ")" : "not complete for this device (" + c.missing + ")";
+            if (c.complete && !c.updateList)
+                state += "; no update list yet";
+            r.log = std::format("{} is available (running {}): {}; {}{}", r.latestTag, running.tag.empty() ? "v" + r.current : running.tag,
+                r.url, state, running.devBuild ? "; a development build" : "");
+        }
+
+        // The running build's place in the Windows order: its tag, or (a
+        // development build, NFSMW_TEST_VERSION) its version: "0.2.3-windows-
+        // beta.6" a beta, a plain version before that version's first beta.
+        bool RunningWindowsTag(const Running& running, ReleaseTag& out)
+        {
+            if (!running.tag.empty() && ParseReleaseTag(running.tag, out))
+                return true;
+            Semver v;
+            if (!ParseSemver(running.version, v) || !v.build.empty())
+                return false;
+            ReleaseTag t;
+            t.windowsBeta = true;
+            if (v.pre.size() == 2 && v.pre[0] == "windows-beta")
+            {
+                if (!Number(v.pre[1], t.beta) || t.beta == 0)
+                    return false;
+            }
+            else if (!v.pre.empty())
+                return false;
+            v.pre.clear();
+            t.version = v;
+            out = t;
+            return true;
+        }
+
+        Result EvaluateWindows(const HttpResponse& response, const Running& running, Result r)
+        {
+            std::vector<Release> releases;
+            std::string error;
+            if (!ParseReleases(response.body, releases, error))
+            {
+                Unreadable(r, error);
+                return r;
+            }
+            ReleaseTag current;
+            if (!RunningWindowsTag(running, current))
+            {
+                r.outcome = Outcome::Unreadable;
+                r.headline = "Couldn't check for updates";
+                r.message = std::format("This build's version ({}) can't be compared with releases.", r.current);
+                r.log = "check failed: this build's version \"" + r.current + "\" isn't a version";
+                return r;
+            }
+            const std::string currentLabel = ReleaseLabel(current);
+            // The newest Windows release: a beta's pre-release, or a release
+            // carrying a Windows zip. Drafts and every other tag are ignored.
+            const Release* best = nullptr;
+            ReleaseTag bestTag;
+            int ignored = 0;
+            for (const Release& release : releases)
+            {
+                ReleaseTag tag;
+                bool counts = !release.draft && release.hasTag && ParseReleaseTag(release.tag, tag) && tag.windowsBeta == release.prerelease;
+                if (counts && !tag.windowsBeta)
+                {
+                    Semver v = tag.version;
+                    const std::vector<std::string> zips = DeviceAssetNames({ Platform::Windows, Arch::X86_64, running.device.prefix },
+                        FormatSemver(v), false);
+                    counts = std::any_of(release.assets.begin(), release.assets.end(),
+                        [&](const Asset& a) { return std::find(zips.begin(), zips.end(), a.name) != zips.end(); });
+                }
+                if (!counts)
+                {
+                    ignored++;
+                    continue;
+                }
+                if (!best || CompareReleaseTags(tag, bestTag) > 0)
+                    best = &release, bestTag = tag;
+            }
+            const std::string ignoredText = ignored ? std::format(" ({} of {} not Windows releases: ignored)", ignored, releases.size()) : "";
+            if (!best || CompareReleaseTags(bestTag, current) <= 0)
+            {
+                r.outcome = Outcome::UpToDate;
+                r.latest = best ? FormatSemver(bestTag.version) : "";
+                r.headline = std::format("You're up to date ({})", currentLabel);
+                r.message = best && CompareReleaseTags(bestTag, current) < 0
+                                ? std::format("The newest Windows release is {}; this build is newer.", ReleaseLabel(bestTag))
+                                : "This is the newest Windows release of " SB_APP_NAME ".";
+                r.log = best ? std::format("up to date: running {}, the newest Windows release is {}{}", FormatReleaseTag(current),
+                                   FormatReleaseTag(bestTag), ignoredText)
+                             : std::format("up to date: running {}; no Windows release among the {} newest{}", FormatReleaseTag(current),
+                                   releases.size(), ignoredText);
+                return r;
+            }
+            Offer(r, *best, bestTag, running);
+            r.message = "You have " + currentLabel + ".";
+            r.log += ignoredText;
+            return r;
+        }
+    }
+
+    Result Evaluate(const Fetched& fetched, const Running& running, int64_t now)
+    {
+        Result r;
+        Semver current;
+        const bool currentOk = ParseSemver(running.version, current);
+        r.current = currentOk ? FormatSemver(current) : CleanLine(running.version, 40);
+        r.url = kReleasesPage;
+        if (Failed(fetched, now, r))
+            return r;
+        if (running.device.platform == Platform::Windows)
+            return EvaluateWindows(fetched.response, running, std::move(r));
 
         Release release;
         std::string error;
-        constexpr const char* kUnreadable = "GitHub's answer couldn't be read. Try again later.";
-        if (!ParseRelease(response.body, release, error))
-            return fail(Outcome::Unreadable, kUnreadable, "unreadable answer: " + error);
+        if (!ParseRelease(fetched.response.body, release, error))
+        {
+            Unreadable(r, error);
+            return r;
+        }
         if (!release.hasTag)
-            return fail(Outcome::Unreadable, kUnreadable, "unreadable answer: no tag_name");
+        {
+            Unreadable(r, "no tag_name");
+            return r;
+        }
         Semver latest;
         if (!ParseSemver(release.tag, latest))
-            return fail(Outcome::Unreadable, kUnreadable, "unreadable answer: the tag \"" + CleanLine(release.tag, 40) + "\" isn't a version");
-        if (!runningOk)
-            return fail(Outcome::Unreadable, std::format("This build's version ({}) can't be compared with releases.", r.current),
-                "this build's version \"" + r.current + "\" isn't a version");
+        {
+            Unreadable(r, "the tag \"" + CleanLine(release.tag, 40) + "\" isn't a version");
+            return r;
+        }
+        if (!currentOk)
+        {
+            r.outcome = Outcome::Unreadable;
+            r.headline = "Couldn't check for updates";
+            r.message = std::format("This build's version ({}) can't be compared with releases.", r.current);
+            r.log = "check failed: this build's version \"" + r.current + "\" isn't a version";
+            return r;
+        }
 
         // Drafts and pre-releases are never offered (the "latest" release is
-        // neither, but the answer is checked rather than trusted).
-        const bool ignored = release.draft || release.prerelease || !latest.pre.empty();
-        const int newer = CompareSemver(latest, running);
+        // neither, but the answer is checked rather than trusted), nor is any
+        // tag but a release's own "vX.Y.Z" (or, as before, "X.Y.Z").
+        ReleaseTag tag;
+        const bool tagOk = ParseReleaseTag(release.tag.starts_with('v') ? release.tag : "v" + release.tag, tag) && !tag.windowsBeta;
+        const bool ignored = release.draft || release.prerelease || !latest.pre.empty() || !tagOk;
+        const int newer = CompareSemver(latest, current);
         if (ignored || newer <= 0)
         {
             r.outcome = Outcome::UpToDate;
             r.latest = ignored ? "" : FormatSemver(latest);
             r.headline = std::format("You're up to date (v{})", r.current);
             r.message = !ignored && newer < 0 ? std::format("The newest release is v{}; this build is newer.", r.latest)
-                                               : "This is the newest release of SpeedBreaker.";
+                                               : "This is the newest release of " SB_APP_NAME ".";
             r.log = ignored ? std::format("up to date: running v{}; the latest, {}, is a draft or pre-release (ignored)", r.current,
                                   CleanLine(release.tag, 40))
                             : std::format("up to date: running v{}, the latest release is v{}", r.current, r.latest);
             return r;
         }
-        r.outcome = Outcome::Available;
-        r.latest = FormatSemver(latest);
-        r.url = SafePageUrl(release.url);
-        r.name = CleanLine(release.name, 120);
-        r.notes = CleanNotes(release.body);
-        r.headline = std::format("v{} is available", r.latest);
+        Offer(r, release, tag, running);
         r.message = std::format("You have v{}.", r.current);
-        r.log = std::format("v{} is available (running v{}): {}", r.latest, r.current, r.url);
         return r;
+    }
+
+    Result Evaluate(const Fetched& fetched, std::string_view current, int64_t now)
+    {
+        Running running;
+        running.version = current;
+        running.devBuild = true;
+        return Evaluate(fetched, running, now);
     }
 }

@@ -8,11 +8,20 @@
 //     is opened, and each one used becomes XInput user 1 (then 2, 3) with its
 //     own state and rumble; player 1 stays user 0, the keyboard and the
 //     controller that drove the menus. Outside split screen users 1-3 read
-//     not connected and only that one controller is opened, as before. Our
-//     menu's Back + Start is player 1's (IsOtherPlayersPad). A pad unplugged
+//     not connected, as before (the other controllers are open only to see
+//     a press: below). Our menu's Back + Start is player 1's
+//     (IsOtherPlayersPad). A pad unplugged
 //     reads not connected (the game's own message). NFSMW_OTHER_PADS=always
 //     exposes them outside split screen too (a diagnostic);
 //     NFSMW_SPLIT_SCREEN=0, never.
+//
+//   - Player 1 is the controller last pressed (GitHub #66; the rule is
+//     hid/last_pad.h): outside split screen every controller is open, and a
+//     button, trigger or stick (past half its travel: not drift) on one
+//     makes it player 1's, rumble and player lights included. The game sees
+//     one controller all along. In split screen player 1 keeps the one it
+//     had when split screen began. Its controller removed: the one pressed
+//     last of those left, else SDL's first.
 //
 //   - Sticks get a radial deadzone with rescaling (Settings > Input, or
 //     NFSMW_DEADZONE; default 0.08 of full deflection), so worn or drifting
@@ -76,6 +85,10 @@ namespace hid
     // Main thread: the controller is another player's in split screen (XInput
     // user 1-3), so our menu's Back + Start chord isn't its to fire.
     bool IsOtherPlayersPad(SDL_JoystickID id);
+    // Main thread: player 1's controller (the one pressed last outside split
+    // screen, hid/last_pad.h), or null; valid until the next HandleEvent or
+    // Update. Our menus navigate with it.
+    SDL_Gamepad* PlayerOneGamepad();
     // Main thread, from the frame loop (not UIKit's callback), once the game
     // is suspended (iOS: the app isn't active) and once it's back: Suspend
     // stops any rumble, Resume sends the game's last request again.

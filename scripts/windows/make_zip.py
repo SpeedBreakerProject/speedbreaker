@@ -440,6 +440,20 @@ def main():
     name_line = "SpeedBreaker v%s %s (%s)" % (version, release, build_id)
     kind = "-".join(w for w in label.lower().split() if w not in ("build", "windows")) or "build"
     stem = "SpeedBreaker-%s-windows-x64-%s-%s-%s" % (version, kind, day, build_id)
+    # The release tag it is published as (NFSMW_BUILD_TAG, -DSB_RELEASE_TAG:
+    # the update check's identity for it): v<version>-windows-beta.<n> while
+    # Windows is in beta (v<version> once it isn't). A build tagged otherwise
+    # is refused; --public needs one (SB_UNTAGGED=1: a zip to try, never a
+    # release).
+    tag = info.get("TAG", "")
+    if tag and not re.fullmatch(r"v%s(-windows-beta\.[1-9][0-9]*)?" % re.escape(version), tag):
+        sys.exit("make_zip.py: the build is tagged %s, not v%s-windows-beta.<n> (its version on Windows): "
+                 "reconfigure with -DSB_RELEASE_TAG=v%s-windows-beta.<n>" % (tag, version, version))
+    if args.public and not tag and os.environ.get("SB_UNTAGGED") != "1":
+        sys.exit("make_zip.py: --public makes a release download, and the build has no release tag: reconfigure with "
+                 "-DSB_RELEASE_TAG=v%s-windows-beta.<n> and build again (SB_UNTAGGED=1: a zip to try, never a release)" % version)
+    if tag:
+        print("release tag: " + tag)
     if args.public:
         if dirty:
             sys.exit("make_zip.py: --public needs a clean build (%s)" % build_id)

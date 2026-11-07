@@ -1,14 +1,18 @@
 // SpeedBreaker runtime. GPL-3.0-or-later (see COPYING). See ui.h.
 //
 // Settings > Advanced > Check for Updates: the row's value and help, and the
-// dialog over the menu with the result (update/updater.h runs the check).
+// dialog over the menu with the result (update/updater.h runs the check, at
+// startup and on the press). The footer's "Update to v0.2.5" (a newer
+// version found by either) opens the same dialog without asking again.
 //   - Checking: says so; Close leaves the check running (the row, the log
 //     and a toast get the result).
 //   - Up to date, or a one-line reason it couldn't check (and Try again).
-//   - A newer version: its notes (plain text, scrolled by the D-pad), "Open
-//     download page" (the system's browser) and the page as a QR code with
-//     its address, for when no browser opens (Steam Deck Game Mode, the
-//     Steam Frame's headset): a phone's camera reads it off the screen.
+//   - A newer version: What's new (its release notes, plain text, scrolled
+//     by the D-pad), one line on how to get it here (this version doesn't
+//     update itself yet: update/check.h NoUpdateNow), "Open download page"
+//     (the system's browser) and the page as a QR code with its address, for
+//     when no browser opens (Steam Deck Game Mode, the Steam Frame's
+//     headset): a phone's camera reads it off the screen.
 // Controller first, like the menu: left/right picks a button, A presses it,
 // up/down scrolls the notes, B goes back to the menu.
 #include <stdafx.h>
@@ -19,6 +23,7 @@
 #include <thirdparty/qrcodegen/qrcodegen.h>
 
 #include <imgui.h>
+#include <imgui_internal.h>  // SetKeyOwner: up and down scroll the notes, never move the cursor
 
 #include <SDL3/SDL_error.h>
 #include <SDL3/SDL_misc.h>
@@ -32,6 +37,7 @@ namespace ui
         bool s_openRequested = false;  // OpenUpdateDialog: open it inside the settings window, next frame
         bool s_showing = false;        // drawn last frame
         std::string s_focusKey;        // what the dialog showed when its button was last focused
+        std::string s_seenTag;         // the release the dialog last showed (update::NoteSeen)
 
         // The download page's QR code, made once per address.
         struct Qr
@@ -138,6 +144,13 @@ namespace ui
             if (ImGui::BeginChild("notes", size, ImGuiChildFlags_Borders | ImGuiChildFlags_NavFlattened))
             {
                 ImGui::PushTextWrapPos(0.0f);
+                // Release notes start with "## What's new"; others get the heading.
+                if (r.notes.lines.empty() || r.notes.lines.front().kind != version::NoteLine::Kind::Heading)
+                {
+                    PushAccentText();
+                    ImGui::TextWrapped("What's new in %s", r.label.empty() ? ("v" + r.latest).c_str() : r.label.c_str());
+                    PopAccentText();
+                }
                 if (!r.name.empty() && r.name != "v" + r.latest && r.name != r.latest)
                 {
                     PushAccentText();
@@ -188,7 +201,20 @@ namespace ui
             const float s = Scale();
             TitleText(r.headline.c_str());
             ImGui::TextDisabled("%s", r.message.c_str());
+            // Why there's no Update Now here (update/check.h NoUpdateNow).
+            if (!r.whyLine.empty())
+            {
+                ImGui::PushTextWrapPos(0.0f);
+                ImGui::TextUnformatted(r.whyLine.c_str());
+                ImGui::PopTextWrapPos();
+            }
             ImGui::Spacing();
+            // Seen here: the startup toast won't announce it again.
+            if (s_seenTag != r.latestTag)
+            {
+                s_seenTag = r.latestTag;
+                update::NoteSeen(r.latestTag);
+            }
 
             // The notes on the left, the code on the right, the address under both.
             const ImGuiStyle& style = ImGui::GetStyle();
@@ -213,6 +239,13 @@ namespace ui
             ImGui::TextDisabled("Download page: %s", r.url.c_str());
 
             ButtonRowAtBottom();
+            // Up and down are the notes' (DrawNotes scrolls with them;
+            // IsKeyDown accepts any owner): owned here, they don't also move
+            // the cursor between the buttons (a held Down, at the notes'
+            // end, took it to Close). Left and right choose the button.
+            for (ImGuiKey key : { ImGuiKey_GamepadDpadUp, ImGuiKey_GamepadDpadDown, ImGuiKey_GamepadLStickUp, ImGuiKey_GamepadLStickDown,
+                     ImGuiKey_UpArrow, ImGuiKey_DownArrow })
+                ImGui::SetKeyOwner(key, ImHashStr("update-notes"));
             FocusOnce("available " + r.latest);
             bool open = ImGui::Button("Open download page");
             ImGui::SameLine();
@@ -280,16 +313,19 @@ namespace ui
         {
         case update::Outcome::UpToDate: return "Up to date";
         case update::Outcome::Available:
-            text = "v" + status.result->latest + " is out";
+            text = status.result->label + " is out";
             return text.c_str();
-        default: return "Failed";
+        case update::Outcome::Offline:
+        case update::Outcome::Timeout: return "Couldn't check (offline)";
+        case update::Outcome::RateLimited: return "Couldn't check (limit)";
+        default: return "Couldn't check";
         }
     }
 
     void UpdateRowHelp()
     {
-        ImGui::TextWrapped("Asks GitHub whether a newer SpeedBreaker is out. The game goes online only when you press this, "
-                           "and sends nothing but the question.");
+        ImGui::TextWrapped("Asks GitHub whether a newer " SB_APP_NAME " is out, and sends nothing but the question. With Check for "
+                           "Updates at Startup on, the game also asks once at each launch.");
         update::Status status = update::GetStatus();
         if (status.phase == update::Phase::Checking)
             ImGui::TextDisabled("Checking...");
@@ -311,6 +347,12 @@ namespace ui
     {
         fprintf(stderr, "[update] Check for Updates pressed\n");
         update::StartCheck();
+        s_openRequested = true;
+    }
+
+    void ShowUpdateDialog()
+    {
+        fprintf(stderr, "[update] %s pressed\n", update::FooterLabel().c_str());
         s_openRequested = true;
     }
 

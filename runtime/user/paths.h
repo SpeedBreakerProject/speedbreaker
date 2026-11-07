@@ -161,8 +161,9 @@ std::string MigrateUserFolders();
 
 // The saves: the USA release's in save/, the European (PAL, Spanish) one's
 // in save-pal-es/ (region/region.h): its saves carry another game ID, and
-// the two are kept apart rather than one release reading the other's.
+// the releases are kept apart rather than one reading another's. The
+// European (PAL, German) one's go to save-pal-de/ the same way.
 inline std::filesystem::path GetSavePath(bool)
 {
-    return GetUserPath() / (region::IsPalEs() ? "save-pal-es" : "save");
+    return GetUserPath() / (region::IsPalDe() ? "save-pal-de" : region::IsPalEs() ? "save-pal-es" : "save");
 }

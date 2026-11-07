@@ -4,6 +4,53 @@ What changed in each SpeedBreaker release, newest first. Each release's notes on
 its entry here, and the game shows the entry once, the first time a new version starts (offline:
 it's built into the game).
 
+## v0.2.4
+
+### What's new
+
+- **Shadow Resolution Auto** (Settings > Graphics), the new default: 2x when Internal Resolution
+  renders at 2x or more, otherwise 1x. Car and road shadows are sharper on 1440p and 4K screens,
+  and on a 1080p screen where Internal Resolution's Auto renders at 2x (a dedicated GPU, or a Mac).
+  Where Internal Resolution stays at 1x, so do the shadows: Intel integrated graphics on Windows,
+  iPhone and iPad. Steam Deck and Steam Frame keep 1x shadows at any resolution, docked too, where
+  2x would cost too much speed. After the update, a Shadow Resolution of 1x from an earlier version
+  becomes Auto, once; 1.5x and 2x are kept, and so is a 1x you choose from now on (GitHub
+  issue #90, reported by deus-ex-machine).
+- **Player 1 follows the controller you last pressed**: with more than one controller connected,
+  pressing a button, a trigger or a stick on any of them makes it player 1, with no setting
+  needed. A docked Steam Deck in Desktop Mode now answers the pad in your hands instead of its
+  own controls, and a pad connected after the game starts works at once. Drift and a resting
+  trigger never count. The settings menu follows player 1 too. In split screen, player 1 keeps
+  the controller used before split screen began, and player 2 joins as before (GitHub issue #66,
+  suggested by krittinen).
+- **Updates at startup**: once at each launch, SpeedBreaker asks GitHub whether a newer version is
+  out. If so, a short notice says so, and Settings offers "Update to v0.x.y", which shows what's
+  new and the download page (in your browser, or as a QR code to read with a phone). Only the
+  question goes out, with the version you run: nothing about you or this device. Turn it off with
+  Settings > Advanced > Check for Updates at Startup; Check for Updates still works by hand.
+- **Intel Macs** (build from source, community-tested): SpeedBreaker now builds and runs on an
+  Intel Mac with macOS 15 or later and a CPU with AVX2, using MoltenVK 1.4.2. There's no Intel
+  Mac download; the README's "Building from source" has the steps. A player runs it with an AMD
+  Radeon RX 6600 XT; we have no Intel Mac to test on, and Intel graphics haven't been tried.
+  Thanks to vorno-crole (pull request #58).
+- **Cops in Quick Race** (Quick Race > Custom Race, in the race options): a new Cops row, Off by
+  default, puts the police in Circuit, Sprint, Lap Knockout and Speedtrap races. It's offered in
+  single player only (not in Drag races or split screen). Thanks to HungryManticore (pull
+  request #82).
+- **The German (PAL) disc, in builds from source.** A build with its code (README, Building from
+  source, step 2) plays it like the Spanish one: its own code, German movies and police radio, and
+  German as the Language row's default. It installs beside a USA or Spanish install, with its saves
+  in their own folder (save-pal-de/). The downloads don't include it yet: their installer refuses
+  the German disc up front, saying it needs a build with its code. Thanks to JokerGermany (pull
+  request #88).
+
+### More about it
+
+- NFSMW_QUICK_RACE_COPS=0 removes the Cops row.
+- For builders: ppc-pal-de/ from config/pal-de/ (-DSB_PAL_DE=OFF leaves it out).
+  survey/func_map.py and survey/region_map.py --region pal-de made its tables, and do the same for
+  another region (docs/REGION_PAL_DE.md).
+
 ## v0.2.3
 
 ### What's new

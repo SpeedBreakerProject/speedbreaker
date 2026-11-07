@@ -150,10 +150,13 @@ namespace ui
     // Settings > Advanced > Check for Updates (update_dialog.cpp, the check
     // itself is update/updater.h): the row's value and help lines, and its
     // dialog, drawn inside the settings window.
-    const char* UpdateRowValue();  // "Check", "Checking...", "Up to date", "v0.1.2 is out", "Failed"
+    const char* UpdateRowValue();  // "Check", "Checking...", "Up to date", "v0.1.2 is out", "Couldn't check (offline)"
     void UpdateRowHelp();
     // Starts a check (unless one is running) and opens the dialog next frame.
     void OpenUpdateDialog();
+    // Opens the dialog with the last check's result, without asking again
+    // (the footer's "Update to v0.2.5": update::FooterLabel).
+    void ShowUpdateDialog();
     // Every frame inside the settings window, at its top level (not in a
     // child or a table: the popup's ID). True while the dialog is open: B
     // closes it, not the menu.
