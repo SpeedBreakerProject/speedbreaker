@@ -28,9 +28,11 @@
 // So the runtime:
 //   - after each of the hooked setups (not drag: a drag race is steered for
 //     you, lane by lane), in single player only (not split screen, not LAN
-//     or online), adds one more row: a Track Direction widget whose vtable is
-//     a copy of the game's (in guest heap memory), so it is told apart;
-//   - for that copy only, Act toggles byte +12 on left/right (as Catch Up's
+//     or online), adds one more row: a Track Direction widget given a vtable
+//     of its own (in guest heap memory), built slot by slot from Track
+//     Direction's functions through region::Addr, so it is told apart by
+//     its vtable's address and holds the running release's functions;
+//   - for that vtable only, Act toggles byte +12 on left/right (as Catch Up's
 //     Act does byte +11) and Draw shows "COPS" with "ON"/"OFF" (the game's
 //     own strings: language hashes 0x0013FF94, COMMON_ON, COMMON_OFF);
 //   - keeps cops out of split screen, where the row isn't offered: while

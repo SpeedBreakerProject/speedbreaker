@@ -69,6 +69,25 @@ int main()
     }
     CHECK(version::ParseNote("").empty() && version::ParseNote("\n\n").empty(), "nothing");
 
+    // A heading needs 1 to 6 '#'s and a space: "#90" at the start of a wrapped
+    // line is the paragraph's (the v0.2.4 CHANGELOG's orange "#90" heading).
+    lines = version::ParseNote("## Fixes\n- Car shadows, reported in issue\n  #90, look sharper.\n#91 too.\n\n####### Seven\n#\n");
+    CHECK(lines.size() == 5, "%zu lines", lines.size());
+    if (lines.size() == 5)
+    {
+        CHECK(lines[0].kind == K::Heading && lines[0].text == "Fixes", "## heading: '%s'", lines[0].text.c_str());
+        CHECK(lines[1].kind == K::Bullet && lines[1].text == "Car shadows, reported in issue #90, look sharper. #91 too.",
+            "#90 and #91 continue the bullet: '%s'", lines[1].text.c_str());
+        CHECK(lines[2].kind == K::Gap, "gap");
+        CHECK(lines[3].kind == K::Text && lines[3].text == "####### Seven", "seven #s are text: '%s'", lines[3].text.c_str());
+        CHECK(lines[4].kind == K::Heading && lines[4].text.empty(), "a bare # is an empty heading");
+    }
+    CHECK(version::HeadingMark("### Downloads") == 3 && version::HeadingMark("#\tTab") == 1 && version::HeadingMark("######") == 6,
+        "heading marks");
+    CHECK(version::HeadingMark("#90") == 0 && version::HeadingMark("#") == 1 && version::HeadingMark("") == 0 &&
+            version::HeadingMark("####### x") == 0,
+        "not heading marks");
+
     printf("%s (%d failures)\n", g_failures ? "FAILED" : "passed", g_failures);
     return g_failures ? 1 : 0;
 }

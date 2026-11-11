@@ -7,6 +7,10 @@
 // video::AutoNativeScale for its Auto at each device's budget: renderer.cpp
 // ReadRenderScale); Auto as the option's default; and gpu/renderer.cpp
 // applying it with the current render scale and again after a scale change.
+// Shadow Edges' Auto (ShadowEdgesSmooth): Classic on a Steam Deck, Smooth
+// everywhere else, Smooth and Classic as chosen; the renderer reading it at
+// start and live, the receivers' Classic variant translated without PCF and
+// taken only by them; its Auto entry and help text.
 // Arguments: runtime/gpu/renderer.cpp, runtime/user/settings.cpp.
 //
 // Build by hand: c++ -std=c++20 -O2 -UNDEBUG -I runtime tests/shadow_auto_test.cpp runtime/video/picture_fit.cpp runtime/video/scale_budget.cpp -o build/shadow_auto_test
@@ -111,7 +115,7 @@ int main(int argc, char** argv)
 
     // Steam Deck and Steam Frame (integrated: 4): 1x at every output, though
     // Internal Resolution's Auto renders 2x2 docked at 1080p (2x shadows cost
-    // the Deck ~12 fps there, issues/90/v024/dev/deck); anything else on the
+    // the Deck ~12 fps there, #90); anything else on the
     // same scales keeps the rule.
     using video::SteamDevice;
     struct DeviceCase
@@ -146,6 +150,13 @@ int main(int argc, char** argv)
     // Auto keeps 1x.
     CHECK(AutoShadowHalves(AutoNativeScale(2560, 1440, 4 / 2)) == 2, "Smooth Motion at 1440p on a Mac: 1x");
 
+    // Shadow Edges (user/settings.h ShadowEdgesMode: 0 Auto, 1 Smooth, 2 Classic).
+    CHECK(!gpu::ShadowEdgesSmooth(0, SteamDevice::Deck), "Auto on a Steam Deck: Classic");
+    CHECK(gpu::ShadowEdgesSmooth(0, SteamDevice::Frame) && gpu::ShadowEdgesSmooth(0, SteamDevice::Other) && gpu::ShadowEdgesSmooth(0),
+        "Auto on a Steam Frame and everywhere else: Smooth");
+    CHECK(gpu::ShadowEdgesSmooth(1, SteamDevice::Deck) && gpu::ShadowEdgesSmooth(1, SteamDevice::Other), "Smooth as chosen, a Deck too");
+    CHECK(!gpu::ShadowEdgesSmooth(2, SteamDevice::Other) && !gpu::ShadowEdgesSmooth(2, SteamDevice::Frame), "Classic as chosen");
+
     if (argc > 1)
     {
         const std::string r = ReadText(argv[1]);
@@ -155,12 +166,23 @@ int main(int argc, char** argv)
         CHECK(r.find("return std::format(\"Auto: {} ({}; the scene at {})\"") != std::string::npos, "the log says why Auto is 1x on a Deck or Frame");
         CHECK(r.find("s_shadowScale = WantedShadowScale(s_shadowResolutionSetting);") != std::string::npos, "at start, after the render scale");
         CHECK(r.find("UpdateShadowResolution();  // Auto follows the new scale") != std::string::npos, "again after a render scale change");
+        CHECK(r.find("s_shadowEdgesSmooth = gpu::ShadowEdgesSmooth(setting, video::ThisSteamDevice());") != std::string::npos,
+            "Shadow Edges resolved for this device");
+        CHECK(r.find("UpdateShadowResolution();\n            UpdateShadowEdges();") != std::string::npos, "Shadow Edges read live");
+        CHECK(r.find("ShadowResolutionName().c_str());\n            UpdateShadowEdges();") != std::string::npos, "and at start");
+        CHECK(r.find("options.shadowPcf = 0;") != std::string::npos && r.find("glsl = &ps.classicGlsl;") != std::string::npos,
+            "the Classic variant: the receiver translated without PCF");
+        CHECK(r.find("if (!s_shadowEdgesSmooth && s_ps->info.shadowPcfGroups && !(key.pad & 3))\n            key.pad |= 1u << 4;") != std::string::npos,
+            "taken by the receivers only, outside Sharper UI's draws");
+        CHECK(r.find("(key.pad >> 4) & 1);") != std::string::npos, "the pipeline passes it to its pixel shader variant");
     }
     if (argc > 2)
     {
         const std::string s = ReadText(argv[2]);
         CHECK(s.find("{ kShadowResolutionAuto, \"auto\", \"Auto\" },") != std::string::npos, "an Auto entry, saved as \"auto\"");
         CHECK(s.find("always 1x on Steam Deck and Steam Frame.") != std::string::npos, "the help text says so");
+        CHECK(s.find("{ int32_t(ShadowEdgesMode::Auto), \"auto\", \"Auto\" },") != std::string::npos, "Shadow Edges: an Auto entry");
+        CHECK(s.find("Auto: Classic on a Steam Deck, Smooth everywhere else.") != std::string::npos, "its help text says what Auto picks");
     }
     if (s_failures)
     {

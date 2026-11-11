@@ -5,9 +5,9 @@
 // 2x or more, else 1x. Since v0.2.2 the 1600x1600 map is fitted to the whole
 // view (#81), about half the 360's texels per metre at 16:9; 2x gives them
 // back. Its cost follows the GPU that Internal Resolution's Auto already
-// judged: M1 Pro at 2x ~+2 ms of GPU, 60 fps held (issues/81); a GTX 1070
+// judged: M1 Pro at 2x ~+2 ms of GPU, 60 fps held (#81); a GTX 1070
 // held 60 at 2x/2x (#84); an Intel UHD 620 on Windows, already GPU-bound at
-// ~28 fps at 1x, lost 14.8 ms at 2x (issues/90), and Auto keeps it at 1x
+// ~28 fps at 1x, lost 14.8 ms at 2x (#90), and Auto keeps it at 1x
 // there (its Internal Resolution budget is 1). Vulkan-free, for
 // tests/shadow_auto_test.cpp.
 //
@@ -19,7 +19,15 @@
 // Not on a Steam Deck or a Steam Frame (video/steam_device.h): 1x there at
 // any output. Docked to a 1080p screen both render at 2x2, and 2x shadows
 // cost the Deck ~5.4 ms of GPU and ~12 fps in races (53 -> 41 fps; the Frame
-// is hotter and slower still at 1080p: issues/90/v024/dev).
+// is hotter and slower still at 1080p; #90).
+//
+// Shadow Edges' Auto (ShadowEdgesSmooth, GitHub #90): Smooth (the receivers'
+// PCF) everywhere but a Steam Deck. Measured with the early out and shared
+// weights: on the Steam Machine and the Steam Frame PCF costs less GPU time
+// than the game's own 9 samples (its 4 gathers fetch less); on the Deck races
+// hold 60 with ~0.1 ms more, but its busiest in-engine city scenes, already
+// near the frame's budget, get ~11 one-frame hitches in 50 s instead of ~1,
+// so Auto keeps the 360's edges there.
 #pragma once
 #include <gpu/render_scale.h>
 #include <video/steam_device.h>
@@ -36,5 +44,14 @@ namespace gpu
             return 2;
         const auto atLeastTwo = [](const AxisScale& a) { return a.num >= 2 * a.den; };
         return atLeastTwo(scene.x) && atLeastTwo(scene.y) ? 4 : 2;
+    }
+
+    // Shadow Edges (user/settings.h ShadowEdgesMode: 0 Auto, 1 Smooth, 2
+    // Classic): whether the sun shadow receivers take their PCF translation.
+    inline bool ShadowEdgesSmooth(int32_t setting, video::SteamDevice device = video::SteamDevice::Other)
+    {
+        if (setting == 1 || setting == 2)
+            return setting == 1;
+        return device != video::SteamDevice::Deck;
     }
 }

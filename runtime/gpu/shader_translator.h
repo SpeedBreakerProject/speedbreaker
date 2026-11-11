@@ -58,6 +58,11 @@ namespace gpu
         bool constRelative = false;
         bool constPacked = false;
         uint32_t sharpFetches = 0;       // PS, TranslateOptions::sharpFetch2D: 2D fetches through sharpTex2D
+        // PS: sun shadow PCF (Shadow Edges: Smooth): the 9-tap groups rewritten,
+        // their taps and the compares that read them.
+        uint32_t shadowPcfGroups = 0;
+        uint32_t shadowPcfTaps = 0;
+        uint32_t shadowPcfCompares = 0;
     };
 
     struct TranslateOptions
@@ -66,7 +71,35 @@ namespace gpu
         // (gpu/sharp_ui.h): its 2D fetches through sharpTex2D. Off (the
         // default): the GLSL is exactly the plain translation's.
         bool sharpFetch2D = false;
+        // Sun shadow PCF: -1 or 1 on (the default), 0 off (the plain
+        // translation: Shadow Edges' Classic), 2 on in draws the renderer
+        // flags (the gated form of a same-run A/B harness).
+        int shadowPcf = -1;
+        // Its early out (ShadowPcfEarlyOut()): -1 as the environment says, 0
+        // off, 1 on.
+        int shadowPcfEarly = -1;
     };
+
+    // Sun shadow PCF (GitHub #90): the default translation; Settings >
+    // Graphics > Shadow Edges' Classic is the plain one (TranslateOptions::
+    // shadowPcf 0), a variant the renderer switches to live.
+    // Most Wanted's sun shadow receivers take 9 bilinear taps of the shadow
+    // map (0 and +-0.5 texel) and compare each filtered DEPTH with the
+    // pixel's: 9 binary tests, the caster's edge still the map's texel
+    // staircase. A pixel shader with that pattern (9 2D taps of one slot
+    // around one coordinate, each read by an sge against a reference) gets,
+    // instead, percentage-closer filtering: the 3x3 texels the taps cover
+    // (4 textureGathers instead of 9 samples) are each compared with the
+    // reference, and each tap's result is those 0/1 values weighted as its
+    // bilinear sample weighted the depths: the same taps, smooth edges.
+    // Both of Most Wanted's maps are k_24_8 (D32 when lent, R32F once
+    // resolved); the gathers read either. Shaders without the pattern
+    // translate exactly as before.
+    // NFSMW_SHADOW_PCF_EARLY (on by default; 0 off): a compare whose 3x3
+    // texels all test the same (the block all lit or all in shadow: most of
+    // the screen) gives every tap that 0 or 1, the game's own result there,
+    // and skips the weights; only blocks across an edge are weighted.
+    bool ShadowPcfEarlyOut();
 
     // NFSMW_CP_OPT bit 8 (on by default): translate shaders with packed constants.
     bool PackedConstantsEnabled();

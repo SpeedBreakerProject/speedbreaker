@@ -30,4 +30,11 @@ namespace apu
     // render callbacks (the game's sound runs on them), when the game's mix
     // last had sound, and the output device (GitHub issue #20).
     std::string DescribeState();
+
+    // Any thread, for Settings > Audio > 7.1 Speakers: the output device's
+    // channels (0: no device, or not open yet), and whether the game's
+    // surround channels go to both of its surround pairs now (7.1 in use:
+    // apu/speaker_layout.h).
+    int OutputChannels();
+    bool SurroundOnBothPairs();
 }

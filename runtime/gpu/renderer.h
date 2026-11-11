@@ -146,6 +146,15 @@ namespace gpu::renderer
     // included; NFSMW_RENDER_SCALE's for every entry while it is set. For
     // the menu's labels (video::ResolutionLabel). Any thread.
     gpu::RenderScale InternalResolutionScale(int32_t setting, uint32_t regionW, uint32_t regionH);
+    // The shadow map's scale Settings > Graphics > Shadow Resolution's
+    // `setting` gives with that picture: Auto's pick (gpu/shadow_auto.h) for
+    // the scene Internal Resolution's current setting renders. For the
+    // menu's Auto label. Any thread.
+    gpu::RenderScale ShadowResolutionScale(int32_t setting, uint32_t regionW, uint32_t regionH);
+    // Whether Settings > Graphics > Shadow Edges' `setting` gives smooth sun
+    // shadow edges on this machine (Auto's pick: gpu/shadow_auto.h). For the
+    // menu's Auto label. Any thread.
+    bool SmoothShadowEdges(int32_t setting);
     // GLSL to SPIR-V (glslang, through the shader disk cache): stage 0
     // vertex, 1 fragment, 2 compute. Empty on failure, with `log` set.
     std::vector<uint32_t> CompileShader(const std::string& glsl, int stage, std::string& log);

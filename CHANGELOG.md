@@ -4,6 +4,40 @@ What changed in each SpeedBreaker release, newest first. Each release's notes on
 its entry here, and the game shows the entry once, the first time a new version starts (offline:
 it's built into the game).
 
+## v0.2.5
+
+### What's new
+
+- **7.1 Speakers** (Settings > Audio, off by default): the game's sound is 5.1, so on a 7.1
+  speaker system one pair of surround speakers stays silent. On, the two surround channels play
+  on both the side and the rear pair, each a little quieter so the total stays the same. It
+  changes nothing on outputs that aren't 7.1, and the line under the setting says whether yours
+  is (GitHub issue #91, suggested and tested by Igor4276).
+- **Shadow Edges** (Settings > Graphics): smoother sun shadows. Smooth softens the stair steps
+  along the edges of car, building and pole shadows; Classic keeps the edges as the Xbox 360 drew
+  them. Auto is Smooth everywhere except the Steam Deck, where the busiest city scenes would
+  otherwise drop an occasional frame; you can still choose Smooth there. The change takes effect
+  at once, without a restart (GitHub issue #90).
+- Shadow Resolution's Auto shows the shadow map size it picked, for example "Auto (3200x3200)".
+
+### Fixed
+
+- Steam Machine on a 3440x1440 screen at Internal Resolution 3x: the pause menu over a race holds
+  60 fps instead of about 52, and so does the busy start of a race, which dipped now and then.
+  Above 1x, the game now copies parts of the picture a cheaper way, a few times each frame; a Mac
+  at 4K and 2x runs as before.
+- The What's new note no longer shows a line that starts with an issue number, such as "#90", as
+  a heading.
+
+### More about it
+
+- NFSMW_SPEAKERS_71=0/1 and NFSMW_SHADOW_EDGES=auto/smooth/classic override the two settings.
+- NFSMW_SCALED_HOST=1 makes those copies the v0.2.4 way at every Internal Resolution, for
+  comparing (0: the new way at every one, 1x included).
+- For builders: the five Cops setup hooks of Quick Race are plain hooks now, so the region address
+  scan (runtime/region/hook_addresses.py) finds them and a regenerated region table keeps them.
+  Nothing changes in play. Thanks to HungryManticore (pull request #82).
+
 ## v0.2.4
 
 ### What's new

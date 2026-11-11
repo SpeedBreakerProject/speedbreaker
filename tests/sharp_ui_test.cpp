@@ -274,7 +274,7 @@ int main(int argc, char** argv)
     CHECK(r.find("return settings::GetBool(settings::Id::SharpUi);") != std::string::npos, "renderer: reads Sharper UI live");
     CHECK(r.find("if (pipelinePending && key.pad)") != std::string::npos, "renderer: the plain pipeline while the variant compiles");
     CHECK(r.find("gpu::sharp_ui::Mode(key.pad & 3)") != std::string::npos, "renderer: BuildPipeline passes the mode");
-    CHECK(r.find("| gpu::sharp_ui::VariantBits(sharp) |\n                ((uiMask & 3u) << 24);") != std::string::npos, "renderer: the variant key holds the mode");
+    CHECK(r.find("| gpu::sharp_ui::VariantBits(sharp) |\n                ((uiMask & 3u) << 24) | (classicEdges ? 1u << 26 : 0);") != std::string::npos, "renderer: the variant key holds the mode");
     CHECK(r.find("const std::string* glsl = &ps.info.glsl;") != std::string::npos, "renderer: the plain GLSL is the default");
     // The front-end test is the edge-bar rules' (c0 the hook's scale, no
     // rotation or projection, ePolys at fetch 95, a vertex shader reading them).

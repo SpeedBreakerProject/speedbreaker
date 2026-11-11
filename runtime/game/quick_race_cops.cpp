@@ -41,7 +41,8 @@ namespace
     constexpr uint32_t kWidgetValue = 48;
     constexpr uint32_t kWidgetChanged = 42;             // byte the game's Acts set
 
-    // The Cops rows' vtable: a copy of Track Direction's, in guest memory.
+    // The Cops rows' vtable, in guest heap memory: Track Direction's functions,
+    // slot by slot (CopsVtable), at an address of its own.
     std::atomic<uint32_t> s_vtable{0};
 
     uint32_t CopsVtable(uint8_t* base)
@@ -204,24 +205,50 @@ namespace game::quick_race_cops
 // above goes through region::Addr (region/pal_es_addresses.inc), both written
 // by survey/region_map.py table.
 
-// UIQRTrackOptions' setups (r3 = the screen). Drag (sub_82562408) is left as is.
-#define SB_COPS_SETUP(name) \
-    SB_HOOK(name) \
-    { \
-        const uint32_t menu = ctx.r3.u32; \
-        SB_ORIGINAL(name)(ctx, base); \
-        AddCopsRow(ctx, base, menu); \
+// UIQRTrackOptions' setups (r3 = the screen): the game's rows, then Cops.
+// Drag (sub_82562408) is left as is.
+namespace
+{
+    void SetupWithCops(PPCContext& ctx, uint8_t* base, PPCFunc* original)
+    {
+        const uint32_t menu = ctx.r3.u32;
+        original(ctx, base);
+        AddCopsRow(ctx, base, menu);
     }
+}
 
-SB_COPS_SETUP(sub_825621A8)  // sprint
-SB_COPS_SETUP(sub_82561F00)  // circuit (and the default)
-SB_COPS_SETUP(sub_82562620)  // lap knockout
-SB_COPS_SETUP(sub_825629B8)  // speedtrap
-SB_COPS_SETUP(sub_82562C48)  // tollbooth
+// Sprint.
+SB_HOOK(sub_825621A8)
+{
+    SetupWithCops(ctx, base, SB_ORIGINAL(sub_825621A8));
+}
 
-#undef SB_COPS_SETUP
+// Circuit (and the default).
+SB_HOOK(sub_82561F00)
+{
+    SetupWithCops(ctx, base, SB_ORIGINAL(sub_82561F00));
+}
 
-// Track Direction's Act and Draw: the Cops rows' when the vtable is the copy.
+// Lap knockout.
+SB_HOOK(sub_82562620)
+{
+    SetupWithCops(ctx, base, SB_ORIGINAL(sub_82562620));
+}
+
+// Speedtrap.
+SB_HOOK(sub_825629B8)
+{
+    SetupWithCops(ctx, base, SB_ORIGINAL(sub_825629B8));
+}
+
+// Tollbooth.
+SB_HOOK(sub_82562C48)
+{
+    SetupWithCops(ctx, base, SB_ORIGINAL(sub_82562C48));
+}
+
+// Track Direction's Act and Draw: the Cops rows' when the widget has the Cops
+// vtable.
 SB_HOOK(sub_825616E8)
 {
     if (IsCopsWidget(base, ctx.r3.u32))

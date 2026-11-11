@@ -14,7 +14,9 @@
 #include <cfloat>
 #include <cmath>
 #include <cstdio>
+#include <array>
 #include <format>
+#include <map>
 #include <set>
 
 // gpuSwap(v, endian): a guest word in the given Xenos endianness (0 none,
@@ -184,6 +186,30 @@ float xmul(float a, float b)
             VertexFetchInstruction lastFullFetch{};
             // r0 (a vertex shader's incoming vertex index) written so far.
             bool r0Written = false;
+
+            // The instruction being emitted (its ucode address), for the
+            // shadow PCF plan below.
+            uint32_t curAddr = 0;
+
+            // Sun shadow PCF (GitHub #90, gpu/shader_translator.h): the 9-tap
+            // receivers' taps and the compares that read them, found before
+            // emission (PlanShadowPcf).
+            struct PcfGroup
+            {
+                uint32_t slot = 0;
+                uint32_t firstAddr = 0;   // the group's first tap in program order: the gathers go there
+            };
+            struct PcfTap
+            {
+                uint32_t group = 0;
+                int ox = 0, oy = 0;       // the tap's offset in half texels (-1, 0, 1)
+                bool reconstruct = true;  // something else may read the tap's register: rebuild the filtered depth
+            };
+            std::vector<PcfGroup> pcfGroups;
+            int pcfMode = 0;  // 1: PCF; 2: PCF only in draws the renderer flags (NFSMW_SHADOW_AB), else the game's samples
+            bool pcfEarly = false;  // ShadowPcfEarlyOut(): uniform blocks skip the weights
+            std::map<uint32_t, PcfTap> pcfTaps;                // by instruction address
+            std::map<uint32_t, std::array<int, 4>> pcfCompares; // by instruction address: per component, the tap's address (-1: none)
 
             void Error(const std::string& message)
             {
@@ -475,6 +501,83 @@ float xmul(float a, float b)
                 indent++;
                 if (vecNeeded)
                     Line("vec4 vres = " + VectorOp(op) + ";");
+                // Sun shadow PCF: a planned compare. The 3x3 texels of each
+                // group it reads are tested against the reference once; each
+                // component then weights those 0/1 values as its tap's
+                // bilinear sample weights the depths: 0..1 instead of 0 or 1.
+                if (auto cmp = pcfCompares.find(curAddr); cmp != pcfCompares.end())
+                {
+                    out.shadowPcfCompares++;
+                    Line("vec4 sref = " + AluVector(op, 2) + ";");
+                    // One reference for every component it writes (r.xxxx in every receiver): one test of the block.
+                    uint32_t refComp = ~0u;
+                    bool oneRef = true;
+                    for (uint32_t c = 0; c < 4; c++)
+                        if (cmp->second[c] >= 0)
+                        {
+                            uint32_t rc = AluInstruction::GetSwizzledComponentIndex(op.src_swizzle(2), c);
+                            oneRef = oneRef && (refComp == ~0u || refComp == rc);
+                            refComp = rc;
+                        }
+                    std::set<uint32_t> groups;
+                    for (uint32_t c = 0; c < 4; c++)
+                        if (cmp->second[c] >= 0)
+                            groups.insert(pcfTaps.at(uint32_t(cmp->second[c])).group);
+                    for (uint32_t g : groups)
+                    {
+                        Line(pcfMode == 2 ? std::format("if (spcfOn{}) {{", g) : std::string("{"));
+                        indent++;
+                        // The lane to read the reference from: the first one written (all equal with oneRef).
+                        uint32_t lane = 0;
+                        while (lane < 3 && cmp->second[lane] < 0)
+                            lane++;
+                        if (oneRef)
+                            Line(std::format("vec3 sc0 = step(vec3(sref.{0}), spcfR{1}0), sc1 = step(vec3(sref.{0}), spcfR{1}1), sc2 = step(vec3(sref.{0}), spcfR{1}2);",
+                                kComp[lane], g));
+                        // The early out: all 9 tests the same, every tap is
+                        // that 0 or 1 (each tap's weights sum to 1), as the
+                        // game's own test gives there; the weights only where
+                        // the block straddles an edge.
+                        bool early = oneRef && pcfEarly;
+                        if (early)
+                        {
+                            Line("float sn = dot(sc0 + sc1 + sc2, vec3(1.0));");
+                            Line("if (sn == 0.0 || sn == 9.0)");
+                            Line("{");
+                            indent++;
+                            Line("float sv = min(sn, 1.0);");
+                            for (uint32_t c = 0; c < 4; c++)
+                                if (cmp->second[c] >= 0 && pcfTaps.at(uint32_t(cmp->second[c])).group == g)
+                                    Line(std::format("vres.{} = sv;", kComp[c]));
+                            indent--;
+                            Line("}");
+                            Line("else");
+                            Line("{");
+                            indent++;
+                        }
+                        for (uint32_t c = 0; c < 4; c++)
+                        {
+                            if (cmp->second[c] < 0)
+                                continue;
+                            const PcfTap& tap = pcfTaps.at(uint32_t(cmp->second[c]));
+                            if (tap.group != g)
+                                continue;
+                            std::string p = std::format("spcfA{} + vec2({}, {})", g, 0.5f * float(tap.ox), 0.5f * float(tap.oy));
+                            if (oneRef)
+                                Line(std::format("vres.{} = spcfW(sc0, sc1, sc2, {});", kComp[c], p));
+                            else
+                                Line(std::format("vres.{0} = spcfW(step(vec3(sref.{0}), spcfR{1}0), step(vec3(sref.{0}), spcfR{1}1), step(vec3(sref.{0}), spcfR{1}2), {2});",
+                                    kComp[c], g, p));
+                        }
+                        if (early)
+                        {
+                            indent--;
+                            Line("}");
+                        }
+                        indent--;
+                        Line("}");
+                    }
+                }
                 if (scaNeeded)
                 {
                     Line("float sres = " + ScalarOp(op) + ";");
@@ -749,6 +852,63 @@ float xmul(float a, float b)
                     }
                     else
                         value = sample(std::format("t2d_{}", slot), uv);
+                    // Sun shadow PCF (PlanShadowPcf): a planned tap. Its
+                    // group's first tap gathers the 3x3 texels all 9 taps
+                    // cover (4 gathers); every tap then gets its filtered
+                    // depth from them, or nothing when only its compare reads
+                    // it. Under NFSMW_SHADOW_AB (pcfMode 2) only in draws the
+                    // renderer flags and where the slot is a depth map, the
+                    // game's own sample otherwise.
+                    if (auto tap = pcfTaps.find(curAddr); tap != pcfTaps.end())
+                    {
+                        uint32_t g = tap->second.group;
+                        if (pcfGroups[g].firstAddr == curAddr)
+                        {
+                            if (pcfMode == 2)
+                            {
+                                Line(std::format("spcfOn{} = shadowPcfOn({}u);", g, slot));
+                                Line(std::format("if (spcfOn{}) {{", g));
+                            }
+                            else
+                                Line("{");
+                            indent++;
+                            Line(std::format("vec2 sz = vec2(textureSize(t2d_{}, 0));", slot));
+                            Line(std::format("vec2 s = vec2({}, {}) * sz;", coord(0), coord(1)));
+                            Line("vec2 b = floor(s) - 1.0;");
+                            Line(std::format("spcfA{} = s - b - 0.5;", g));
+                            Line(std::format("vec4 g00 = textureGather(t2d_{}, (b + vec2(1.0, 1.0)) / sz);", slot));
+                            Line(std::format("vec4 g10 = textureGather(t2d_{}, (b + vec2(3.0, 1.0)) / sz);", slot));
+                            Line(std::format("vec4 g01 = textureGather(t2d_{}, (b + vec2(1.0, 3.0)) / sz);", slot));
+                            Line(std::format("float g11 = textureGather(t2d_{}, (b + vec2(3.0, 3.0)) / sz).w;", slot));
+                            Line(std::format("spcfR{}0 = vec3(g00.w, g00.z, g10.w);", g));
+                            Line(std::format("spcfR{}1 = vec3(g00.x, g00.y, g10.x);", g));
+                            Line(std::format("spcfR{}2 = vec3(g01.w, g01.z, g11);", g));
+                            indent--;
+                            Line("}");
+                        }
+                        out.shadowPcfTaps++;
+                        std::string pcf = tap->second.reconstruct
+                            ? std::format("vec4(spcfW(spcfR{0}0, spcfR{0}1, spcfR{0}2, spcfA{0} + vec2({1}, {2})))", g,
+                                  0.5f * float(tap->second.ox), 0.5f * float(tap->second.oy))
+                            : std::string("vec4(0.0)");
+                        if (pcfMode == 2)
+                        {
+                            Line("vec4 tdata;");
+                            Line(std::format("if (spcfOn{}) tdata = {};", g, pcf));
+                            Line("else tdata = " + value + ";");
+                        }
+                        else
+                            Line(std::format("vec4 tdata = {};{}", pcf, tap->second.reconstruct ? "" : "  // read only by its compare"));
+                        StoreFetchResult(op.dest(), op.is_dest_relative(), op.dest_swizzle(), "tdata");
+                        indent--;
+                        Line("}");
+                        if (op.is_predicated())
+                        {
+                            indent--;
+                            Line("}");
+                        }
+                        return;
+                    }
                     break;
                 }
                 case xenos::FetchOpDimension::k3DOrStacked:
@@ -791,6 +951,7 @@ float xmul(float a, float b)
                         Error("instruction address outside the shader");
                         return;
                     }
+                    curAddr = exec.address() + k;
                     if (seq & 1)
                     {
                         auto& f = *reinterpret_cast<const FetchInstruction*>(op);
@@ -802,6 +963,447 @@ float xmul(float a, float b)
                     else
                     {
                         Alu(*reinterpret_cast<const AluInstruction*>(op));
+                    }
+                }
+            }
+
+            // Sun shadow PCF (GitHub #90). Most Wanted's sun shadow receivers
+            // take 9 bilinear taps of the shadow map, at 0 and +-0.5 texel
+            // around one coordinate, and compare each FILTERED depth with
+            // z/w + bias (sge): 9 binary results, so a caster's edge is still
+            // the map's texel staircase. Found here, before emission:
+            //  - a group of 9 such taps: 2D fetches of one slot from one
+            //    source register and swizzle (not written until the last
+            //    tap), the 9 offsets once each, each into one register
+            //    component from .x, under one condition;
+            //  - the sge instructions whose first operand, on every
+            //    component they write, is one of those taps (no modifiers),
+            //    under the same condition; every tap must reach one before
+            //    anything overwrites it.
+            // From the group's first tap to its last compare the program must
+            // run straight: exec clauses only, none ending the program before
+            // the last, no jump, call or loop into or out of them, no
+            // predicate change. A tap's register gets the filtered depth
+            // rebuilt from the gathered texels unless the plan proves only its
+            // compare reads it. Anything else is translated as before.
+            struct PcfInstr
+            {
+                uint32_t addr = 0;
+                uint32_t cf = 0;
+                uint64_t guard = 0;  // the exec clause's condition and the instruction's predicate
+                bool fetch = false;
+            };
+
+            void PlanShadowPcf(const std::vector<ControlFlowInstruction>& cf)
+            {
+                // Control flow: jump/call/loop targets (an entry from elsewhere)
+                // and the clauses a planned range may cross.
+                std::vector<bool> target(cf.size() + 1, false);
+                auto mark = [&](size_t i) { if (i < target.size()) target[i] = true; };
+                for (size_t i = 0; i < cf.size(); i++)
+                {
+                    const auto& c = cf[i];
+                    switch (c.opcode())
+                    {
+                    case ControlFlowOpcode::kCondJmp: mark(c.cond_jmp.address()); break;
+                    case ControlFlowOpcode::kCondCall: mark(c.cond_call.address()); mark(i + 1); break;
+                    case ControlFlowOpcode::kLoopStart: mark(c.loop_start.address()); mark(i + 1); break;
+                    case ControlFlowOpcode::kLoopEnd: mark(c.loop_end.address()); mark(i + 1); break;
+                    default: break;
+                    }
+                }
+                auto passable = [&](size_t i, bool last) {
+                    switch (cf[i].opcode())
+                    {
+                    case ControlFlowOpcode::kNop:
+                    case ControlFlowOpcode::kAlloc:
+                    case ControlFlowOpcode::kExec:
+                    case ControlFlowOpcode::kCondExec:
+                    case ControlFlowOpcode::kCondExecPred:
+                    case ControlFlowOpcode::kCondExecPredClean:
+                        return true;
+                    case ControlFlowOpcode::kExecEnd:
+                    case ControlFlowOpcode::kCondExecEnd:
+                    case ControlFlowOpcode::kCondExecPredEnd:
+                    case ControlFlowOpcode::kCondExecPredCleanEnd:
+                        return last;
+                    default:
+                        return false;
+                    }
+                };
+
+                // Every instruction in program order.
+                std::vector<PcfInstr> list;
+                for (size_t i = 0; i < cf.size(); i++)
+                {
+                    const auto& c = cf[i];
+                    if (!IsControlFlowOpcodeExec(c.opcode()))
+                        continue;
+                    uint64_t guard = 0;
+                    uint32_t address = c.exec.address(), count = c.exec.count(), seq = c.exec.sequence();
+                    switch (c.opcode())
+                    {
+                    case ControlFlowOpcode::kCondExec:
+                    case ControlFlowOpcode::kCondExecEnd:
+                    case ControlFlowOpcode::kCondExecPredClean:
+                    case ControlFlowOpcode::kCondExecPredCleanEnd:
+                        guard = 1 | (uint64_t(c.cond_exec.bool_address()) << 4) | (uint64_t(c.cond_exec.condition()) << 12);
+                        break;
+                    case ControlFlowOpcode::kCondExecPred:
+                    case ControlFlowOpcode::kCondExecPredEnd:
+                        guard = 2 | (uint64_t(c.cond_exec_pred.condition()) << 12);
+                        break;
+                    default:
+                        break;
+                    }
+                    for (uint32_t k = 0; k < count; k++, seq >>= 2)
+                    {
+                        if (size_t(address + k) * 3 + 3 > dwords)
+                            return;
+                        PcfInstr in;
+                        in.addr = address + k;
+                        in.cf = uint32_t(i);
+                        in.fetch = (seq & 1) != 0;
+                        const uint32_t* w = ucode + size_t(in.addr) * 3;
+                        bool pred = in.fetch ? reinterpret_cast<const FetchInstruction*>(w)->is_predicated()
+                                             : reinterpret_cast<const AluInstruction*>(w)->is_predicated();
+                        bool cond = in.fetch ? reinterpret_cast<const FetchInstruction*>(w)->predicate_condition()
+                                             : reinterpret_cast<const AluInstruction*>(w)->predicate_condition();
+                        in.guard = guard | (pred ? (1ull << 16) | (uint64_t(cond) << 17) : 0);
+                        list.push_back(in);
+                    }
+                }
+
+                // A tap candidate: (slot, source register, swizzle) and its
+                // offset and destination component.
+                struct Tap
+                {
+                    size_t idx;
+                    uint32_t slot, src, swizzle, dreg, dcomp;
+                    int ox, oy;
+                };
+                auto asTap = [&](size_t idx, Tap& t) {
+                    const PcfInstr& in = list[idx];
+                    if (!in.fetch)
+                        return false;
+                    const auto& f = *reinterpret_cast<const FetchInstruction*>(ucode + size_t(in.addr) * 3);
+                    if (f.opcode() != FetchOpcode::kTextureFetch)
+                        return false;
+                    const auto op = f.texture_fetch();
+                    if (op.dimension() != xenos::FetchOpDimension::k2D || op.unnormalized_coordinates() || op.is_dest_relative() ||
+                        op.is_src_relative() || !op.use_computed_lod() || op.use_register_lod())
+                        return false;
+                    float ox = op.offset_x() * 2.0f, oy = op.offset_y() * 2.0f;
+                    if ((ox != -1.0f && ox != 0.0f && ox != 1.0f) || (oy != -1.0f && oy != 0.0f && oy != 1.0f))
+                        return false;
+                    int comp = -1;
+                    for (uint32_t c = 0; c < 4; c++)
+                    {
+                        uint32_t s = (op.dest_swizzle() >> (3 * c)) & 7;
+                        if (s == 7)
+                            continue;
+                        if (s != 0 || comp >= 0)
+                            return false;
+                        comp = int(c);
+                    }
+                    if (comp < 0 || op.dest() == op.src())
+                        return false;
+                    t = { idx, op.fetch_constant_index(), op.src(), op.src_swizzle(), op.dest(), uint32_t(comp), int(ox), int(oy) };
+                    return true;
+                };
+                // The registers an instruction may read (bit per register; all
+                // ones with relative addressing) and the components it writes.
+                struct Access
+                {
+                    std::vector<std::pair<uint32_t, uint32_t>> reads;  // (register, component mask)
+                    bool readsAll = false;
+                    std::vector<std::pair<uint32_t, uint32_t>> writes;  // (register, component mask)
+                    bool writesAll = false;
+                    bool predicate = false;  // changes p0
+                };
+                // skipSrc1: an sge's first operand, read by the compare itself.
+                auto accessOf = [&](size_t idx, bool skipSrc1 = false) {
+                    Access a;
+                    const PcfInstr& in = list[idx];
+                    const uint32_t* w = ucode + size_t(in.addr) * 3;
+                    auto read = [&](uint32_t r, uint32_t mask = 0xF) { a.reads.push_back({ r, mask }); };
+                    if (in.fetch)
+                    {
+                        const auto& f = *reinterpret_cast<const FetchInstruction*>(w);
+                        uint32_t dest, swizzle;
+                        bool destRel, srcRel;
+                        if (f.opcode() == FetchOpcode::kVertexFetch)
+                        {
+                            const auto op = f.vertex_fetch();
+                            dest = op.dest(); swizzle = op.dest_swizzle(); destRel = op.is_dest_relative(); srcRel = op.is_src_relative();
+                            read(op.src());
+                        }
+                        else
+                        {
+                            const auto op = f.texture_fetch();
+                            dest = op.dest(); swizzle = op.dest_swizzle(); destRel = op.is_dest_relative(); srcRel = op.is_src_relative();
+                            read(op.src());
+                            if (op.opcode() != FetchOpcode::kTextureFetch)
+                                swizzle = 07777;  // setTexLOD and the like write no register
+                        }
+                        a.readsAll = srcRel;
+                        uint32_t mask = 0;
+                        for (uint32_t c = 0; c < 4; c++)
+                            if (((swizzle >> (3 * c)) & 7) != 7)
+                                mask |= 1u << c;
+                        if (destRel)
+                            a.writesAll = true;
+                        else if (mask)
+                            a.writes.push_back({ dest, mask });
+                        return a;
+                    }
+                    const auto& op = *reinterpret_cast<const AluInstruction*>(w);
+                    const auto& vinfo = GetAluVectorOpcodeInfo(op.vector_opcode());
+                    const auto& sinfo = GetAluScalarOpcodeInfo(op.scalar_opcode());
+                    bool constTemp = false;
+                    switch (op.scalar_opcode())
+                    {
+                    case AluScalarOpcode::kMulsc0: case AluScalarOpcode::kMulsc1:
+                    case AluScalarOpcode::kAddsc0: case AluScalarOpcode::kAddsc1:
+                    case AluScalarOpcode::kSubsc0: case AluScalarOpcode::kSubsc1:
+                        constTemp = true;
+                        break;
+                    default:
+                        break;
+                    }
+                    // The operands used: the vector op's, and the scalar op's (src3, or a temporary of its own).
+                    uint32_t used = vinfo.GetOperandCount();
+                    if (sinfo.operand_count && !constTemp)
+                        used = 3;
+                    if (constTemp)
+                        read(op.scalar_const_reg_op_src_temp_reg());
+                    for (uint32_t i = skipSrc1 ? 2 : 1; i <= used; i++)
+                        if (op.src_is_temp(i))
+                        {
+                            uint32_t reg = op.src_reg(i), mask = 0;
+                            if (AluInstruction::is_src_temp_relative(reg))
+                                a.readsAll = true;
+                            for (uint32_t c = 0; c < 4; c++)
+                                mask |= 1u << AluInstruction::GetSwizzledComponentIndex(op.src_swizzle(i), c);
+                            read(AluInstruction::src_temp_reg(reg), mask);
+                        }
+                    a.predicate = ((vinfo.changed_state | sinfo.changed_state) & kAluOpChangedStatePredicate) != 0;
+                    if (!op.is_export())
+                    {
+                        if (uint32_t m = op.GetVectorOpResultWriteMask())
+                        {
+                            if (op.is_vector_dest_relative())
+                                a.writesAll = true;
+                            else
+                                a.writes.push_back({ op.vector_dest(), m });
+                        }
+                        if (uint32_t m = op.GetScalarOpResultWriteMask())
+                        {
+                            if (op.is_scalar_dest_relative())
+                                a.writesAll = true;
+                            else
+                                a.writes.push_back({ op.scalar_dest(), m });
+                        }
+                    }
+                    return a;
+                };
+                auto readsComp = [](const Access& a, uint32_t r, uint32_t c) {
+                    if (a.readsAll)
+                        return true;
+                    for (auto& [reg, m] : a.reads)
+                        if (reg == r && (m >> c & 1))
+                            return true;
+                    return false;
+                };
+                auto writesComp = [](const Access& a, uint32_t r, uint32_t c) {
+                    if (a.writesAll)
+                        return true;
+                    for (auto& [reg, m] : a.writes)
+                        if (reg == r && (m >> c & 1))
+                            return true;
+                    return false;
+                };
+
+                // Pass 1: groups of 9 taps.
+                std::vector<std::vector<Tap>> groups;
+                std::vector<Tap> open;
+                for (size_t idx = 0; idx < list.size(); idx++)
+                {
+                    Tap t;
+                    if (asTap(idx, t))
+                    {
+                        bool fits = !open.empty() && t.slot == open[0].slot && t.src == open[0].src && t.swizzle == open[0].swizzle &&
+                            list[idx].guard == list[open[0].idx].guard;
+                        for (const Tap& o : open)
+                            fits = fits && (o.ox != t.ox || o.oy != t.oy);
+                        if (!fits)
+                            open.clear();
+                        open.push_back(t);
+                        if (open.size() == 9)
+                        {
+                            groups.push_back(open);
+                            open.clear();
+                        }
+                        continue;
+                    }
+                    if (!open.empty())
+                    {
+                        Access a = accessOf(idx);
+                        bool src = a.writesAll || a.predicate;
+                        for (uint32_t c = 0; c < 4; c++)
+                            src = src || writesComp(a, open[0].src, c);
+                        if (src)
+                            open.clear();
+                    }
+                }
+
+                // Pass 2: each group's compares, and which taps need their depth.
+                for (const auto& group : groups)
+                {
+                    const size_t first = group[0].idx;
+                    const uint64_t guard = list[first].guard;
+                    struct Live { size_t tap; bool consumed = false, rawRead = false; };
+                    std::map<uint32_t, Live> live;   // register * 4 + component
+                    std::map<size_t, bool> dead;      // tap idx -> its register provably read only by its compare
+                    std::map<size_t, std::array<int, 4>> compares;
+                    size_t lastCompare = 0;
+                    bool ok = true, killsValid = true;
+                    auto isGroupTap = [&](size_t idx, Tap& out) {
+                        for (const Tap& t : group)
+                            if (t.idx == idx) { out = t; return true; }
+                        return false;
+                    };
+                    std::set<size_t> consumedTaps;
+                    bool entered = false;  // past a clause control can also arrive at from elsewhere
+                    size_t idx = first;
+                    for (; idx < list.size() && ok; idx++)
+                    {
+                        // The scan follows the program while control can only go
+                        // on to the next clause: it stops where control can leave
+                        // (a jump, call, loop or return), and where the program
+                        // ends every tap only its compare read is dead. Past a
+                        // clause control can also arrive at from elsewhere (an
+                        // entry), no new compare is taken (the range check below
+                        // wants none there), but a write still ends a tap's life:
+                        // the paths that matter are the ones through its compare.
+                        if (idx > first && list[idx].cf != list[idx - 1].cf)
+                        {
+                            if (!passable(list[idx - 1].cf, false))
+                            {
+                                if (passable(list[idx - 1].cf, true))  // the program ended
+                                    for (auto& [key, l] : live)
+                                        if (consumedTaps.count(l.tap) && !l.rawRead)
+                                            dead[l.tap] = true;
+                                break;
+                            }
+                            bool straight = true;
+                            for (size_t c = list[idx - 1].cf + 1; c <= list[idx].cf; c++)
+                            {
+                                entered = entered || target[c];
+                                straight = straight && (c == list[idx].cf || passable(c, false));
+                            }
+                            if (!straight)
+                                break;
+                        }
+                        Tap t;
+                        if (isGroupTap(idx, t))
+                        {
+                            auto prev = live.find(t.dreg * 4 + t.dcomp);
+                            if (prev != live.end() && !consumedTaps.count(prev->second.tap))
+                                ok = false;  // a tap overwritten by another before any compare read it
+                            live[t.dreg * 4 + t.dcomp] = Live{ idx };
+                            continue;
+                        }
+                        // A compare reading taps: an sge whose first operand is a tap on every component it writes.
+                        std::array<int, 4> mapped{ -1, -1, -1, -1 };
+                        bool isCompare = false;
+                        if (!list[idx].fetch && !entered)
+                        {
+                            const auto& op = *reinterpret_cast<const AluInstruction*>(ucode + size_t(list[idx].addr) * 3);
+                            uint32_t mask = op.GetVectorOpResultWriteMask();
+                            if (op.vector_opcode() == AluVectorOpcode::kSge && !op.is_export() && mask && !op.is_vector_dest_relative() &&
+                                op.src_is_temp(1) && !AluInstruction::is_src_temp_relative(op.src_reg(1)) &&
+                                !AluInstruction::is_src_temp_value_absolute(op.src_reg(1)) && !op.src_negate(1) && list[idx].guard == guard)
+                            {
+                                uint32_t reg = AluInstruction::src_temp_reg(op.src_reg(1));
+                                isCompare = true;
+                                for (uint32_t c = 0; c < 4 && isCompare; c++)
+                                {
+                                    if (!(mask >> c & 1))
+                                        continue;
+                                    uint32_t comp = AluInstruction::GetSwizzledComponentIndex(op.src_swizzle(1), c);
+                                    auto it = live.find(reg * 4 + comp);
+                                    if (it == live.end())
+                                        isCompare = false;
+                                    else
+                                        mapped[c] = int(it->second.tap);
+                                }
+                            }
+                        }
+                        Access a = accessOf(idx, isCompare);
+                        // Raw reads: a live tap's component read other than as a compare's tap.
+                        for (auto& [key, l] : live)
+                            if (readsComp(a, key / 4, key % 4))
+                                l.rawRead = true;
+                        if (isCompare)
+                        {
+                            for (uint32_t c = 0; c < 4; c++)
+                                if (mapped[c] >= 0)
+                                {
+                                    for (auto& [key, l] : live)
+                                        if (l.tap == size_t(mapped[c]))
+                                            l.consumed = true;
+                                    consumedTaps.insert(size_t(mapped[c]));
+                                }
+                            compares[idx] = mapped;
+                            lastCompare = idx;
+                        }
+                        if (a.predicate)
+                            killsValid = false;
+                        // Writes end a tap's life.
+                        for (auto it = live.begin(); it != live.end();)
+                        {
+                            if (!writesComp(a, it->first / 4, it->first % 4))
+                            {
+                                ++it;
+                                continue;
+                            }
+                            if (!it->second.consumed && !consumedTaps.count(it->second.tap))
+                                ok = false;  // overwritten before any compare read it
+                            else if (!it->second.rawRead && (list[idx].guard == 0 || (killsValid && list[idx].guard == guard)))
+                                dead[it->second.tap] = true;
+                            it = live.erase(it);
+                        }
+                    }
+                    // The scan ran off the program's last clause: the end.
+                    if (ok && idx == list.size() && passable(list.back().cf, true) && !passable(list.back().cf, false))
+                        for (auto& [key, l] : live)
+                            if (consumedTaps.count(l.tap) && !l.rawRead)
+                                dead[l.tap] = true;
+                    if (!ok || consumedTaps.size() != 9 || compares.empty())
+                        continue;
+                    // The whole range runs together.
+                    for (size_t k = first; k <= lastCompare && ok; k++)
+                        if (accessOf(k).predicate)
+                            ok = false;
+                    for (size_t c = list[first].cf; c <= list[lastCompare].cf && ok; c++)
+                        ok = passable(c, c == list[lastCompare].cf) && (c == list[first].cf || !target[c]);
+                    if (!ok)
+                        continue;
+                    uint32_t g = uint32_t(pcfGroups.size());
+                    pcfGroups.push_back({ group[0].slot, list[first].addr });
+                    for (const Tap& t : group)
+                        pcfTaps[list[t.idx].addr] = PcfTap{ g, t.ox, t.oy, !dead.count(t.idx) };
+                    for (auto& [at, m] : compares)
+                    {
+                        std::array<int, 4> byAddr{ -1, -1, -1, -1 };
+                        for (uint32_t c = 0; c < 4; c++)
+                            if (m[c] >= 0)
+                                byAddr[c] = int(list[size_t(m[c])].addr);
+                        auto& dst = pcfCompares.try_emplace(list[at].addr, std::array<int, 4>{ -1, -1, -1, -1 }).first->second;
+                        for (uint32_t c = 0; c < 4; c++)
+                            if (byAddr[c] >= 0)
+                                dst[c] = byAddr[c];
                     }
                 }
             }
@@ -826,6 +1428,11 @@ float xmul(float a, float b)
                     cf.push_back(ab[0]);
                     cf.push_back(ab[1]);
                 }
+
+                pcfMode = options.shadowPcf >= 0 ? options.shadowPcf : 1;
+                pcfEarly = options.shadowPcfEarly >= 0 ? options.shadowPcfEarly > 0 : ShadowPcfEarlyOut();
+                if (stage == ShaderStage::Pixel && pcfMode > 0)
+                    PlanShadowPcf(cf);
 
                 // Straight-line programs (no jumps, calls, loops) are emitted flat.
                 bool flat = true;
@@ -1023,6 +1630,27 @@ float clampNegInf(float v) { return (isinf(v) && v < 0.0) ? -3.402823466e+38 : v
 float flushInf(float v) { return isinf(v) ? (v > 0.0 ? 0.0 : -0.0) : v; }
 )";
 
+        // Sun shadow PCF (Shadow Edges: Smooth). spcfW: the bilinear sample
+        // at p (texels from the first texel's centre, 0 <= p < 2) of a 3x3
+        // block given by rows (depths, or their 0/1 tests against the
+        // reference: PCF), as separable weights. shadowPcfOn: NFSMW_SHADOW_AB's
+        // gate (the renderer's flag, a depth-format slot).
+        const char* kShadowPcfHelpers = R"(
+float spcfW(vec3 r0, vec3 r1, vec3 r2, vec2 p)
+{
+    vec2 a = clamp(p, 0.0, 1.0), b = clamp(p - 1.0, 0.0, 1.0);
+    vec3 wx = vec3(1.0 - a.x, a.x - b.x, b.x), wy = vec3(1.0 - a.y, a.y - b.y, b.y);
+    return dot(wy, vec3(dot(wx, r0), dot(wx, r1), dot(wx, r2)));
+}
+)";
+        const char* kShadowPcfGateGlsl = R"(
+bool shadowPcfOn(uint slot)
+{
+    uint format = fetchDword(slot, 1u) & 0x3Fu;
+    return (format == 22u || format == 23u) && (pc.flags & 16u) != 0u;  // k_24_8, k_24_8_FLOAT
+}
+)";
+
         const char* kStateHelpers = R"(
 vec4 maxa(vec4 s0, vec4 s1)
 {
@@ -1079,6 +1707,12 @@ vec3 cubeDirection(vec3 c)
     bool PackedConstantsEnabled()
     {
         static const bool enabled = [] { const char* v = std::getenv("NFSMW_CP_OPT"); return !v || (strtoul(v, nullptr, 0) & 8) != 0; }();
+        return enabled;
+    }
+
+    bool ShadowPcfEarlyOut()
+    {
+        static const bool enabled = [] { const char* v = std::getenv("NFSMW_SHADOW_PCF_EARLY"); return !(v && v[0] == '0'); }();
         return enabled;
     }
 
@@ -1210,6 +1844,20 @@ vec3 cubeDirection(vec3 c)
         else
             g += "vec4 o_depth = vec4(0.0);\nbool killed = false;\n";
         g += kStateHelpers;
+        result.shadowPcfGroups = uint32_t(t.pcfGroups.size());
+        if (!t.pcfGroups.empty())
+        {
+            // Sun shadow PCF (Shadow Edges: Smooth): per group, the first
+            // tap's position in the 3x3 block (texels; the block's origin is
+            // texel floor(s) - 1), the block's depths row by row, and under
+            // NFSMW_SHADOW_AB whether PCF runs in this draw.
+            for (size_t i = 0; i < t.pcfGroups.size(); i++)
+                g += std::format("{1}vec2 spcfA{0} = vec2(0.0);\nvec3 spcfR{0}0 = vec3(0.0), spcfR{0}1 = vec3(0.0), spcfR{0}2 = vec3(0.0);\n", i,
+                    t.pcfMode == 2 ? std::format("bool spcfOn{} = false;\n", i) : std::string());
+            g += kShadowPcfHelpers;
+            if (t.pcfMode == 2)
+                g += kShadowPcfGateGlsl;
+        }
         // Relative reads come from the same constants through the ring's
         // storage buffer: AMD's Windows driver reads a dynamically indexed
         // u.c[] inside per-pixel predicated blocks as if a0 were 0, which

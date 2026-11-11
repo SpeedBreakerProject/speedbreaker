@@ -1,7 +1,7 @@
 // SpeedBreaker tests. GPL-3.0-or-later (see COPYING).
 //
-// Settings > Graphics > Upscaling, Shadow Resolution, Sharper UI and Movie
-// Upscaling's values in settings.toml (user/settings.cpp, linked as the game links it): tokens read,
+// Settings > Graphics > Upscaling, Shadow Resolution, Shadow Edges, Sharper UI
+// and Movie Upscaling's values in settings.toml (user/settings.cpp, linked as the game links it): tokens read,
 // saved and read back; environment overrides for one run, never saved; and
 // Sharpening's default, 0.3, unchanged.
 // The argument is a scratch folder (settings.toml is written there).
@@ -69,6 +69,7 @@ int main(int argc, char** argv)
     unsetenv("NFSMW_SHADOW_RESOLUTION");
     unsetenv("NFSMW_SHARP_UI");
     unsetenv("NFSMW_MOVIE_UPSCALE");
+    unsetenv("NFSMW_SHADOW_EDGES");
     const std::filesystem::path dir = argc > 1 ? argv[1] : "settings_scaling_scratch";
     std::filesystem::remove_all(dir);
     std::filesystem::create_directories(dir);
@@ -250,6 +251,41 @@ int main(int argc, char** argv)
         Write(file, "");
         CHECK(settings::Load(file) && !settings::GetBool(Id::SharpUi), "NFSMW_SHARP_UI=0 turns it off");
         unsetenv("NFSMW_SHARP_UI");
+    }
+
+    // Shadow Edges (GitHub #90, gpu/shadow_auto.h): Auto (the default),
+    // Smooth, Classic; live; [video].shadow_edges, NFSMW_SHADOW_EDGES for one
+    // run, never saved; the row right after Shadow Resolution.
+    {
+        using settings::ShadowEdgesMode;
+        const settings::Option& e = settings::Info(Id::ShadowEdges);
+        CHECK(e.category == settings::Category::Graphics && e.type == settings::Type::Enum && e.apply == settings::Apply::Live && !e.hidden,
+            "Shadow Edges: a live Graphics choice");
+        CHECK(std::string(e.table) == "video" && std::string(e.key) == "shadow_edges" && std::string(e.env) == "NFSMW_SHADOW_EDGES",
+            "Shadow Edges: [video].shadow_edges, NFSMW_SHADOW_EDGES");
+        CHECK(std::string(e.label) == "Shadow Edges", "label %s", e.label);
+        CHECK(int(Id::ShadowEdges) == int(Id::ShadowResolution) + 1, "right after Shadow Resolution");
+        CHECK(e.entries.size() == 3, "%zu shadow-edges entries", e.entries.size());
+        if (e.entries.size() == 3)
+        {
+            CHECK(e.entries[0].value == int32_t(ShadowEdgesMode::Auto) && std::string(e.entries[0].token) == "auto", "first: Auto");
+            CHECK(e.entries[1].value == int32_t(ShadowEdgesMode::Smooth) && std::string(e.entries[1].token) == "smooth", "second: Smooth");
+            CHECK(e.entries[2].value == int32_t(ShadowEdgesMode::Classic) && std::string(e.entries[2].token) == "classic", "third: Classic");
+        }
+        CHECK(settings::DefaultValue(Id::ShadowEdges) == double(ShadowEdgesMode::Auto), "Auto by default");
+        Write(file, "");
+        CHECK(settings::Load(file) && settings::GetInt(Id::ShadowEdges) == int32_t(ShadowEdgesMode::Auto), "no file: Auto");
+        CHECK(settings::Set(Id::ShadowEdges, double(ShadowEdgesMode::Classic)) == settings::SetResult::Applied &&
+                settings::GetInt(Id::ShadowEdges) == int32_t(ShadowEdgesMode::Classic),
+            "Classic, live");
+        CHECK(settings::Save(file) && Read(file).find("shadow_edges = \"classic\"") != std::string::npos, "saved as a token:\n%s", Read(file).c_str());
+        CHECK(settings::Load(file) && settings::GetInt(Id::ShadowEdges) == int32_t(ShadowEdgesMode::Classic), "read back");
+        setenv("NFSMW_SHADOW_EDGES", "smooth", 1);
+        CHECK(settings::Load(file) && settings::GetInt(Id::ShadowEdges) == int32_t(ShadowEdgesMode::Smooth) && settings::EnvOverride(Id::ShadowEdges),
+            "NFSMW_SHADOW_EDGES=smooth wins for the run");
+        CHECK(settings::Save(file) && Read(file).find("shadow_edges = \"classic\"") != std::string::npos, "the override isn't saved:\n%s",
+            Read(file).c_str());
+        unsetenv("NFSMW_SHADOW_EDGES");
     }
 
     // Movie Upscaling (video/upscale.h): Original, Sharper (the default);

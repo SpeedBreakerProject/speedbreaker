@@ -3,7 +3,7 @@
 // reader for GitHub's release and list of releases, this device's file and
 // whether a release is complete for it, the HTTP answer as curl prints it,
 // the release notes as plain lines, the result of every outcome, and every
-// row of update-now/DESIGN.md's table "Which version is newer". From the
+// case of which version counts as newer. From the
 // repo root:
 //   clang++ -std=c++20 -O2 -Iruntime tests/update_check_test.cpp runtime/update/check.cpp -o build/update_check_test
 //   build/update_check_test

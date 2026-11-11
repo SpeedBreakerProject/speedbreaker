@@ -1581,10 +1581,13 @@ namespace gpu::renderer
             // Sharper UI's mode: gpu/sharp_ui.h).
             std::unordered_map<uint32_t, VkShaderModule> variants;
             // A pixel shader with 2D fetches: its microcode (host order), for
-            // Sharper UI's translation, made with its first such pipeline.
+            // Sharper UI's translation and a sun shadow receiver's Classic
+            // one, each made with its first such pipeline.
             std::vector<uint32_t> ucode;
             std::string sharpGlsl;
             bool sharpTranslated = false;
+            std::string classicGlsl;  // Shadow Edges: Classic (the receivers' plain translation)
+            bool classicTranslated = false;
         };
         std::unordered_map<uint64_t, std::unique_ptr<Shader>> s_shaders;
         Shader* s_vs = nullptr;
@@ -1920,10 +1923,10 @@ namespace gpu::renderer
         }
 
         VkShaderModule PixelVariant(Shader& ps, uint32_t outputs, uint32_t inputs, bool alphaTest,
-            gpu::sharp_ui::Mode sharp = gpu::sharp_ui::Mode::Off, uint32_t uiMask = 0)
+            gpu::sharp_ui::Mode sharp = gpu::sharp_ui::Mode::Off, uint32_t uiMask = 0, bool classicEdges = false)
         {
             uint32_t key = (outputs & 0xF) | ((inputs & 0xFFFF) << 4) | (alphaTest ? 1u << 20 : 0) | gpu::sharp_ui::VariantBits(sharp) |
-                ((uiMask & 3u) << 24);
+                ((uiMask & 3u) << 24) | (classicEdges ? 1u << 26 : 0);
             std::lock_guard lock(ps.compileMutex);
             auto it = ps.variants.find(key);
             if (it != ps.variants.end())
@@ -1950,6 +1953,25 @@ namespace gpu::renderer
                     glsl = &ps.sharpGlsl;
                 else
                     sharp = gpu::sharp_ui::Mode::Off;  // nothing to reconstruct: the plain module (its own key)
+            }
+            else if (classicEdges && ps.info.shadowPcfGroups)
+            {
+                // Shadow Edges: Classic: a sun shadow receiver translated
+                // without its PCF (once per shader), the 360's 9 tests.
+                if (!ps.classicTranslated)
+                {
+                    ps.classicTranslated = true;
+                    if (!ps.ucode.empty())
+                    {
+                        gpu::TranslateOptions options;
+                        options.shadowPcf = 0;
+                        TranslatedShader t = TranslateShader(ps.stage, ps.ucode.data(), ps.ucode.size(), options);
+                        if (t.ok)
+                            ps.classicGlsl = std::move(t.glsl);
+                    }
+                }
+                if (!ps.classicGlsl.empty())
+                    glsl = &ps.classicGlsl;
             }
             std::string preamble;
             // NFSMW_SHARP_UI_EXP=1/2 (a diagnostic, the cost's breakdown): sharpTex2D stops after the hardware's
@@ -2264,6 +2286,11 @@ namespace gpu::renderer
         gpu::RenderScale s_renderScale;
         gpu::RenderScale s_shadowScale;
         int32_t s_shadowResolutionSetting = settings::kShadowResolutionDefault;
+        // Shadow Edges (gpu/shadow_auto.h ShadowEdgesSmooth): -1 until read;
+        // the sun shadow receivers draw their Classic variant while
+        // s_shadowEdgesSmooth is false (PipelineKey::pad bit 4).
+        int32_t s_shadowEdgesSetting = -1;
+        bool s_shadowEdgesSmooth = true;
         uint32_t s_scalePitchMin = 640, s_scalePitchMax = 1280;
         uint32_t s_scaleBudget = 6;  // Auto's most host pixels per guest pixel
         bool s_scaleFixed = false;   // NFSMW_RENDER_SCALE: no live changes
@@ -2294,6 +2321,32 @@ namespace gpu::renderer
                 return std::format("Auto: {} ({}; the scene at {})", gpu::ScaleName(s_shadowScale),
                     video::SteamDeviceName(device), gpu::ScaleName(s_renderScale));
             return std::format("Auto: {} (the scene at {})", gpu::ScaleName(s_shadowScale), gpu::ScaleName(s_renderScale));
+        }
+
+        // For the log: "Smooth", "Classic", "Auto: Smooth", or on a Steam
+        // Deck or Frame "Auto: Classic (Steam Deck)".
+        std::string ShadowEdgesName(int32_t setting, bool smooth)
+        {
+            const char* look = smooth ? "Smooth" : "Classic";
+            if (setting != int32_t(settings::ShadowEdgesMode::Auto))
+                return look;
+            const video::SteamDevice device = video::ThisSteamDevice();
+            if (device != video::SteamDevice::Other)
+                return std::format("Auto: {} ({})", look, video::SteamDeviceName(device));
+            return std::format("Auto: {}", look);
+        }
+
+        // Shadow Edges read, and again when it changes (live: each receiver's
+        // pipelines take the other variant from its next draw, compiled once;
+        // until then its other pipeline draws).
+        void UpdateShadowEdges()
+        {
+            const int32_t setting = settings::GetInt(settings::Id::ShadowEdges);
+            if (setting == s_shadowEdgesSetting)
+                return;
+            s_shadowEdgesSetting = setting;
+            s_shadowEdgesSmooth = gpu::ShadowEdgesSmooth(setting, video::ThisSteamDevice());
+            fprintf(stderr, "[renderer] shadow edges %s\n", ShadowEdgesName(setting, s_shadowEdgesSmooth).c_str());
         }
 
         // What the Internal Resolution setting asks for with the picture
@@ -2436,6 +2489,7 @@ namespace gpu::renderer
                 s_renderScale.x.Size(1280), s_renderScale.y.Size(720), ScaleReason(setting, regionW, regionH).c_str(), s_scalePitchMin,
                 s_scalePitchMax);
             fprintf(stderr, "[renderer] shadow resolution %s\n", ShadowResolutionName().c_str());
+            UpdateShadowEdges();
         }
 
         bool ScaledPitch(uint32_t pitch)
@@ -2999,7 +3053,8 @@ namespace gpu::renderer
             uint32_t colorMask;      // 4 bits per target
             uint32_t depthControl;   // RB_DEPTHCONTROL (0 without a depth target, or one attached for the pass only)
             uint32_t raster;         // cull | front CW << 2 | depth clamp << 3 | depth bias << 4
-            uint32_t pad;            // bits 0-1: Sharper UI's gpu::sharp_ui::Mode (0: the plain pixel shader); 2-3: its UI mask kind
+            uint32_t pad;            // bits 0-1: Sharper UI's gpu::sharp_ui::Mode (0: the plain pixel shader); 2-3: its UI mask kind;
+                                     // 4: Shadow Edges' Classic (a sun shadow receiver's translation without PCF)
 
             bool operator==(const PipelineKey& o) const { return memcmp(this, &o, sizeof(*this)) == 0; }
         };
@@ -3071,7 +3126,8 @@ namespace gpu::renderer
                     outputs |= 1u << i;
             uint32_t psRegs = std::min(16u, ps.info.registerCount);
             uint32_t inputs = vs.info.interpolatorMask & ((1u << psRegs) - 1);
-            VkShaderModule psModule = PixelVariant(ps, outputs, inputs, (key.raster >> 5) & 1, gpu::sharp_ui::Mode(key.pad & 3), (key.pad >> 2) & 3);
+            VkShaderModule psModule = PixelVariant(ps, outputs, inputs, (key.raster >> 5) & 1, gpu::sharp_ui::Mode(key.pad & 3), (key.pad >> 2) & 3,
+                (key.pad >> 4) & 1);
             if (!psModule)
                 return VK_NULL_HANDLE;
             stages[1] = { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_FRAGMENT_BIT,
@@ -4405,6 +4461,14 @@ void main()
         // ... and then only there, where no other reader asks (see Resolve);
         // NFSMW_SCALED_HOLD=0: into the pool as well, always.
         const bool s_scaledHold = [] { const char* v = std::getenv("NFSMW_SCALED_HOLD"); return !v || v[0] != '0'; }();
+        // ... and into the cached scaled textures only at scales where that
+        // pays (gpu::HostScaledResolves: a Steam Deck's native rows, not a
+        // Steam Machine's 3x); NFSMW_SCALED_HOST=0: never, 1: at every scale.
+        const int s_scaledHostSetting = [] { const char* v = std::getenv("NFSMW_SCALED_HOST"); return v ? std::atoi(v) : -1; }();
+        bool ScaledHostOn(const gpu::RenderScale& s)
+        {
+            return s_scaledHostSetting >= 0 ? s_scaledHostSetting != 0 : gpu::HostScaledResolves(s);
+        }
         // NFSMW_FUSE_PARTIAL=1 (default kFewerPasses; 0: only a resolve
         // covering the whole texture stores into it): a resolve into whole 32x32 tiles
         // inside a direct texture (or a cube's face) stores there too, at
@@ -7006,10 +7070,14 @@ void main()
                     // Its other texels must still be what it loaded: checked
                     // again after MarkWritten. NFSMW_SCALED_FUSE=0: not.
                     Texture* hosted = nullptr;
+                    const bool hostHere = ScaledHostOn(source->scale);
                     const char* unhosted = !scaledWrite ? nullptr : !s_scaledFuse || !s_resolveToTexture ? "off"
-                        : freshSlots ? "fresh slots" : "no scaled texture there";
+                        : !hostHere ? "not at this scale" : freshSlots ? "fresh slots" : "no scaled texture there";
                     uint32_t hostX = 0, hostY = 0;
-                    if (scaledWrite && source->scale == s_scaled.scale && s_scaledFuse && s_resolveToTexture && !freshSlots)
+                    if (scaledWrite && !hostHere && s_scaledFuse && s_resolveToTexture)
+                        LogOnce(0x2901, "scaled resolves at %s don't store into cached scaled textures (untiled from the pool before use)",
+                            gpu::ScaleName(source->scale).c_str());
+                    if (scaledWrite && source->scale == s_scaled.scale && s_scaledFuse && hostHere && s_resolveToTexture && !freshSlots)
                         for (auto it = s_scaledByStart.upper_bound(rc.destBase); !hosted && it != s_scaledByStart.begin();)
                         {
                             if (rc.destBase - (--it)->first >= s_maxScaledSize)
@@ -8977,6 +9045,7 @@ void main()
                     ApplyMipmaps(mips);
             }
             UpdateShadowResolution();
+            UpdateShadowEdges();
             if (s_scaleFixed)
                 return;
             int32_t setting = settings::GetInt(settings::Id::InternalResolution);
@@ -9332,6 +9401,10 @@ void main()
             if (!slot->info.ok)
                 fprintf(stderr, "[renderer] %s_%016llx: translation failed: %s\n", type == 0 ? "vs" : "ps",
                     (unsigned long long)h, slot->info.error.c_str());
+            // Sun shadow PCF (GitHub #90, gpu/shader_translator.h): which receivers got it.
+            if (slot->info.shadowPcfGroups)
+                fprintf(stderr, "[shadowpcf] ps_%016llx: %u tap group(s), %u taps, %u compares\n", (unsigned long long)h,
+                    slot->info.shadowPcfGroups, slot->info.shadowPcfTaps, slot->info.shadowPcfCompares);
             // Compiled to SPIR-V with its first pipeline, on a pipeline worker.
         }
         if (e)
@@ -9991,6 +10064,13 @@ void main()
                     color[0]->guestHeight, tex.c_str());
             }
         }
+
+        // Settings > Graphics > Shadow Edges: Classic (gpu/shadow_auto.h): a
+        // sun shadow receiver takes its translation without PCF; Smooth, and
+        // every other shader, as before. (Sharper UI's front-end and movie
+        // draws never sample the sun's map.)
+        if (!s_shadowEdgesSmooth && s_ps->info.shadowPcfGroups && !(key.pad & 3))
+            key.pad |= 1u << 4;
 
         if ((key.pad >> 2) & 3)
             layoutChoice = &GetUiMaskTextureLayout(*s_vs, *s_ps);
@@ -12236,6 +12316,19 @@ void main()
         if (s_scaleFixed)
             return s_renderScale;
         return WantedRenderScale(setting, regionW, regionH);
+    }
+
+    bool SmoothShadowEdges(int32_t setting)
+    {
+        return gpu::ShadowEdgesSmooth(setting, video::ThisSteamDevice());
+    }
+
+    gpu::RenderScale ShadowResolutionScale(int32_t setting, uint32_t regionW, uint32_t regionH)
+    {
+        if (setting != settings::kShadowResolutionAuto)
+            return gpu::ShadowScale(uint32_t(setting));
+        const gpu::RenderScale scene = InternalResolutionScale(settings::GetInt(settings::Id::InternalResolution), regionW, regionH);
+        return gpu::ShadowScale(gpu::AutoShadowHalves(scene, video::ThisSteamDevice()));
     }
 
     void Shutdown()

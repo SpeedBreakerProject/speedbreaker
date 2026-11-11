@@ -129,6 +129,25 @@ endif()
 # sharp_ui_glsl for the check after it.
 sb_test(sharp_ui_test SOURCES ${RT}/video/fsr1.cpp ARGS ${RT} ${CMAKE_CURRENT_BINARY_DIR}/sharp_ui_glsl)
 target_include_directories(sharp_ui_test PRIVATE ${CMAKE_BINARY_DIR}/runtime/generated)
+# Sun shadow PCF (gpu/shader_translator.h, Shadow Edges: Smooth, GitHub #90): the
+# block maths' CPU model; with the game's dumped shaders in game/shaders (not
+# in git: skipped without them), exactly the 13 sun-shadow receivers rewritten,
+# every other shader's GLSL unchanged, mutations of a receiver left alone. It
+# writes the rewritten receivers' GLSL (plain, without the early out, and
+# NFSMW_SHADOW_AB's gated form) to shadow_pcf_glsl for the checks after it.
+sb_test(shadow_pcf_test SOURCES ${RT}/gpu/shader_translator.cpp ${RT}/gpu/xenos/ucode.cpp
+    ARGS ${ROOT}/game/shaders ${CMAKE_CURRENT_BINARY_DIR}/shadow_pcf_glsl)
+set_tests_properties(shadow_pcf_test PROPERTIES SKIP_RETURN_CODE 77)
+if(SB_GLSLANG_VALIDATOR AND EXISTS ${ROOT}/game/shaders/ps_793a572b6da508d4.bin)
+    foreach(hash 42220e24e11f5220 44c366e23ae5d695 48553c3b04eb9b2f 672e3ab309ec00b0 6c105e8dfb4c5220 781d5cda69b100b2
+            793a572b6da508d4 90a9b04dbce54afb 9a81af49c72455cc a0910baf65176645 d3f6eaa9311f5220 e53b1f5c8a7bdaa0 eb525efa9f5f9bd9)
+        foreach(form "" _full _ab)
+            add_test(NAME shadow_pcf_glsl_check_${hash}${form} COMMAND ${SB_GLSLANG_VALIDATOR} -V --target-env vulkan1.1
+                ${CMAKE_CURRENT_BINARY_DIR}/shadow_pcf_glsl/ps_${hash}${form}.frag -o ${CMAKE_CURRENT_BINARY_DIR}/shadow_pcf_glsl/ps_${hash}${form}.spv)
+            set_tests_properties(shadow_pcf_glsl_check_${hash}${form} PROPERTIES DEPENDS shadow_pcf_test)
+        endforeach()
+    endforeach()
+endif()
 # Anisotropic Filtering's Auto: 16x on a Mac at 1x at every screen shape (gpu/anisotropy_auto.h), as GetSampler applies it.
 sb_test(anisotropy_auto_test SOURCES ${RT}/video/picture_fit.cpp ARGS ${RT}/gpu/renderer.cpp)
 # Shadow Resolution's Auto: 2x while the scene renders at 2x or more (gpu/shadow_auto.h), as the renderer applies it (GitHub #90).
@@ -200,6 +219,11 @@ sb_test(present_schedule_test)
 # doesn't stop the game's sound (GitHub issue #20: the sound stopped for good,
 # then the game hung after the race), and a working one is followed as before.
 sb_test(audio_cadence_test)
+# Settings > Audio > 7.1 Speakers (apu/speaker_layout.h, header only; GitHub
+# issue #91: a 7.1 receiver left its side pair silent): off, the frame is bit
+# for bit the 5.1 it was; on, with an 8-channel device, the game's surrounds
+# on both the back and the side pair at -3 dB each.
+sb_test(speaker_layout_test)
 # EA SND's mixer never drops sounds for time on a host (apu/ea_cpu_budget.h,
 # header only; GitHub issue #35: one sound, usually the engine, much quieter
 # until the next gear change): EA's budget rule as a model, the policy, and

@@ -185,6 +185,12 @@ namespace settings
             { 4, "2x", "2x (3200x3200)" },
         };
 
+        constexpr EnumEntry kShadowEdgesEntries[] = {
+            { int32_t(ShadowEdgesMode::Auto), "auto", "Auto" },
+            { int32_t(ShadowEdgesMode::Smooth), "smooth", "Smooth" },
+            { int32_t(ShadowEdgesMode::Classic), "classic", "Classic" },
+        };
+
         constexpr EnumEntry kMovieUpscalingEntries[] = {
             { int32_t(MovieUpscalingMode::Original), "original", "Original" },
             { int32_t(MovieUpscalingMode::Sharper), "sharper", "Sharper" },
@@ -362,6 +368,11 @@ namespace settings
               .table = "video", .key = "shadow_resolution", .label = "Shadow Resolution",
               .description = "Sharper sun shadows: draw the game's 1600x1600 shadow map at 1.5x or 2x. 1x is the 360's map, spread over the whole picture so shadows reach its sides, which makes them a little softer than on the 360. Higher settings use more GPU time and memory. Auto: 2x when Internal Resolution renders at 2x or more, otherwise 1x; always 1x on Steam Deck and Steam Frame.",
               .env = "NFSMW_SHADOW_RESOLUTION", .defaultValue = kShadowResolutionDefault, .entries = kShadowResolutionEntries },
+            // Shadow Edges (gpu/shadow_auto.h ShadowEdgesSmooth): the receivers' PCF or the 360's tests, switched live.
+            { .id = Id::ShadowEdges, .category = Category::Graphics, .type = Type::Enum, .apply = Apply::Live,
+              .table = "video", .key = "shadow_edges", .label = "Shadow Edges",
+              .description = "Smooth softens the stair steps along sun shadow edges: each shadow test is blended across the shadow map's texels instead of switching at once. Classic: the edges as the 360 drew them. Smooth costs a little GPU time, and on a Steam Deck the busiest city scenes can then drop an occasional frame. Auto: Classic on a Steam Deck, Smooth everywhere else.",
+              .env = "NFSMW_SHADOW_EDGES", .defaultValue = double(ShadowEdgesMode::Auto), .entries = kShadowEdgesEntries },
             // Sharper UI (gpu/sharp_ui.h): front-end draws only, above 1x.
             { .id = Id::SharpUi, .category = Category::Graphics, .type = Type::Bool, .apply = Apply::Live,
               .table = "video", .key = "sharper_ui", .label = "Sharper UI",
@@ -399,6 +410,14 @@ namespace settings
               .table = "audio", .key = "mute_in_background", .label = "Mute in Background",
               .description = "Silence the game while its window isn't focused.",
               .env = "NFSMW_MUTE_UNFOCUSED", .defaultValue = 0 },
+            // GitHub issue #91 (apu/speaker_layout.h). Off by default: on it
+            // changes what a 7.1 output plays, which nobody asked for unless
+            // they turn it on; off, every output gets the 5.1 as before.
+            { .id = Id::Speakers71, .category = Category::Audio, .type = Type::Bool, .apply = Apply::Live,
+              .table = "audio", .key = "speakers_71", .label = "7.1 Speakers",
+              .description = "The game's sound is 5.1, so on 7.1 speakers one surround pair stays silent. On: the two "
+                             "surround channels play on both pairs, a little quieter each. Only 7.1 outputs change.",
+              .env = "NFSMW_SPEAKERS_71", .defaultValue = 0 },
             // Input
             { .id = Id::StickDeadzone, .category = Category::Input, .type = Type::Float, .apply = Apply::Live,
               .table = "input", .key = "stick_deadzone", .label = "Stick Deadzone",

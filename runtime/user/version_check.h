@@ -124,6 +124,19 @@ namespace version
         return out;
     }
 
+    // Markdown's heading mark: 1 to 6 '#'s, then a space or the line's end. The
+    // length of the mark, or 0 when the line isn't a heading ("#90, reported by
+    // ..." in a wrapped paragraph is text).
+    inline size_t HeadingMark(std::string_view body)
+    {
+        size_t hashes = body.find_first_not_of('#');
+        if (hashes == std::string_view::npos)
+            hashes = body.size();
+        if (hashes == 0 || hashes > 6)
+            return 0;
+        return hashes == body.size() || body[hashes] == ' ' || body[hashes] == '\t' ? hashes : 0;
+    }
+
     inline std::vector<NoteLine> ParseNote(std::string_view entry)
     {
         std::vector<NoteLine> lines;
@@ -145,10 +158,8 @@ namespace version
             NoteLine next{ NoteLine::Kind::Text, {} };
             if (body.starts_with("- ") || body.starts_with("* "))
                 next = { NoteLine::Kind::Bullet, PlainText(body.substr(2)) };
-            else if (body.starts_with("#"))
-                next = { NoteLine::Kind::Heading, PlainText(body.substr(body.find_first_not_of('#') == std::string_view::npos
-                                                                               ? body.size()
-                                                                               : body.find_first_not_of('#'))) };
+            else if (size_t mark = HeadingMark(body))
+                next = { NoteLine::Kind::Heading, PlainText(body.substr(mark)) };
             else if (!gap && !lines.empty() && (lines.back().kind == NoteLine::Kind::Bullet || lines.back().kind == NoteLine::Kind::Text))
             {
                 // The next line of a bullet or a paragraph.
@@ -158,7 +169,7 @@ namespace version
             else
                 next.text = PlainText(body);
             if (next.kind == NoteLine::Kind::Heading)
-                next.text.erase(0, next.text.find_first_not_of(' '));
+                next.text.erase(0, next.text.find_first_not_of(" \t"));
             if (gap)
                 lines.push_back({ NoteLine::Kind::Gap, {} });
             gap = false;

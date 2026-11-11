@@ -60,6 +60,7 @@ namespace settings
         Mipmaps,
         InternalResolution,
         ShadowResolution,
+        ShadowEdges,     // the sun shadow's edges: Smooth (PCF) or Classic (gpu/shadow_auto.h ShadowEdgesSmooth)
         SharpUi,         // Sharper UI: the front end's magnified art reconstructed (gpu/sharp_ui.h)
         MovieUpscaling,  // how movies are enlarged while they play at 1x (video/upscale.h MoviePass)
         WindowWidth,   // hidden: the window's size, remembered between runs
@@ -71,6 +72,7 @@ namespace settings
         MasterVolume,
         Mute,
         MuteInBackground,
+        Speakers71,  // 7.1 Speakers: the surrounds on both pairs of a 7.1 output (apu/speaker_layout.h)
         // Input
         StickDeadzone,
         TriggerDeadzone,
@@ -176,6 +178,11 @@ namespace settings
     // (gpu/shadow_auto.h).
     constexpr int32_t kShadowResolutionAuto = 0;
     constexpr int32_t kShadowResolutionDefault = kShadowResolutionAuto;
+    // Shadow Edges (GitHub #90): Smooth weights each sun shadow test across
+    // the map's texels (PCF: gpu/shader_translator.h), Classic tests as the
+    // 360 did; Auto is Classic on a Steam Deck, Smooth everywhere else
+    // (gpu/shadow_auto.h).
+    enum class ShadowEdgesMode : int32_t { Auto = 0, Smooth = 1, Classic = 2 };
     // Auto: a screen of another shape is filled (video/picture_fit), the HUD
     // kept in a centred 16:9 block: a wider one with a wider view (Hor+), a
     // narrower one (16:10: the Steam Deck, 1280x800 Macs; 3:2, 4:3) with a

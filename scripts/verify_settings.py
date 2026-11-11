@@ -29,7 +29,8 @@ as the relaunch phases reuse the video phase's profile):
             the game's exposure adapts, so a change is judged against the two
             captures around it, and a bracket with the menu open and nothing
             changed is the control): anti-aliasing, upscaling, sharpening,
-            anisotropic filtering, aspect ratio, Brightness, Xbox 360 Display
+            anisotropic filtering, Shadow Edges (its switch also from the log),
+            aspect ratio, Brightness, Xbox 360 Display
             Gamma, the performance overlay;
             Mipmaps and Internal Resolution marked RESTART and changing
             nothing yet; V-Sync's present mode and frame rate; the deadzones
@@ -105,8 +106,8 @@ ROWS = {
     'Display': ['video.fullscreen', 'video.vsync', 'video.frame_rate', 'video.aspect_ratio', 'video.brightness',
                 'video.xbox_display_gamma', 'video.cooler_colors', 'video.hdr'] + (['video.hdr_format'] if MAC else []) + ['video.hdr_strength', 'video.hdr_paper_white'],
     'Graphics': ['video.anti_aliasing', 'video.scaling', 'video.sharpening', 'video.anisotropic_filtering',
-                 'video.mipmaps', 'video.internal_resolution', 'video.shadow_resolution'],
-    'Audio': ['audio.master_volume', 'audio.mute', 'audio.mute_in_background'],
+                 'video.mipmaps', 'video.internal_resolution', 'video.shadow_resolution', 'video.shadow_edges'],
+    'Audio': ['audio.master_volume', 'audio.mute', 'audio.mute_in_background', 'audio.speakers_71'],
     'Input': ['input.stick_deadzone', 'input.trigger_deadzone', 'input.vibration'],
     'Advanced': ['advanced.async_shaders', 'advanced.performance_overlay'],
 }
@@ -116,8 +117,8 @@ DEFAULTS = {
     'video.anti_aliasing': 'true', 'video.scaling': '"bicubic"',
     'video.aspect_ratio': '"auto"', 'video.brightness': '0', 'video.xbox_display_gamma': 'true', 'video.cooler_colors': 'false', 'video.hdr': 'false',
     'video.hdr_format': '"auto"', 'video.hdr_strength': '"2x"', 'video.hdr_paper_white': '"auto"', 'video.sharpening': '0.3', 'video.anisotropic_filtering': '"auto"',
-    'video.mipmaps': 'true', 'video.internal_resolution': '"auto"', 'video.shadow_resolution': '"auto"', 'audio.master_volume': '100', 'audio.mute': 'false',
-    'audio.mute_in_background': 'false', 'input.stick_deadzone': '0.08', 'input.trigger_deadzone': '0.02',
+    'video.mipmaps': 'true', 'video.internal_resolution': '"auto"', 'video.shadow_resolution': '"auto"', 'video.shadow_edges': '"auto"', 'audio.master_volume': '100', 'audio.mute': 'false',
+    'audio.mute_in_background': 'false', 'audio.speakers_71': 'false', 'input.stick_deadzone': '0.08', 'input.trigger_deadzone': '0.02',
     'input.vibration': 'true', 'advanced.async_shaders': 'true', 'advanced.performance_overlay': 'false',
 }
 
@@ -240,6 +241,8 @@ def picture_checks(p):
     bracket(p, 'aniso_16', [('video.anisotropic_filtering', 4, '16x')], [('video.anisotropic_filtering', -4, 'Off')])
     p.change('video.anisotropic_filtering', -1, 'Auto')
     p.close()
+    # Shadow Edges (GitHub #90), live: Auto (Smooth off a Steam Deck, Classic on one) -> Classic -> Auto.
+    bracket(p, 'edges_classic', [('video.shadow_edges', 2, 'Classic')], [('video.shadow_edges', -2, 'Auto')])
 
 
 def phase_video():
@@ -822,6 +825,7 @@ def analyze_video(res, run, log):
     if not paused_scene(res, phase, s):
         return
     picture_results(res, phase, s)
+    shadow_edges_switched(res, phase, log)
     # The AA pass's GPU time ([perf], NFSMW_GPU_TIMING=1) while it was off.
     off0, on1 = log.find('video.anti_aliasing On -> Off'), log.find('video.anti_aliasing Off -> On')
     perf = [(m.start(), float(m.group(1))) for m in re.finditer(r'post-processing GPU [.\d]+ ms \(AA ([.\d]+) ms\)', log)]
@@ -1062,6 +1066,20 @@ def picture_results(res, phase, s, strict_aniso=False):
                     (0.35, 0.8), strict_aniso)
     changes_picture(res, 'video.anisotropic_filtering', phase, 'Off -> 16x changes the surfaces in the distance', s, 'aniso_16',
                     (0.35, 0.8), strict_aniso)
+    # Only the sun shadows' edges change (off a Steam Deck, where Auto is Smooth): few blocks, so not strict;
+    # shadow_edges_switched reads the switch itself from the log.
+    changes_picture(res, 'video.shadow_edges', phase, "Auto -> Classic changes the sun shadows' edges", s, 'edges_classic',
+                    (0.45, 1.0), False)
+
+
+def shadow_edges_switched(res, phase, log):
+    """The renderer's own lines: Shadow Edges read at start, Classic from the
+    menu's change, Auto again after it, in one run (live, no restart)."""
+    lines = [l.split('] shadow edges ', 1)[1] for l in log.splitlines() if l.startswith('[renderer] shadow edges ')]
+    ok = len(lines) >= 3 and lines[0].startswith('Auto') and 'Classic' in lines[1] and not lines[1].startswith('Auto') and \
+        lines[2].startswith('Auto')
+    res.add('video.shadow_edges', phase, 'switched live: Auto at start, Classic from the menu, Auto again',
+            'PASS' if ok else 'FAIL', ' -> '.join(lines) if lines else 'no "[renderer] shadow edges" lines')
 
 
 def analyze_upscale(res, run, log):
@@ -1073,6 +1091,7 @@ def analyze_upscale(res, run, log):
     s = shots(run)
     if paused_scene(res, phase, s):
         picture_results(res, phase, s, strict_aniso=bool(m and m.group(1) == '1x1'))
+        shadow_edges_switched(res, phase, log)
 
 
 def rumble_results(res, phase, log, to):
