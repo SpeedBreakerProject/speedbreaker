@@ -4461,13 +4461,19 @@ void main()
         // ... and then only there, where no other reader asks (see Resolve);
         // NFSMW_SCALED_HOLD=0: into the pool as well, always.
         const bool s_scaledHold = [] { const char* v = std::getenv("NFSMW_SCALED_HOLD"); return !v || v[0] != '0'; }();
-        // ... and into the cached scaled textures only at scales where that
-        // pays (gpu::HostScaledResolves: a Steam Deck's native rows, not a
-        // Steam Machine's 3x); NFSMW_SCALED_HOST=0: never, 1: at every scale.
+        // ... and into the cached scaled textures only where that pays
+        // (gpu::HostScaledResolves: a Steam Deck's native rows, not a Steam
+        // Machine's 3x; on Apple GPUs at every scale); NFSMW_SCALED_HOST=0:
+        // never, 1: at every scale.
         const int s_scaledHostSetting = [] { const char* v = std::getenv("NFSMW_SCALED_HOST"); return v ? std::atoi(v) : -1; }();
+#ifdef __APPLE__
+        constexpr bool kAppleGpu = true;
+#else
+        constexpr bool kAppleGpu = false;
+#endif
         bool ScaledHostOn(const gpu::RenderScale& s)
         {
-            return s_scaledHostSetting >= 0 ? s_scaledHostSetting != 0 : gpu::HostScaledResolves(s);
+            return s_scaledHostSetting >= 0 ? s_scaledHostSetting != 0 : gpu::HostScaledResolves(s, kAppleGpu);
         }
         // NFSMW_FUSE_PARTIAL=1 (default kFewerPasses; 0: only a resolve
         // covering the whole texture stores into it): a resolve into whole 32x32 tiles

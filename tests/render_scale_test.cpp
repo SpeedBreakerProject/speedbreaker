@@ -799,12 +799,17 @@ static void TestHostScale()
 {
     printf("scaled resolves: which scales store into cached scaled textures\n");
     const RenderScale deck{ { 1, 1 }, { 10, 9 } };
-    CHECK(gpu::HostScaledResolves(deck), "Steam Deck 1x10/9: hosted");
-    CHECK(gpu::HostScaledResolves(RenderScale{ { 10, 9 }, { 1, 1 } }), "10/9 x1: hosted");
-    // A Steam Machine's 3x for a 3440x1440 picture (the picture's own columns), and the other scales above 5/4.
+    CHECK(gpu::HostScaledResolves(deck, false), "Steam Deck 1x10/9: hosted");
+    CHECK(gpu::HostScaledResolves(RenderScale{ { 10, 9 }, { 1, 1 } }, false), "10/9 x1: hosted");
+    // A Steam Machine's 3x for a 3440x1440 picture (the picture's own columns), and the other scales above 5/4:
+    // hosted on Apple GPUs only (a Mac's 2x2 for a 4K picture).
     for (const RenderScale& r : { RenderScale{ { 129, 32 }, { 3, 1 } }, RenderScale::Whole(3, 3), RenderScale::Whole(2, 2),
              RenderScale{ kHalf, kHalf }, RenderScale{ { 1, 1 }, kHalf }, RenderScale{ { 2, 1 }, { 20, 9 } } })
-        CHECK(!gpu::HostScaledResolves(r), "%s: not hosted", gpu::ScaleName(r).c_str());
+    {
+        CHECK(!gpu::HostScaledResolves(r, false), "%s: not hosted", gpu::ScaleName(r).c_str());
+        CHECK(gpu::HostScaledResolves(r, true), "%s on an Apple GPU: hosted", gpu::ScaleName(r).c_str());
+    }
+    CHECK(gpu::HostScaledResolves(deck, true), "1x10/9 on an Apple GPU: hosted");
 }
 
 static void TestShaders(const char* rendererPath)
