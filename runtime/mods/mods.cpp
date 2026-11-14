@@ -124,7 +124,8 @@ namespace mods
 
     bool ValidKey(std::string_view key)
     {
-        if (key.empty() || key.size() > 64)
+        // "_<key>" in mods/ is the set being replaced (MoveSet)
+        if (key.empty() || key.size() > 64 || key.front() == '_')
             return false;
         return std::all_of(key.begin(), key.end(),
             [](char c)
@@ -257,9 +258,60 @@ namespace mods
         return false;
     }
 
+    namespace
+    {
+        // mods/_<key>: the installed set while a new one moves in.
+        fs::path Backup(const fs::path& data, std::string_view key)
+        {
+            return ModsFolder(data) / ("_" + std::string(key));
+        }
+
+        // mods/_<key>.copy: a set copied from another drive, renamed in once complete.
+        fs::path Staging(const fs::path& data, std::string_view key)
+        {
+            return ModsFolder(data) / ("_" + std::string(key) + ".copy");
+        }
+
+        // Leftovers of a MoveSet cut short (a crash, power loss): a backup goes
+        // back if its set is missing, else away; a staging copy goes away.
+        void RecoverAtBoot(const fs::path& data)
+        {
+            std::error_code ec;
+            std::vector<fs::path> found;
+            for (const auto& entry : fs::directory_iterator(ModsFolder(data), ec))
+                if (entry.is_directory(ec) && !entry.is_symlink(ec)
+                    && entry.path().filename().string().starts_with('_'))
+                    found.push_back(entry.path());
+            for (const fs::path& dir : found)
+            {
+                std::string key = dir.filename().string().substr(1);
+                const bool staging = key.ends_with(".copy");
+                if (staging)
+                    key.resize(key.size() - 5);
+                if (!ValidKey(key))
+                    continue;
+                const fs::path set = ModsFolder(data) / key;
+                if (staging)
+                    fs::remove_all(dir, ec);
+                else if (!ReadVersion(dir / kVersionFile, key))
+                    continue;  // not a backup of ours
+                else if (fs::exists(set, ec))
+                    fs::remove_all(dir, ec);
+                else
+                    fs::rename(dir, set, ec);
+                fprintf(stderr, "[mods] %s: %s\n", dir.string().c_str(),
+                    staging                ? "unfinished copy deleted"
+                    : fs::exists(dir, ec)  ? "can't recover"
+                    : fs::exists(set, ec)  ? "restored"
+                                           : "deleted");
+            }
+        }
+    }
+
     bool MoveSet(const fs::path& data, std::string_view key, std::string& error)
     {
         const fs::path from = UpdateFolder(data) / key, to = ModsFolder(data) / key;
+        const fs::path backup = Backup(data, key), staging = Staging(data, key);
         std::error_code ec;
         if (!fs::is_regular_file(from / kVersionFile, ec))
         {
@@ -267,26 +319,57 @@ namespace mods
             return false;
         }
         fs::create_directories(ModsFolder(data), ec);
-        fs::remove_all(to, ec);
+        fs::remove_all(backup, ec);
+        fs::remove_all(staging, ec);
+
+        // The new set next to the installed one: renamed, or copied from
+        // another drive (mods/ links somewhere else).
+        bool copied = false;
+        fs::rename(from, staging, ec);
         if (ec)
         {
-            error = "can't remove " + to.string() + ": " + ec.message();
-            return false;
+            std::error_code renameError = ec;
+            if (!CopySet(from, staging, ec))
+            {
+                error = "can't move " + from.string() + " to " + staging.string() + ": "
+                    + renameError.message() + "; copying: " + ec.message();
+                fs::remove_all(staging, ec);
+                return false;
+            }
+            copied = true;
         }
-        fs::rename(from, to, ec);
-        if (!ec)
-            return true;
-        // Another drive (mods/ links somewhere else): copy,then drop the original.
-        std::error_code renameError = ec;
-        if (CopySet(from, to, ec))
+        // On failure the pending set stays for the next start.
+        auto undo = [&](const std::string& why)
         {
-            fs::remove_all(from, ec);
-            return true;
+            error = why + ": " + ec.message();
+            std::error_code ignored;
+            if (copied)
+                fs::remove_all(staging, ignored);
+            else
+                fs::rename(staging, from, ignored);
+            return false;
+        };
+
+        // The installed set steps aside, the new one moves in, the old one goes.
+        const bool installed = fs::exists(to, ec);
+        if (installed)
+        {
+            fs::rename(to, backup, ec);
+            if (ec)
+                return undo("can't move " + to.string() + " aside");
         }
-        error = "can't move " + from.string() + " to " + to.string() + ": "
-            + renameError.message() + "; copying: " + ec.message();
-        fs::remove_all(to, ec);
-        return false;
+        fs::rename(staging, to, ec);
+        if (ec)
+        {
+            std::error_code ignored;
+            if (installed)
+                fs::rename(backup, to, ignored);
+            return undo("can't move " + staging.string() + " to " + to.string());
+        }
+        fs::remove_all(backup, ec);
+        if (copied)
+            fs::remove_all(from, ec);
+        return true;
     }
 
     Placed PlaceSet(const fs::path& data, std::string_view key, std::string& error)
@@ -302,6 +385,7 @@ namespace mods
     std::vector<std::string> ApplyPendingAtBoot(const fs::path& data)
     {
         std::vector<std::string> installedKeys;
+        RecoverAtBoot(data);
         std::error_code ec;
         std::vector<fs::path> sets;
         for (const auto& entry : fs::directory_iterator(UpdateFolder(data), ec))
@@ -324,8 +408,10 @@ namespace mods
                     installedKeys.push_back(key);
                     continue;
                 }
-                fprintf(stderr, "[mods] %s: v%llu not installed: %s\n", key.c_str(),
-                    (unsigned long long)pending, error.c_str());
+                fprintf(stderr,
+                    "[mods] %s: v%llu not installed (next start tries again): %s\n",
+                    key.c_str(), (unsigned long long)pending, error.c_str());
+                continue;
             }
             else
                 fprintf(stderr, "[mods] %s: deleted (%s)\n", dir.string().c_str(),
@@ -338,7 +424,9 @@ namespace mods
 
         s_presentAtBoot.clear();
         for (const auto& entry : fs::directory_iterator(ModsFolder(data), ec))
-            if (entry.is_directory(ec) && HasTextures(entry.path()))
+            if (entry.is_directory(ec)
+                && !entry.path().filename().string().starts_with('_')
+                && HasTextures(entry.path()))
                 s_presentAtBoot.push_back(entry.path().filename().string());
         return installedKeys;
     }

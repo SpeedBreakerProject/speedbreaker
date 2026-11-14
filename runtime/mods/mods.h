@@ -97,8 +97,9 @@ namespace mods
     // .dds.sblink, same as ForEachTexture takes).
     bool HasTextures(const std::filesystem::path& dir);
 
-    // Moves mods_update/<key> over mods/<key>, VERSION last.
-    // Returns false and why.
+    // Moves mods_update/<key> over mods/<key>: the installed set goes to
+    // mods/_<key> until the new one is in, and back if it can't get in.
+    // Returns false and why (mods_update/<key> is kept).
     bool MoveSet(const std::filesystem::path& data, std::string_view key,
         std::string& error);
 
