@@ -294,6 +294,8 @@ def licenses(deps):
     entry("QR Code generator library (Project Nayuki): the download page's QR code in Settings > Advanced > "
           "Check for Updates", "MIT",
           [add("qrcodegen-LICENSE.txt", t(ROOT, "runtime", "thirdparty", "qrcodegen", "LICENSE"))])
+    entry("Zstandard (Meta): .zst files of texture mods", "BSD-3-Clause",
+          [add("zstd-LICENSE.txt", t(ROOT, "runtime", "thirdparty", "zstd", "LICENSE"))])
     entry("AMD FidelityFX Super Resolution 1 (Advanced Micro Devices): Settings > Graphics > Upscaling's FSR 1 "
           "(its shader code and constant setup, unmodified)", "MIT",
           [add("FidelityFX-FSR-LICENSE.txt", t(ROOT, "runtime", "thirdparty", "fsr1", "LICENSE.txt"))])

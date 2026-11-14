@@ -21,6 +21,7 @@
 #include <gpu/renderer.h>    // Internal Resolution's labels: what each entry renders now
 #include <region/region.h>   // the ESRB row: USA only
 #include <report/report.h>
+#include <mods/mods.h>  // mod rows on the Mods page: downloaded or not
 #include <update/updater.h>  // the footer's "Update to v0.2.5"
 #include <user/settings.h>
 #include <hid/key_map.h>     // the Controls page: one row per control, two keys each
@@ -105,6 +106,8 @@ namespace ui
                 return hid::wheel::Found();
             if (c == Category::Game)  // its one row, Language, isn't shown on iPhone and iPad
                 return !settings::Info(Id::GameLanguage).hidden;
+            if (c == Category::Mods)
+                return mods::kAvailable;
 #if defined(__APPLE__) && TARGET_OS_IOS
             if (c == Category::Controls)
                 return SDL_HasKeyboard();

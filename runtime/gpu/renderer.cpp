@@ -24,6 +24,7 @@
 #include "anisotropy_auto.h"
 #include "shadow_auto.h"
 #include "split_views.h"
+#include "texture_override.h"
 #include "xenos/registers.h"
 
 #include <kernel/vmem.h>
@@ -4386,6 +4387,8 @@ void main()
             // frame it was last checked in.
             std::vector<uint64_t> verifyHashes;
             uint64_t verifyFrame = 0;
+            // Sampled instead while set (gpu/texture_override.h).
+            struct OverrideImage* overrideImage = nullptr;
         };
         void LoadScaledTexture(Texture& t, uint32_t base, uint32_t pitchBlocks, uint32_t endian);
         // Deferred shadow resolves (see ShadowLend): before `t`'s own image is
@@ -4769,14 +4772,172 @@ void main()
             return slot;
         }
 
+        // A texture override on the GPU (gpu/texture_override.h):
+        // BC as it came in, or RGBA8 with a full mip chain. Kept
+        // (views too) until the texture pack unloads or another
+        // minimap file takes over (EvictOverrides).
+        struct OverrideImage
+        {
+            Image image;
+            VkFormat format = VK_FORMAT_R8G8B8A8_UNORM;
+            uint32_t levels = 1, generation = 0;
+            std::unordered_map<uint32_t, VkImageView> views;  // by swizzle
+        };
+        // By texture_override::Image::id (null: the load failed).
+        std::unordered_map<uint64_t, std::unique_ptr<OverrideImage>>
+            s_overrides;
+        uint32_t s_minimapGeneration = 1;
+
+        // Uploads level 0 through the ring in
+        // bands, then blits the mips (RGBA only).
+        OverrideImage* LoadOverride(const texture_override::Image& src)
+        {
+            // Tried only once: a failed load stays
+            // null (EvictOverrides drops it).
+            auto [it, added] = s_overrides.try_emplace(src.id);
+            auto& slot = it->second;
+            if (!added)
+                return slot.get();
+            using F = texture_override::Format;
+            const uint32_t w = src.width, h = src.height;
+            const bool bc = src.format != F::Rgba8;
+            // A row of texels (of 4x4 blocks for
+            // BC), and how many rows make the image.
+            const uint32_t blockBytes = src.format == F::Dxt1 ? 8 : 16;
+            const uint32_t rowBytes = bc ? (w + 3) / 4 * blockBytes : w * 4;
+            const uint32_t rowCount = bc ? (h + 3) / 4 : h, rowTexels = bc ? 4 : 1;
+            src.Decode();  // a DDS file gets decoded on its first draw
+            if (src.texels.size() < size_t(rowBytes) * rowCount)
+                return nullptr;
+            auto ovr = std::make_unique<OverrideImage>();
+            ovr->generation = src.generation;
+            ovr->format = src.format == F::Dxt1 ? VK_FORMAT_BC1_RGBA_UNORM_BLOCK
+                : src.format == F::Dxt3       ? VK_FORMAT_BC2_UNORM_BLOCK
+                : src.format == F::Dxt5       ? VK_FORMAT_BC3_UNORM_BLOCK
+                                              : VK_FORMAT_R8G8B8A8_UNORM;
+            ovr->levels = bc ? 1 : 32 - uint32_t(__builtin_clz(std::max(w, h)));
+            const VkImageUsageFlags usage = VK_IMAGE_USAGE_SAMPLED_BIT
+                | VK_IMAGE_USAGE_TRANSFER_DST_BIT
+                | (bc ? 0 : VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
+            ovr->image = CreateImage(VK_IMAGE_TYPE_2D, ovr->format, { w, h, 1 }, 1, usage,
+                VK_IMAGE_VIEW_TYPE_2D, VK_IMAGE_ASPECT_COLOR_BIT, 0, ovr->levels, nullptr,
+                nullptr, true);
+            if (!ovr->image.image)
+            {
+                fprintf(stderr, "[mods] Texture override: can't create a %ux%u image\n",
+                    w, h);
+                src.Release();
+                return nullptr;
+            }
+            const uint32_t band = std::max<uint32_t>(1, uint32_t((8u << 20) / rowBytes));
+            bool first = true;
+            for (uint32_t r = 0; r < rowCount; r += band)
+            {
+                const uint32_t rows = std::min(band, rowCount - r), y = r * rowTexels;
+                VkDeviceSize staging = RingAllocate(VkDeviceSize(rowBytes) * rows);
+                if (staging == ~VkDeviceSize(0))
+                {
+                    fprintf(stderr,
+                        "[mods] Texture override: can't upload a %ux%u image\n", w, h);
+                    DestroyImage(ovr->image);
+                    src.Release();
+                    return nullptr;
+                }
+                memcpy(s_ringHost + staging, src.texels.data() + size_t(r) * rowBytes,
+                    size_t(rowBytes) * rows);
+                EndPass();
+                Begin();
+                if (first)
+                    ToGeneral(ovr->image.image, VK_IMAGE_ASPECT_COLOR_BIT, 1);
+                first = false;
+                VkBufferImageCopy region{};
+                region.bufferOffset = staging;
+                region.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+                region.imageOffset = { 0, int32_t(y), 0 };
+                region.imageExtent = { w, std::min(rows * rowTexels, h - y), 1 };
+                vkCmdCopyBufferToImage(s_cmd, s_ring, ovr->image.image,
+                    VK_IMAGE_LAYOUT_GENERAL, 1, &region);
+            }
+            for (uint32_t level = 1; level < ovr->levels; level++)
+            {
+                FullBarrier();
+                VkImageBlit blit{};
+                blit.srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, level - 1, 0, 1 };
+                auto extent = [&](uint32_t l) {
+                    return VkOffset3D{ int32_t(std::max(w >> l, 1u)),
+                        int32_t(std::max(h >> l, 1u)), 1 };
+                };
+                blit.srcOffsets[1] = extent(level - 1);
+                blit.dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, level, 0, 1 };
+                blit.dstOffsets[1] = extent(level);
+                vkCmdBlitImage(s_cmd, ovr->image.image, VK_IMAGE_LAYOUT_GENERAL,
+                    ovr->image.image, VK_IMAGE_LAYOUT_GENERAL, 1, &blit,
+                    VK_FILTER_LINEAR);
+            }
+            FullBarrier();
+            SubmitIfStarving();
+            src.Release();  // copied to the ring, the GPU image is our copy now
+            slot = std::move(ovr);
+            return slot.get();
+        }
+
+        // Sampled with its own mips, linear in between.
+        VkSampler OverrideSampler(xenos::xe_gpu_texture_fetch_t f,
+            const OverrideImage& ovr)
+        {
+            f.mip_filter = xenos::TextureFilter::kLinear;
+            f.mip_min_level = 0;
+            return GetSampler(f, ovr.levels - 1);
+        }
+
         VkImageView LendView(PooledDepth& d, uint32_t swizzle);
+        VkImageView ComponentView(VkImage image, VkFormat format, VkImageViewType type,
+            uint32_t layers, uint32_t swizzle, const void* next = nullptr);
         VkImageView TextureView(Texture& t, uint32_t swizzle)
         {
+            if (t.overrideImage)
+            {
+                // Texels of an 8888 guest land as B,G,R,A (swapped ARGB), so red
+                // in the fetch swizzle is blue in the override.
+                const bool bgra = t.format == VK_FORMAT_R8G8B8A8_UNORM && t.convert == 0;
+                auto& view = t.overrideImage->views[swizzle | uint32_t(bgra) << 12];
+                if (!view)
+                {
+                    uint32_t s = swizzle;
+                    if (bgra)
+                        for (uint32_t i = 0; i < 4; i++)
+                        {
+                            const uint32_t c = (swizzle >> (3 * i)) & 7;
+                            if (c == 0 || c == 2)
+                                s ^= (c ^ (2 - c)) << (3 * i);
+                        }
+                    const OverrideImage& ovr = *t.overrideImage;
+                    view = ComponentView(ovr.image.image, ovr.format,
+                        VK_IMAGE_VIEW_TYPE_2D, 1, s);
+                }
+                return view;
+            }
             if (t.lend)
                 return LendView(*t.lend, swizzle);
             auto& view = t.views[swizzle];
             if (view)
                 return view;
+            // Sampled only (the format of a storable scaled
+            // texture doesn't have to support storage).
+            VkImageViewUsageCreateInfo usage{
+                VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_CREATE_INFO, nullptr,
+                VK_IMAGE_USAGE_SAMPLED_BIT };
+            const VkImageViewType type = t.cube ? VK_IMAGE_VIEW_TYPE_CUBE
+                : t.volume ? VK_IMAGE_VIEW_TYPE_3D : VK_IMAGE_VIEW_TYPE_2D;
+            view = ComponentView(t.image.image, t.format, type, t.cube ? 6u : 1u, swizzle,
+                t.storeView ? &usage : nullptr);
+            return view;
+        }
+
+        // A view with the swizzle from the fetch constant.
+        VkImageView ComponentView(VkImage image, VkFormat format, VkImageViewType type,
+            uint32_t layers, uint32_t swizzle, const void* next)
+        {
             auto comp = [](uint32_t s) {
                 switch (s & 7)
                 {
@@ -4789,15 +4950,15 @@ void main()
                 default: return VK_COMPONENT_SWIZZLE_IDENTITY;
                 }
             };
-            // Sampled only (a storable scaled texture's format need not support storage).
-            VkImageViewUsageCreateInfo usage{ VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_CREATE_INFO, nullptr, VK_IMAGE_USAGE_SAMPLED_BIT };
             VkImageViewCreateInfo vci{ VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
-            vci.pNext = t.storeView ? &usage : nullptr;
-            vci.image = t.image.image;
-            vci.viewType = t.cube ? VK_IMAGE_VIEW_TYPE_CUBE : t.volume ? VK_IMAGE_VIEW_TYPE_3D : VK_IMAGE_VIEW_TYPE_2D;
-            vci.format = t.format;
+            vci.pNext = next;
+            vci.image = image;
+            vci.viewType = type;
+            vci.format = format;
             vci.components = { comp(swizzle), comp(swizzle >> 3), comp(swizzle >> 6), comp(swizzle >> 9) };
-            vci.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, VK_REMAINING_MIP_LEVELS, 0, t.cube ? 6u : 1u };
+            vci.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0,
+                VK_REMAINING_MIP_LEVELS, 0, layers };
+            VkImageView view;
             Check(vkCreateImageView(s_dev, &vci, nullptr, &view), "vkCreateImageView(texture)");
             return view;
         }
@@ -5263,6 +5424,25 @@ void main()
                         }
                     }
                     t.uploaded = true;
+                    t.overrideImage = nullptr;
+                    std::shared_ptr<const texture_override::Image> image;
+                    if (layers == 1 && !volume)
+                        image = texture_override::Find(base, width, height,
+                            s_sharedHost + base, size);
+                    if (image)
+                        switch (format)
+                        {
+                        // The override reads as RGBA: only guests that land as
+                        // RGBA/BGRA keep the swizzle right. Guards against files from
+                        // other mods (HD HUD: only DXT and 8888).
+                        case 3: case 4: case 6: case 14:
+                        case 15: case 18: case 19: case 20:
+                            t.overrideImage = LoadOverride(*image);
+                            break;
+                        default:
+                            fprintf(stderr, "[mods] Texture override: skipped %08X, "
+                                "guest format %u\n", base, format);
+                        }
                     writewatch::Watch(base, size);
                     GuardGpu(base, size, false, "texture", true);  // the untile runs later
                     if (mipSize)
@@ -5281,6 +5461,8 @@ void main()
             }
             if (out && !t.scaled)
                 out->texture = &t;
+            if (t.overrideImage)
+                sampler = OverrideSampler(f, *t.overrideImage);
             return TextureView(t, f.swizzle);
         }
 
@@ -8885,6 +9067,52 @@ void main()
             DestroyImage(t.image);
         }
 
+        // Frees overrides whose texture pack got unloaded, or whose minimap
+        // file was replaced by another one, once the GPU is done with them.
+        void EvictOverrides()
+        {
+            const uint32_t current = texture_override::MinimapGeneration();
+            const auto freedIds = texture_override::TakeFreed();
+            if (current == s_minimapGeneration && freedIds.empty())
+                return;
+            const bool newMinimap = current != s_minimapGeneration;
+            s_minimapGeneration = current;
+            const std::unordered_set<uint64_t> freed(freedIds.begin(), freedIds.end());
+            std::unordered_set<const OverrideImage*> old;
+            for (const auto& [id, ovr] : s_overrides)
+                if (ovr
+                    && (freed.contains(id)
+                        || (ovr->generation && ovr->generation != current)))
+                    old.insert(ovr.get());
+            // Null slots (failed loads) dont have a GPU image; for a minimap one the
+            // generation is unknown, so a new minimap file drops all of them.
+            std::erase_if(s_overrides, [&](const auto& e) {
+                return !e.second && (newMinimap || freed.contains(e.first));
+            });
+            if (old.empty())
+                return;
+            Flush();
+            for (auto& [key, t] : s_textures)
+                if (t->overrideImage && old.contains(t->overrideImage))
+                {
+                    t->overrideImage = nullptr;
+                    t->uploaded = false;  // (looked up again)
+                }
+            s_textureCache->generation++;
+            for (auto it = s_overrides.begin(); it != s_overrides.end();)
+            {
+                if (!it->second || !old.contains(it->second.get()))
+                {
+                    ++it;
+                    continue;
+                }
+                for (auto& [swizzle, view] : it->second->views)
+                    vkDestroyImageView(s_dev, view, nullptr);
+                DestroyImage(it->second->image);
+                it = s_overrides.erase(it);
+            }
+        }
+
         // Drops the cached textures `which` picks (the GPU idle); returns how many.
         template <typename Which>
         size_t DropTextures(Which which)
@@ -12108,7 +12336,10 @@ void main()
     {
         HfrDrawMatchSwap(frame);  // DIAG (v0.1.5 HFR scoping)
         if (s_vk)
+        {
             ApplyLiveSettings();
+            EvictOverrides();
+        }
         if (s_uploadLog)
         {
             UploadLog& log = *s_uploadLog;

@@ -170,6 +170,15 @@ namespace settings
             { int32_t(IntroVideos::SkipAll), "skip_all", "Skip every intro video" },
         };
 
+        constexpr EnumEntry kGamepadPromptsEntries[] = {
+            { int32_t(GamepadPrompts::Original), "original", "Xbox 360 (Original)" },
+            { int32_t(GamepadPrompts::Xbox360), "xbox_360", "Xbox 360 (HD)" },
+            { int32_t(GamepadPrompts::XboxOne), "xbox_one", "Xbox One™" },
+            { int32_t(GamepadPrompts::Ps3), "ps3", "PlayStation®3" },
+            { int32_t(GamepadPrompts::Ps4), "ps4", "PlayStation®4" },
+            { int32_t(GamepadPrompts::Switch), "switch", "Nintendo Switch™" },
+        };
+
         constexpr EnumEntry kSubtitlesEntries[] = {
             { int32_t(Subtitles::Auto), "auto", "Auto" },
             { int32_t(Subtitles::ForceOn), "force_on", "Force On" },
@@ -664,6 +673,19 @@ namespace settings
               .table = "fixes", .key = "unlock_all_things", .label = "Unlock All Content",
               .description = "The game's native debug switch: every car, part and race is available, in Career, Quick Race and split-screen. Not saved to your profile; turning it off leaves your saved progress as it was.",
               .env = "NFSMW_FIX_UNLOCK_ALL", .defaultValue = 0 },
+            // Mods
+            { .id = Id::GamepadPrompts, .category = Category::Mods, .type = Type::Enum,
+              .apply = Apply::Restart, .table = "mods", .key = "gamepad_prompts",
+              .label = "Gamepad Prompts",
+              .description = "Optional HD gamepad prompts by Aero_ for various systems, including a redrawn Xbox 360 set.",
+              .env = "NFSMW_MOD_GAMEPAD_PROMPTS",
+              .defaultValue = double(int32_t(GamepadPrompts::Original)),
+              .entries = kGamepadPromptsEntries },
+            { .id = Id::HdHudMod, .category = Category::Mods, .type = Type::Bool,
+              .apply = Apply::Restart, .table = "mods", .key = "hd_hud_mod",
+              .label = "HD HUD Mod",
+              .description = "Upscaled HUD mod by LunicAura106: redrawn 4K textures adapted for SpeedBreaker. Uses up to 50 MB of RAM/VRAM. The original textures were mastered for sub-720p resolutions (Deck-friendly).",
+              .env = "NFSMW_MOD_HD_HUD", .defaultValue = 0 },
             // Advanced
             { .id = Id::AsyncShaders, .category = Category::Advanced, .type = Type::Bool, .apply = Apply::Live,
               .table = "advanced", .key = "async_shaders", .label = "Asynchronous Shaders",
@@ -726,6 +748,7 @@ namespace settings
         std::atomic<double> s_stored[kCount]{};    // what settings.toml holds / the menu set
         std::atomic<double> s_envValue[kCount]{};  // this run's environment override
         std::atomic<bool> s_envSet[kCount]{};
+        std::atomic<bool> s_modWaiting[kCount]{};  // set by SetModWaiting
         double s_baseline[kCount]{};               // stored values as last loaded or saved (Dirty)
         std::atomic<double> s_deviceDefault[kCount]{};  // SetDeviceDefault's, where s_hasDeviceDefault
         std::atomic<bool> s_hasDeviceDefault[kCount]{};
@@ -1566,8 +1589,21 @@ namespace settings
     {
         size_t i = size_t(id);
         EnsureInit("a restart was checked");
-        return kOptions[i].apply == Apply::Restart && !s_envSet[i].load(std::memory_order_relaxed) &&
-            s_stored[i].load(std::memory_order_relaxed) != detail::g_effective[i].load(std::memory_order_relaxed);
+        const bool env = s_envSet[i].load(std::memory_order_relaxed);
+        const double stored = s_stored[i].load(std::memory_order_relaxed);
+        if (kOptions[i].apply != Apply::Restart)
+            return false;
+        if (!env && stored != detail::g_effective[i].load(std::memory_order_relaxed))
+            return true;
+        // On (the value for this run under an override) with mod files waiting.
+        const double on =
+            env ? detail::g_effective[i].load(std::memory_order_relaxed) : stored;
+        return s_modWaiting[i].load(std::memory_order_relaxed) && on != 0;
+    }
+
+    void SetModWaiting(Id id, bool waiting)
+    {
+        s_modWaiting[size_t(id)].store(waiting, std::memory_order_relaxed);
     }
 
     bool AnyRestartPending()

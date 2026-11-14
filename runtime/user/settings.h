@@ -168,6 +168,9 @@ namespace settings
         Subtitles,
         Nfsu2LoyaltyBonus,
         UnlockAllThings,
+        // Mods (the [mods] table): game/mods.cpp
+        GamepadPrompts,
+        HdHudMod,
         // Advanced
         AsyncShaders,
         PerformanceOverlay,
@@ -226,6 +229,17 @@ namespace settings
     enum class IntroVideos : int32_t
     {
         Original = 0, EaLogoOnly = 1, SkipEaHd = 2, SkipAll = 3
+    };
+    // Gamepad Prompts (game/mods.cpp): the original icons, or an HD set
+    // (<user data>/mods/button_packs/<set>).
+    enum class GamepadPrompts : int32_t
+    {
+        Original = 0,
+        Xbox360 = 1,
+        XboxOne = 2,
+        Ps3 = 3,
+        Ps4 = 4,
+        Switch = 5,
     };
     // Subtitles (game/fixes.cpp): Auto = stock behavior,
     // Force On = every movie, Force Off = tutorials only.
@@ -329,8 +343,12 @@ namespace settings
     // The environment variable's name while it overrides this option for
     // this run; nullptr otherwise.
     const char* EnvOverride(Id id);
-    // A Restart option whose stored value differs from the running one.
+    // A Restart option whose stored value differs from the running one, or
+    // one that is on (non-zero) while SetModWaiting holds for it.
     bool RestartPending(Id id);
+    // Mod files for this option changed on disk since start (downloaded, or
+    // an update is waiting): used after a restart (mods/mods.h).
+    void SetModWaiting(Id id, bool waiting);
     // RestartPending for any option the menu shows. Hidden ones don't count:
     // the presenter stores the window's size on every resize, which isn't a
     // reason to ask the player to restart.

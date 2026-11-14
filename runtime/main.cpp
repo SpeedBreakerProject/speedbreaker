@@ -25,6 +25,7 @@
 #include <install/locate.h>
 #include <install/placement.h>
 #include <install/sha256.h>
+#include <mods/mods.h>  // mod downloads: swap on start, mod state
 #include <platform/quit_signals.h>
 #include <region/region.h>
 #include <report/report.h>
@@ -657,6 +658,8 @@ int main(int argc, char** argv)
     }
     report::LogSystemSummary();
 
+    // Downloaded mod sets move in before the game indexes mods (mods/mods.h).
+    mods::StartSession(GetUserPath());
     fixes::ApplyAtBoot();  // the Restart fixes that write game data, before the game's code runs
 
     g_userHeap.Init();
