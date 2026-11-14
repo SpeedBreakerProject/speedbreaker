@@ -132,6 +132,9 @@ void LeaderboardCountdown(PPCRegister& r26)
         return;
     }
     uint64_t now = SDL_GetTicksNS();
+    // widgets not ticked for 1 s are gone (or paused): their address can be reused
+    std::erase_if(s_paces,
+        [now](const auto& p) { return now - p.second.lastNs > 1'000'000'000; });
     Pace& pace = s_paces.try_emplace(r26.u32, Pace{ now, 0.0 }).first->second;
     pace.carry += std::min((now - pace.lastNs) / 1e9, 0.25);  // pauses don't burst
     pace.lastNs = now;
