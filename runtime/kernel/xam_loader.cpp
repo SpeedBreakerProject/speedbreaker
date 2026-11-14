@@ -5,6 +5,7 @@
 // ERROR_NOT_FOUND; data set by the title is kept for a later relaunch.
 #include <stdafx.h>
 #include "function.h"
+#include <download/download.h>
 #include <report/report.h>
 
 namespace
@@ -48,6 +49,7 @@ void XamLoaderTerminateTitle()
 {
     fprintf(stderr, "[xam] the title asked to terminate; exiting\n");
     fflush(stderr);
+    download::Shutdown();
     report::FlushLog();  // into the session log before _Exit
     std::_Exit(0);
 }
@@ -57,6 +59,7 @@ void XamLoaderLaunchTitle(const char* path, uint32_t flags)
     fprintf(stderr, "[xam] the title asked to launch \"%s\" (flags %08X); relaunching isn't supported, exiting\n",
         path ? path : "(null)", flags);
     fflush(stderr);
+    download::Shutdown();
     report::FlushLog();
     std::_Exit(0);
 }

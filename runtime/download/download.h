@@ -123,6 +123,9 @@ namespace download
     void Close();
     // Any thread.
     Status GetStatus();
+    // Quit paths (they end in std::_Exit, no atexit): stops the
+    // running job and gives it up to 3 s to end the transfer.
+    void Shutdown();
 
     // Free bytes for `folder` if known (on iOS
     // what it allows for important downloads).

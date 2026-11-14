@@ -577,6 +577,11 @@ namespace download
         return true;
     }
 
+    void Shutdown()
+    {
+        OnExit();
+    }
+
     void Start(Task task)
     {
         static const bool exitHandler = (std::atexit(OnExit), true);

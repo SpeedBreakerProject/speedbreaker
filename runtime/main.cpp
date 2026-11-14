@@ -21,6 +21,7 @@
 #include <hid/input.h>
 #include <cpu/guest_thread.h>
 #include <cpu/host_cpu.h>
+#include <download/download.h>
 #include <install/install_cli.h>
 #include <install/locate.h>
 #include <install/placement.h>
@@ -537,6 +538,7 @@ int main(int argc, char** argv)
                 while (kill(lifeline, 0) == 0 || errno != ESRCH)
                     std::this_thread::sleep_for(std::chrono::milliseconds(500));
                 fprintf(stderr, "[runtime] launcher (pid %d) is gone: exiting\n", int(lifeline));
+                download::Shutdown();
                 if (settings::Dirty())
                     settings::Save();
                 gpu::renderer::Shutdown();
@@ -719,6 +721,7 @@ int main(int argc, char** argv)
     if (int sig = quitsignals::Requested())
         fprintf(stderr, "[runtime] %s: quitting, as the window's close button does\n", quitsignals::Name(sig));
     fprintf(stderr, "[runtime] window closed\n");
+    download::Shutdown();
     if (settings::Dirty())
         settings::Save();
     gpu::renderer::Shutdown();
