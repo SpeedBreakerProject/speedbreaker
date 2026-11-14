@@ -7,6 +7,8 @@
 //   - Checking: says so; Close leaves the check running (the row, the log
 //     and a toast get the result).
 //   - Up to date, or a one-line reason it couldn't check (and Try again).
+//   - Then a line for each downloadable mod with a newer version (just text:
+//     the download starts from the mod row in Settings > Mods).
 //   - A newer version: What's new (its release notes, plain text, scrolled
 //     by the D-pad), one line on how to get it here (this version doesn't
 //     update itself yet: update/check.h NoUpdateNow), "Open download page"
@@ -38,6 +40,7 @@ namespace ui
         bool s_showing = false;        // drawn last frame
         std::string s_focusKey;        // what the dialog showed when its button was last focused
         std::string s_seenTag;         // the release the dialog last showed (update::NoteSeen)
+        std::vector<std::string> s_seenModTags;  // ...same for mods (update::NoteModSeen)
 
         // The download page's QR code, made once per address.
         struct Qr
@@ -195,8 +198,30 @@ namespace ui
             ImGui::EndChild();
         }
 
+        // Mods with a newer version, one accent line
+        // each; seen here, so no startup toast for them.
+        void DrawModNotices(const update::Status& status)
+        {
+            if (!status.mods || status.mods->empty())
+                return;
+            ImGui::PushTextWrapPos(0.0f);
+            PushAccentText();
+            for (const update::ModNotice& notice : *status.mods)
+            {
+                ImGui::TextUnformatted(notice.text.c_str());
+                if (std::find(s_seenModTags.begin(), s_seenModTags.end(), notice.tag)
+                    == s_seenModTags.end())
+                {
+                    s_seenModTags.push_back(notice.tag);
+                    update::NoteModSeen(notice);
+                }
+            }
+            PopAccentText();
+            ImGui::PopTextWrapPos();
+        }
+
         // True: close the dialog.
-        bool DrawAvailable(const update::Result& r)
+        bool DrawAvailable(const update::Result& r, const update::Status& status)
         {
             const float s = Scale();
             TitleText(r.headline.c_str());
@@ -218,7 +243,10 @@ namespace ui
 
             // The notes on the left, the code on the right, the address under both.
             const ImGuiStyle& style = ImGui::GetStyle();
-            const float footer = ImGui::GetFrameHeight() + ImGui::GetTextLineHeightWithSpacing() * 2 + style.ItemSpacing.y * 2;
+            const size_t modLines = status.mods ? status.mods->size() : 0;
+            const float footer = ImGui::GetFrameHeight()
+                + ImGui::GetTextLineHeightWithSpacing() * float(2 + modLines)
+                + style.ItemSpacing.y * 2;
             const float body = std::max(ImGui::GetContentRegionAvail().y - footer, ImGui::GetTextLineHeightWithSpacing() * 4);
             const Qr& qr = QrFor(r.url);
             const float caption = ImGui::GetTextLineHeightWithSpacing() * 2;
@@ -237,6 +265,7 @@ namespace ui
                 ImGui::EndGroup();
             }
             ImGui::TextDisabled("Download page: %s", r.url.c_str());
+            DrawModNotices(status);
 
             ButtonRowAtBottom();
             // Up and down are the notes' (DrawNotes scrolls with them;
@@ -257,8 +286,9 @@ namespace ui
         }
 
         // Up to date, or why not: one line, and OK (and Try again).
-        bool DrawShort(const update::Result& r, uint64_t checks)
+        bool DrawShort(const update::Result& r, const update::Status& status)
         {
+            const uint64_t checks = status.checks;
             TitleText(r.headline.c_str());
             ImGui::Spacing();
             ImGui::PushTextWrapPos(0.0f);
@@ -266,6 +296,11 @@ namespace ui
             if (r.outcome == update::Outcome::Unavailable)
                 ImGui::TextDisabled("Releases: %s", update::kReleasesPage);
             ImGui::PopTextWrapPos();
+            if (status.mods && !status.mods->empty())
+            {
+                ImGui::Spacing();
+                DrawModNotices(status);
+            }
             ImGui::Spacing();
             ImGui::Spacing();
             const bool failed = r.outcome != update::Outcome::UpToDate && r.outcome != update::Outcome::Unavailable;
@@ -402,9 +437,9 @@ namespace ui
         if (!result)
             close = DrawChecking();
         else if (available)
-            close = DrawAvailable(*result);
+            close = DrawAvailable(*result, status);
         else
-            close = DrawShort(*result, status.checks);
+            close = DrawShort(*result, status);
         if (!close && (ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false) || ImGui::IsKeyPressed(ImGuiKey_Escape, false)))
             close = true;
         if (close)
