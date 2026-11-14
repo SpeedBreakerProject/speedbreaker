@@ -256,32 +256,52 @@ namespace gpu::texture_override
             return IsZst(path) ? Unzstd(file) : file;
         }
 
-        // Bytes of a DDS file, kept packed until the first draw (Decode); only
-        // the header gets unpacked now, for ReadDdsHeader.
+        // Header of a DDS file; the texels get read on the first draw (Decode).
         std::shared_ptr<Image> LoadDds(const std::filesystem::path& path)
         {
-            std::vector<uint8_t> file = ReadFile(path);
+            std::ifstream in(path, std::ios::binary);
             const bool packed = IsZst(path);
             std::vector<uint8_t> head(128);
-            size_t size = file.size();
+            size_t size;
             if (packed)
             {
-                if (!ZstdSize(file, size))
+                // the frame header gives the size, the first blocks the DDS header
+                std::vector<uint8_t> chunk(ZSTD_DStreamInSize());
+                in.read(reinterpret_cast<char*>(chunk.data()),
+                    std::streamsize(chunk.size()));
+                chunk.resize(size_t(in.gcount()));
+                if (!ZstdSize(chunk, size))
                     return nullptr;
                 ZSTD_DCtx* dctx = ZSTD_createDCtx();
                 if (!dctx)
                     return nullptr;
-                ZSTD_inBuffer src{ file.data(), file.size(), 0 };
                 ZSTD_outBuffer dst{ head.data(), head.size(), 0 };
-                while (dst.pos < dst.size && src.pos < src.size)
-                    if (ZSTD_isError(ZSTD_decompressStream(dctx, &dst, &src)))
+                while (dst.pos < dst.size && !chunk.empty())
+                {
+                    ZSTD_inBuffer src{ chunk.data(), chunk.size(), 0 };
+                    bool failed = false;
+                    while (dst.pos < dst.size && src.pos < src.size && !failed)
+                        failed = ZSTD_isError(ZSTD_decompressStream(dctx, &dst, &src));
+                    if (failed || dst.pos == dst.size)
                         break;
+                    chunk.resize(chunk.capacity());
+                    in.read(reinterpret_cast<char*>(chunk.data()),
+                        std::streamsize(chunk.size()));
+                    chunk.resize(size_t(in.gcount()));
+                }
                 ZSTD_freeDCtx(dctx);
                 head.resize(dst.pos);
             }
             else
-                head.assign(file.begin(),
-                    file.begin() + std::min<size_t>(file.size(), 128));
+            {
+                in.read(reinterpret_cast<char*>(head.data()),
+                    std::streamsize(head.size()));
+                head.resize(size_t(in.gcount()));
+                std::error_code ec;
+                size = size_t(std::filesystem::file_size(path, ec));
+                if (ec)
+                    return nullptr;
+            }
             DdsHeader dds;
             if (head.size() < 128 || !ReadDdsHeader(head.data(), size, dds))
                 return nullptr;
@@ -290,7 +310,7 @@ namespace gpu::texture_override
             image->height = dds.height;
             image->format = dds.format;
             image->packed = packed;
-            image->file = std::move(file);
+            image->file = path;
             return image;
         }
 
@@ -300,7 +320,8 @@ namespace gpu::texture_override
             if (avail < 16 || memcmp(in, "JDLZ", 4) != 0)
                 return false;
             const uint32_t usize = Le32(in + 8), csize = Le32(in + 12);
-            if (csize > avail)
+            // a minimap BIN unpacks to a few MB; a corrupt header could ask for 4 GB
+            if (csize > avail || usize > (64u << 20))
                 return false;
             const size_t start = out.size();
             out.resize(start + usize);
@@ -450,15 +471,15 @@ namespace gpu::texture_override
     void Image::Release() const
     {
         std::vector<uint8_t>().swap(texels);
-        std::vector<uint8_t>().swap(file);
+        read = true;
     }
 
     void Image::Decode() const
     {
-        if (file.empty())
+        if (read || file.empty())
             return;
-        const std::vector<uint8_t> dds = packed ? Unzstd(file) : std::exchange(file, {});
-        std::vector<uint8_t>().swap(file);
+        read = true;
+        const std::vector<uint8_t> dds = packed ? ReadUnpacked(file) : ReadFile(file);
         auto decoded = DecodeDds(dds, true);
         if (!decoded || decoded->width != width || decoded->height != height
             || decoded->format != format)
@@ -582,12 +603,18 @@ namespace gpu::texture_override
     std::shared_ptr<const Image> Find(uint32_t base, uint32_t width, uint32_t height,
         const uint8_t* guest, uint32_t size)
     {
+        {
+            std::lock_guard lock(s_mutex);
+            if (!s_entries.contains(base))
+                return nullptr;
+        }
+        // up to 64 KB: hashed outside the lock, the game thread registers meanwhile
+        const uint64_t hash = HashBytes(guest, size);
         std::lock_guard lock(s_mutex);
         auto it = s_entries.find(base);
         if (it == s_entries.end())
             return nullptr;
         Entry& e = it->second;
-        const uint64_t hash = HashBytes(guest, size);
         if (e.width != width || e.height != height
             || (e.contentHash && e.contentHash != hash))
         {

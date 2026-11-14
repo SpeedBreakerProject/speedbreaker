@@ -25,16 +25,17 @@ namespace gpu::texture_override
         Format format = Format::Rgba8;
         // Freed by the renderer once on the GPU (the only reader after decode).
         mutable std::vector<uint8_t> texels;
-        // Bytes of the DDS file as read (.zst still packed), until Decode.
-        mutable std::vector<uint8_t> file;
+        // The DDS file (.zst: packed), read by Decode, once.
+        std::filesystem::path file;
         bool packed = false;  // `file` is zstd
+        mutable bool read = false;
         uint64_t id = 0;  // unique
         uint32_t generation = 0;
 
 #ifndef SB_NO_MODS
-        // Frees `texels` and `file`.
+        // Frees `texels` (`file` isn't read after it).
         void Release() const;
-        // Renderer: `file` into `texels` (empty when it fails), `file` freed.
+        // Renderer: `file` into `texels` (empty when it fails), on the first call.
         void Decode() const;
 #else
         void Release() const {}
