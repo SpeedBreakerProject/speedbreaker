@@ -470,6 +470,10 @@ sb_test(json_test SOURCES ${RT}/update/json.cpp)
 # complete releases, curl's output, the release notes, and every row of
 # update-now's "Which version is newer" table (update/check.cpp, self-contained).
 sb_test(update_check_test SOURCES ${RT}/update/check.cpp ${RT}/update/json.cpp)
+# Unpacking downloads: sha256sum lines, stored zips (checks, then a file
+# opened and extracted in a scratch folder) (download/unpack.h).
+sb_test(download_unpack_test SOURCES ${RT}/download/unpack.cpp ${RT}/update/json.cpp
+    ARGS ${CMAKE_CURRENT_BINARY_DIR}/download_unpack_scratch)
 # The startup check's toast, frame by frame: once per version, not over a
 # panel, and taken down for good once Settings opens (update/startup_toast.h).
 sb_test(startup_toast_test)
