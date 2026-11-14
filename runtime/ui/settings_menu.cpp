@@ -21,6 +21,7 @@
 #include <gpu/renderer.h>    // Internal Resolution's labels: what each entry renders now
 #include <region/region.h>   // the ESRB row: USA only
 #include <report/report.h>
+#include <mods/mods.h>  // mod rows on the Mods page: downloaded or not
 #include <update/updater.h>  // the footer's "Update to v0.2.5"
 #include <user/settings.h>
 #include <hid/key_map.h>     // the Controls page: one row per control, two keys each
@@ -105,6 +106,8 @@ namespace ui
                 return hid::wheel::Found();
             if (c == Category::Game)  // its one row, Language, isn't shown on iPhone and iPad
                 return !settings::Info(Id::GameLanguage).hidden;
+            if (c == Category::Mods)
+                return mods::kAvailable;
 #if defined(__APPLE__) && TARGET_OS_IOS
             if (c == Category::Controls)
                 return SDL_HasKeyboard();
@@ -265,7 +268,49 @@ namespace ui
             ImGui::PopStyleColor();
         }
 
-        // A Restart option's row: current state (currentText,
+        // Row of a downloadable mod (mods/mods.h): its folder, or null.
+        const char* ModKey(Id id)
+        {
+            const mods::Mod* mod = mods::FindMod(id);
+            return mod ? mod->key : nullptr;
+        }
+
+        // What A (Enter, a click) does on a mod row: opens the download dialog
+        // if the files are missing or older than the ones in the manifest.
+        enum class ModAction { None, Download, Update };
+        ModAction ModActionOf(Id id)
+        {
+            const char* key = ModKey(id);
+            if (!key)
+                return ModAction::None;
+            switch (mods::GetState(key).status)
+            {
+            case mods::Status::Missing: return ModAction::Download;
+            case mods::Status::UpdateAvailable: return ModAction::Update;
+            default: return ModAction::None;
+            }
+        }
+
+        // Status line of a mod row while it has an action. False: none.
+        // A choice that needs the missing mod says it does nothing yet.
+        bool ModActionLine(const settings::Option& o, double choice)
+        {
+            const ModAction action = ModActionOf(o.id);
+            if (action == ModAction::None)
+                return false;
+            PushAccentText();
+            if (action == ModAction::Update)
+                ImGui::TextUnformatted("Press A to update.");
+            else if (choice != o.defaultValue)
+                ImGui::TextUnformatted(
+                    "Not applied until the mod is downloaded. Press A to download.");
+            else
+                ImGui::TextUnformatted("Press A to download.");
+            PopAccentText();
+            return true;
+        }
+
+        // Row of a Restart option (Fixes, Mods): current state (currentText,
         // or the entry label), description, restart note.
         void RestartRow(const settings::Option& o, const char* (*currentText)(double choice) = nullptr)
         {
@@ -273,7 +318,9 @@ namespace ui
             const double choice = env ? settings::GetValue(o.id) : settings::GetStoredValue(o.id);
             ImGui::TextDisabled("Current: %s.", currentText ? currentText(choice) : ValueText(o, choice).c_str());
             RowDescription(o);
-            if (env)
+            if (ModActionLine(o, choice))
+                ;  // the RESTART marker covers the rest
+            else if (env)
                 ImGui::TextDisabled("%s sets this for this run: %s. The choice here is saved for later runs.", env,
                     ValueText(o, settings::GetValue(o.id)).c_str());
             else if (settings::RestartPending(o.id))
@@ -355,7 +402,8 @@ namespace ui
                 s_described = o.id;
             const float mid = RowLabel(labelPos, o.label);
 
-            // Markers after the label: set by the environment, waits for a restart.
+            // Markers after the label: mod files, set
+            // by the environment, waits for a restart.
             {
                 float x = labelPos.x + ImGui::CalcTextSize(o.label).x + 10.0f * s;
                 ImDrawList* draw = ImGui::GetWindowDrawList();
@@ -370,6 +418,22 @@ namespace ui
                     ImGui::PopFont();
                     x += size.x + pad.x * 2 + 6.0f * s;
                 };
+                if (const char* key = ModKey(o.id))
+                {
+                    switch (mods::GetState(key).status)
+                    {
+                    case mods::Status::Missing:
+                        marker("NOT DOWNLOADED", IM_COL32(0xF0, 0x5A, 0x4F, 0xFF));
+                        break;
+                    case mods::Status::UpdateAvailable:
+                        marker("UPDATE AVAILABLE",
+                            ImGui::GetColorU32(ImGuiCol_PlotLines));
+                        break;
+                    default:
+                        marker("DOWNLOADED", IM_COL32(0x5C, 0xC8, 0x6E, 0xFF));
+                        break;
+                    }
+                }
                 if (settings::EnvOverride(o.id))
                     marker("ENV", ImGui::GetColorU32(ImGuiCol_TextDisabled));
                 if (settings::RestartPending(o.id))
@@ -394,7 +458,12 @@ namespace ui
             // arrows change it, so a touch that only meant to look, or to
             // scroll, changes nothing. A pointer activates on its release.
             const bool byPointer = ImGui::IsMouseReleased(ImGuiMouseButton_Left);
-            if (activated && !byPointer && (o.type == settings::Type::Bool || o.type == settings::Type::Enum))
+            // A mod row with something to fetch opens the download dialog
+            // instead, on a click too; left/right still change it.
+            if (activated && !locked && ModActionOf(o.id) != ModAction::None)
+                mods::OpenDownloadDialog(ModKey(o.id));
+            else if (activated && !byPointer
+                && (o.type == settings::Type::Bool || o.type == settings::Type::Enum))
             {
                 delta = 1;
                 wrap = true;
@@ -887,6 +956,13 @@ namespace ui
                 RestartRow(o, [](double choice) { return choice != 0.0 ? "Modern layouts" : "Original layouts"; });
                 return;
             }
+            if (o.id == Id::HdHudMod)
+            {
+                RestartRow(o, [](double choice) {
+                    return choice != 0.0 ? "HD HUD textures" : "Original HUD textures";
+                });
+                return;
+            }
             if (o.id == Id::MainMenuQuit)
             {
                 RestartRow(o, [](double choice) { return choice != 0.0 ? "Quit enabled" : "Original behavior"; });
@@ -897,7 +973,7 @@ namespace ui
                 RestartRow(o, [](double choice) { return choice != 0.0 ? "Bugfix" : "Original behavior"; });
                 return;
             }
-            if (o.id == Id::IntroVideos)
+            if (o.id == Id::GamepadPrompts || o.id == Id::IntroVideos)
             {
                 RestartRow(o);
                 return;
@@ -1050,7 +1126,8 @@ namespace ui
 #endif
 
         // Pages: LB/RB (Q/E) or the tabs; not under a dialog, which keeps them.
-        const bool dialog = ImGui::IsPopupOpen("reset") || UpdateDialogOpen() || QuitPromptOpen();
+        const bool dialog = ImGui::IsPopupOpen("reset") || UpdateDialogOpen()
+            || DownloadDialogOpen() || QuitPromptOpen();
         if (int delta = dialog ? 0 : PageDelta())
         {
             Category next = s_category;
@@ -1317,6 +1394,8 @@ namespace ui
         }
         if (DrawUpdateDialog())
             popup = true;
+        if (DrawDownloadDialog())
+            popup = true;
 #if SB_QUIT_GAME
         if (DrawQuitPrompt())
             popup = true;
@@ -1352,6 +1431,7 @@ namespace ui
         if (ImGuiContext* g = ImGui::GetCurrentContext(); g && g->OpenPopupStack.Size > 0)
             ImGui::ClosePopupToLevel(0, false);
         ForgetUpdateDialog();
+        ForgetDownloadDialog();
     }
 
     bool SettingsMenuTakesKey(const SDL_KeyboardEvent& key)

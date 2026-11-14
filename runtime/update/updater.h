@@ -21,6 +21,9 @@
 //     "Couldn't check (offline)").
 //   - On a press: Settings > Advanced > Check for Updates
 //     (ui/update_dialog.cpp), whatever the setting says.
+//   - Both also read the mod manifest (mods/mods.h; not with NFSMW_UPDATE_FEED/URL,
+//     not on macOS and iOS): a newer mod gets a line in the dialog and a startup
+//     toast once per tag. Downloads start only from Settings > Mods.
 //   - Either way, a newer version puts "Update to v0.2.5" first in the
 //     Settings menu's footer (FooterLabel), which opens the dialog with it.
 //
@@ -52,14 +55,20 @@
 #pragma once
 #include "check.h"
 
+#include <mods/mods.h>
+
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace update
 {
     enum class Phase : uint8_t { Idle, Checking, Done };
     enum class Kind : uint8_t { Pressed, Startup };
+
+    // A downloadable mod with a newer version (mods/mods.h).
+    using ModNotice = mods::Notice;
 
     struct Status
     {
@@ -67,6 +76,8 @@ namespace update
         uint64_t checks = 0;                   // checks started this session
         std::shared_ptr<const Result> result;  // the last check's (Done)
         Kind kind = Kind::Pressed;             // the last check's
+        // From the last check (Done; null: manifest not read).
+        std::shared_ptr<const std::vector<ModNotice>> mods;
     };
 
     // Main thread: starts a check (the press) unless one is running (then
@@ -80,6 +91,8 @@ namespace update
     // The dialog showed this release (its tag): the startup toast won't
     // announce it again.
     void NoteSeen(const std::string& tag);
+    // Same for a mod tag.
+    void NoteModSeen(const ModNotice& notice);
 
     // The version a check compares: the build's, or NFSMW_TEST_VERSION's.
     std::string RunningVersion();

@@ -5,6 +5,7 @@
 #include <stdafx.h>
 #include <game/fe.h>
 #include <game/fixes.h>
+#include <game/mods.h>
 #include <region/region.h>
 
 #include <bit>
@@ -676,14 +677,18 @@ SB_HOOK(sub_8223FC18)
 // Controls screen (Options > Controller): the picture labels.
 SB_HOOK(sub_8223F708)
 {
+    const uint32_t screen = ctx.r3.u32;
     WithTypeLabels(base, PPC_LOAD_U32(region::Addr(kControlsPlayer)),
         [&] { SB_ORIGINAL(sub_8223F708)(ctx, base); });
+    mods::HideGuideText(ctx, base, screen);
 }
 
 // Loading screen's controller picture (player 0).
 SB_HOOK(sub_822BA768)
 {
+    const uint32_t screen = ctx.r3.u32;
     WithTypeLabels(base, 0, [&] { SB_ORIGINAL(sub_822BA768)(ctx, base); });
+    mods::HideGuideText(ctx, base, screen);
 }
 
 // Skip EA Trax In-Game: Engage Event (D-pad up) plays the next track, in free
