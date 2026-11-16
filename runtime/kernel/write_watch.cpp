@@ -4,6 +4,7 @@
 #include "memory.h"
 
 #include <cpu/guest_time.h>
+#include <gpu/command_processor.h>
 #ifndef _WIN32
 #include <sys/mman.h>
 #include <unistd.h>
@@ -742,7 +743,8 @@ namespace writewatch
                     done = false;
                     break;
                 }
-                g_submitRequested.store(true);
+                if (!g_submitRequested.exchange(true))
+                    gpu::WakeCommandProcessor();  // the worker may be parked
                 // While the game is suspended the GPU gate holds the
                 // submission back until it's resumed: poll every 1 ms instead.
                 // A signal handler can't wait on the gate, only read the flag

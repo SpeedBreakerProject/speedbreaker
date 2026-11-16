@@ -1192,7 +1192,9 @@ namespace gpu
                     }
                     {
                         std::unique_lock<std::mutex> lock(s_workMutex);
-                        s_workCv.wait_for(lock, std::chrono::milliseconds(500), [&]() {
+                        s_workCv.wait_for(lock, std::chrono::seconds(60), [&]() {
+                            if (writewatch::g_submitRequested.load())
+                                return true;
                             uint32_t p = s_primaryBuffer;
                             uint32_t w = *MmioRegister(REG_CP_RB_WPTR);
                             return p != 0 && w != s_readIndex && (w * 4 < s_primarySize);
@@ -1395,6 +1397,17 @@ namespace gpu
         s_readWriteback = guestAddress & 0x1FFFFFFF;
     }
 
+    void WakeCommandProcessor()
+    {
+        // The work is published before this call (the WPTR store, or
+        // g_submitRequested). Taking the mutex keeps the notify from slipping
+        // between the worker's predicate check and its wait.
+        {
+            std::lock_guard lock(s_workMutex);
+        }
+        s_workCv.notify_one();
+    }
+
     void SetInterruptCallback(uint32_t callback, uint32_t userData)
     {
         s_interruptData = userData;
@@ -1441,15 +1454,9 @@ namespace gpu
 SB_HOOK(sub_82596A20)
 {
     const bool sync = (std::getenv("NFSMW_SYNCHRONIZE_COMMAND_PROCESSOR") != nullptr);
-    std::unique_lock<std::mutex> lock(gpu::s_workMutex, std::defer_lock);
+    SB_ORIGINAL(sub_82596A20)(ctx, base);
     if (sync)
     {
-        lock.lock(); // Lock is acquired here
-    }
-    SB_ORIGINAL(sub_82596A20)(ctx, base);
-        if (sync)
-    {
-        lock.unlock(); // Explicitly drop the lock before notifying to prevent waiter thrashing
-        gpu::s_workCv.notify_one();
+        gpu::WakeCommandProcessor();
     }
 }

@@ -22,6 +22,10 @@ namespace gpu
     void EnableReadPointerWriteBack(uint32_t guestAddress, uint32_t blockSizeLog2);
     void SetInterruptCallback(uint32_t callback, uint32_t userData);
 
+    // Wakes the command processor's worker from its park. The write watch
+    // calls this from a fault handler when it asks for a submission.
+    void WakeCommandProcessor();
+
     // Frames completed (XE_SWAP packets executed).
     uint64_t FrameCount();
 
