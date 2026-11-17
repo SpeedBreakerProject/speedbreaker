@@ -1013,9 +1013,12 @@ namespace gpu::bars
     // texture's top row (v = 0) stays at band y 0.974 (left) and 0.950
     // (right), and above it the quad draws nothing (v < 0); at rest the quad
     // is the picture (v 0.004..0.996). On a 16:9 screen the tags' tops sit 9
-    // and 18 rows below the top of 720 (the 360's own picture); under Vert+
-    // the screen goes on to 1/sv of the band and the gap above them was a
-    // band of 3D scene (0.143 and 0.167 of the band on a 16:10 MacBook). Such
+    // and 18 rows below the top of 720 (the 360's own picture), and so they
+    // do on a screen wider than 16:9 (Hor+: an iPhone, an ultrawide; the
+    // band is the screen's height there), with the 3D scene in the gap;
+    // under Vert+ the screen goes on to 1/sv of the band and the gap above
+    // them was a band of 3D scene (0.143 and 0.167 of the band on a 16:10
+    // MacBook). Such
     // a quad (one axis-aligned rectangle of the front-end shader the other
     // rules left alone, opaque (every vertex alpha >= minAlpha), over a
     // 32-bit picture of at least minTexels a side, its u spanning the
@@ -1026,7 +1029,9 @@ namespace gpu::bars
     // what puts that top on the
     // screen's top edge (clip 1): the same amount every frame of the reveal
     // and at rest, so the game's reveal starts at the screen's top and its
-    // front moves down as before. Under Vert+ only (16:9: nothing). The
+    // front moves down as before. At every screen shape (scaleY <= 1: 16:9,
+    // Hor+ and Vert+ alike; under Vert+ the amount is #87's, unchanged; at
+    // 16:9 and under Hor+ it is the art's own gap, 1 - its top). The
     // bottom edge mirrored. Thresholds in band units. The nearest draws it
     // must not take: the header (its art past the band: the edge piece's),
     // the Rap Sheet's and the bio's panels (the black frame rule's, never
@@ -1102,7 +1107,7 @@ namespace gpu::bars
     // inkV: the v of the art's visible top (FirstInkV; 0: the picture's top row).
     inline float MatchRaise(const UvVertex q[4], float scaleX, float scaleY, const RaiseRule& rule = {}, bool* revealing = nullptr, float inkV = 0.0f)
     {
-        if (!(scaleX > 0.0f && scaleY > 0.0f && scaleY < 1.0f))
+        if (!(scaleX > 0.0f && scaleY > 0.0f && scaleY <= 1.0f))
             return 0.0f;
         for (int i = 0; i < 4; i++)
             if ((q[i].argb >> 24) < rule.minAlpha)
@@ -1124,12 +1129,13 @@ namespace gpu::bars
         return side * (1.0f - t * scaleY);  // clip units: the art's top to clip +-1
     }
 
-    // The register checks for a raise: Candidate's, over a 32-bit picture.
+    // The register checks for a raise: Candidate's, over a 32-bit picture, at
+    // every screen shape (16:9 and Hor+ too: scaleY 1).
     inline bool RaiseCandidate(const Draw& d, const RaiseRule& rule = {})
     {
         const float* c = d.c;
         const bool yScale = d.frontEndY > 0.0f && std::fabs(std::fabs(c[5]) - d.frontEndY) <= d.frontEndY * 1e-5f;
-        return d.scaleY < 1.0f && !d.occlusion && d.prim == 13 && d.count == 4 && d.frontEndShader && d.leftAlone && c[3] == 0.0f &&
+        return d.scaleY > 0.0f && d.scaleY <= 1.0f && !d.occlusion && d.prim == 13 && d.count == 4 && d.frontEndShader && d.leftAlone && c[3] == 0.0f &&
             c[4] == 0.0f && c[6] == 0.0f && c[7] == 0.0f && yScale && (d.vte & 0xF) == 0xF &&
             (d.blend0 == 0x07060706u || d.blend0 == 0x00010001u) && d.t0Sampled && d.t0Format == 6 && d.t0Width >= rule.minTexels &&
             d.t0Height >= rule.minTexels;

@@ -10,6 +10,7 @@
 #include "xxHashMap.h"
 #include <user/paths.h>
 #include "overlapped.h"
+#include "save_import.h"
 #include <kernel/function.h>
 #include <fstream>
 
@@ -326,6 +327,34 @@ static void ScanSavedContent()
         return;
     scanned = true;
     std::error_code ec;
+    // A save brought in from outside (an Xbox 360 package or a bare save
+    // file put in the save folder) becomes a save first: kernel/save_import.h.
+    // Existing saves are never touched. NFSMW_SAVE_IMPORT=0 turns it off.
+    if (const char* v = std::getenv("NFSMW_SAVE_IMPORT"); !v || strcmp(v, "0") != 0)
+    {
+        // The folder is there from the first start, for a player to put a file in.
+        std::filesystem::create_directories(GetSavePath(true), ec);
+        const auto reports = save_import::ImportDroppedSaves(GetSavePath(true));
+        for (const auto& r : reports)
+            fprintf(stderr, "[xam] save import: %s\n", save_import::ReportLine(r).c_str());
+        save_import::WriteLog(GetSavePath(true), reports);
+#if defined(__APPLE__) && TARGET_OS_IOS
+        // iPhone, iPad: the save folder is in the app's Library, which the
+        // Files app doesn't show. Its Documents folder (Files > On My iPhone >
+        // SpeedBreaker, where the disc image goes too) is where a player can
+        // put a save: it is looked at as well, and what happened to each file
+        // is said there, in import-log.txt; a file brought in moves to
+        // imported/ there. Folders there other than a save's own are not read.
+        if (const char* home = std::getenv("HOME"); home && *home)
+            if (const std::filesystem::path documents = std::filesystem::path(home) / "Documents"; std::filesystem::is_directory(documents, ec))
+            {
+                const auto dropped = save_import::ImportDroppedSaves(GetSavePath(true), documents);
+                for (const auto& r : dropped)
+                    fprintf(stderr, "[xam] save import from Documents: %s\n", save_import::ReportLine(r).c_str());
+                save_import::WriteLog(documents, dropped);
+            }
+#endif
+    }
     for (const auto& entry : std::filesystem::directory_iterator(GetSavePath(true), ec))
     {
         if (entry.path().extension() != ".xcontent")

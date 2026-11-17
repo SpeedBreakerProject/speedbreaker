@@ -8,6 +8,8 @@
 #include <cpu/guest_thread.h>
 #include <cpu/host_cpu.h>
 #include <cpu/guest_time.h>
+#include <cpu/backoff.h>
+#include <cpu/efficiency.h>
 #include <kernel/function.h>
 #include <video/presenter.h>
 #include <video/frame_rate.h>
@@ -22,6 +24,7 @@
 #include <kernel/write_watch.h>
 #include <debug/timeline.h>
 #include <report/report.h>
+#include <report/cpu_use.h>
 #include <unordered_set>
 
 namespace gpu
@@ -59,22 +62,27 @@ namespace gpu
         // spinning. 2 ms; on macOS 0.5 ms, where its 100 us sleeps are exact
         // (this thread is QoS user-interactive): M1 Pro, 1x, two interleaved
         // rounds, 1.50-1.60 -> 1.41-1.49 cores in races and 0.53 -> 0.43-0.47
-        // in the menus, the same fps and no more late frames. (Linux, the
-        // Steam Machine's CP-bound free roam, and Windows, whose 100 us sleep
-        // takes 1-2 ms, keep 2 ms until measured.) NFSMW_CP_IDLE_SPIN_US
-        // (microseconds) overrides.
+        // in the menus, the same fps and no more late frames. iOS too (item
+        // #71, cpu/efficiency.h's kCpSpin; NFSMW_EFFICIENCY=0 keeps 2 ms
+        // there), and Linux (not Android) with kCpSpin on: by default on a
+        // Steam Deck and the Steam Machine (cpu/efficiency_choice.h). (Android, and Windows,
+        // whose 100 us sleep takes 1-2 ms, keep 2 ms until measured.)
+        // NFSMW_CP_IDLE_SPIN_US (microseconds) overrides.
         std::chrono::microseconds IdleSpin()
         {
-            static const std::chrono::microseconds spin = [] {
-#if defined(__APPLE__) && !TARGET_OS_IOS
-                constexpr int kDefault = 500;
-#else
-                constexpr int kDefault = 2000;
-#endif
+            static const int set = [] {
                 const char* v = std::getenv("NFSMW_CP_IDLE_SPIN_US");
-                return std::chrono::microseconds(v && *v ? std::max(0, std::atoi(v)) : kDefault);
+                return v && *v ? std::max(0, std::atoi(v)) : -1;
             }();
-            return spin;
+            if (set >= 0)
+                return std::chrono::microseconds(set);
+#if (defined(__APPLE__) && TARGET_OS_IOS) || (defined(__linux__) && !defined(__ANDROID__))
+            return std::chrono::microseconds(efficiency::On(efficiency::kCpSpin) ? 500 : 2000);
+#elif defined(__APPLE__)
+            return std::chrono::microseconds(500);
+#else
+            return std::chrono::microseconds(2000);
+#endif
         }
 
         // Page-aligned, as is s_history: where the hot arrays fall within a
@@ -853,9 +861,15 @@ namespace gpu
                     // (2 ms; macOS 0.5 ms), then back off to short sleeps.
                     (void)wait;
                     if (std::chrono::steady_clock::now() - waitStart < IdleSpin())
+                    {
+                        cpuuse::Count(cpuuse::kCpWaitYield);
                         std::this_thread::yield();
+                    }
                     else
+                    {
+                        cpuuse::Count(cpuuse::kCpWaitSleep);
                         std::this_thread::sleep_for(std::chrono::microseconds(100));
+                    }
                 }
                 return true;
             }
@@ -1156,6 +1170,7 @@ namespace gpu
             GuestThreadContext thread(2);
             PPCContext& ctx = thread.ppcContext;
             renderer::Initialize(s_regs);
+            (void)efficiency::On(efficiency::kCpSpin);  // reads NFSMW_EFFICIENCY now: its [efficiency] line at the start
             auto lastWork = std::chrono::steady_clock::now();
             while (true)
             {
@@ -1181,9 +1196,15 @@ namespace gpu
                         continue;
                     }
                     if (std::chrono::steady_clock::now() - lastWork < IdleSpin())
+                    {
+                        cpuuse::Count(cpuuse::kCpIdleYield);
                         std::this_thread::yield();
+                    }
                     else
+                    {
+                        cpuuse::Count(cpuuse::kCpIdleSleep);
                         std::this_thread::sleep_for(std::chrono::microseconds(100));
+                    }
                     continue;
                 }
                 s_regs[REG_CP_RB_WPTR] = writeIndex;
@@ -1193,6 +1214,7 @@ namespace gpu
                 s_busyWaitFrom = renderer::g_cpWaitNs;
                 ExecuteBuffer(r, ctx);
                 AccountBusy();
+                backoff::NoteGpuProgress();  // ring space freed, maybe idle: a D3D GPU wait may poll for it
                 timeline::Mark(timeline::BatchEnd);
                 if (writewatch::g_submitRequested.exchange(false))
                     renderer::Submit();
@@ -1382,6 +1404,9 @@ namespace gpu
             s_frames.load(), s_draws.load(), s_vblanks.load(), s_primaryBuffer.load(), s_primarySize, s_readIndex,
             uint32_t(*MmioRegister(REG_CP_RB_WPTR)));
         text += FormatHistory();
+        // Where the GPU is: what it was given and hasn't finished.
+        if (std::string gpu = renderer::DescribeGpu(); !gpu.empty())
+            text += "GPU:\n" + gpu;
         return text;
     }
 }

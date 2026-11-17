@@ -459,6 +459,9 @@ namespace ui
         {
             if (result != VK_SUCCESS)
                 fprintf(stderr, "[ui] Vulkan error %d\n", int(result));
+            // (GitHub #101: six of these, while the game stood frozen.)
+            if (result == VK_ERROR_DEVICE_LOST)
+                gpu::renderer::ReportDeviceLost("Dear ImGui's Vulkan backend (the UI)");
         }
 
         void UpdateCapture()

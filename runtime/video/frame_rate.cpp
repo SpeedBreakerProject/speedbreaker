@@ -10,6 +10,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <format>
+#include <string_view>
+#include <utility>
 
 namespace video
 {
@@ -25,6 +27,13 @@ namespace video
         const bool s_log = [] {
             const char* v = std::getenv("NFSMW_AUTO_FPS_LOG");
             return v && v[0] == '1';
+        }();
+
+        // NFSMW_AUTO_FPS=classic: Auto's rules up to v0.2.5 (serious alone
+        // drops to 30); otherwise the gentle ones (video/frame_rate_policy.h).
+        const bool s_gentle = [] {
+            const char* v = std::getenv("NFSMW_AUTO_FPS");
+            return !(v && std::string_view(v) == "classic");
         }();
 
         constexpr const char* kWarmToast = "30 fps: the device is warm";
@@ -103,7 +112,7 @@ namespace video
             // Where the restarted policy's first update will be: 30 on a hot
             // device (it drops for that at once), so Auto never shows 60 first.
             const platform::thermal::State thermal = platform::thermal::Current();
-            const bool hot = thermal == platform::thermal::State::Serious || thermal == platform::thermal::State::Critical;
+            const bool hot = AutoFrameRatePolicy::DropsOnState(thermal, s_gentle);
             s_rate.store(hot ? 30 : 60, std::memory_order_relaxed);
             s_reason.store(hot ? FrameRateReason::Hot : FrameRateReason::None, std::memory_order_relaxed);
             s_restart.store(true, std::memory_order_release);
@@ -112,7 +121,15 @@ namespace video
         if (!AutoOn())
             return;
         if (s_restart.exchange(false, std::memory_order_acquire))
+        {
+            static bool s_said = false;
+            if (!std::exchange(s_said, true))
+                fprintf(stderr, "[frame rate] auto: %s\n", s_gentle
+                    ? "gentle rules (serious alone keeps 60; 30 when 60 isn't held there, or at critical; tries while serious)"
+                    : "classic rules (NFSMW_AUTO_FPS=classic: serious or critical drops to 30)");
+            s_policy.SetGentle(s_gentle);
             s_policy.Reset();
+        }
         const platform::thermal::State thermal = platform::thermal::Current();
         const FrameRateDecision d = s_policy.Update(report::SessionSeconds(), thermal, sample);
         // Every time, not only on a change: a menu change racing this update

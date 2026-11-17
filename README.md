@@ -137,7 +137,7 @@ belongs to its owners.</sub>
 | **Linux** (x86-64) | [Download][dl-steamos-x86_64] the x86-64 SteamOS build, `SpeedBreaker-steamos-x86_64.tar.xz`, or [build from source](#building-from-source) | Tested here on SteamOS. Players reported v0.1.1 working on Fedora 44 (GeForce GTX 1080 Ti) and Ubuntu 24.04 (Intel Arc 140T). Other setups: reports welcome. |
 | **Mac** (Apple silicon) | [Download][dl-macos]<br>`SpeedBreaker-macos.dmg` | MacBook Pro (M1 Pro) on macOS 27 and Mac Studio (M4 Max) on macOS 26; macOS 15.6 (Sequoia) in a virtual machine. There is no Intel Mac download; an Intel Mac can [build from source](#building-from-source), with MoltenVK 1.4.2 (the Khronos release, or Homebrew's `molten-vk` 1.4.2). Intel Macs are community-tested: a player's Core i7-9700K and Radeon RX 6600 XT on macOS 15.4. |
 | **iPhone** and **iPad** | [Sideload the IPA](#iphone-and-ipad) (experimental), `SpeedBreaker-<version>-ios.ipa` on the [release page][releases], or [build it yourself](#iphone-and-ipad) with Xcode | iPhone 15 Pro Max and iPhone 18 Pro Max (iOS 27). iPad Pro 12.9-inch (M2, iPadOS 27) with a Backbone Pro. Not on the App Store. Those were Xcode-signed builds: the IPA itself hasn't been installed on a device yet. |
-| **Windows** (beta) | [Download][all-releases] `SpeedBreaker-0.2.5-windows-x64-beta.zip` from the Releases page; see [Windows (beta)](#windows-beta) | Here: a laptop with Intel UHD Graphics (60 Hz). Players have reported it running on NVIDIA GeForce (GTX 1070, RTX 4090, RTX 5070 Ti) and AMD Radeon (RX 6700 XT, RX 6750 XT) graphics. Intel Arc graphics and 120/144 Hz monitors haven't been tested yet: [reports welcome](#reporting-a-bug). |
+| **Windows** (beta) | [Download][all-releases] `SpeedBreaker-0.2.6-windows-x64-beta.zip` from the Releases page; see [Windows (beta)](#windows-beta) | Here: a laptop with Intel UHD Graphics (60 Hz). Players have reported it running on NVIDIA GeForce (GTX 1070, RTX 4090, RTX 5070 Ti) and AMD Radeon (RX 6700 XT, RX 6750 XT) graphics. Intel Arc graphics and 120/144 Hz monitors haven't been tested yet: [reports welcome](#reporting-a-bug). |
 | **Android** | Coming soon | |
 
 Each link downloads the newest release. Every file and its `.sha256` checksum file are on the
@@ -321,7 +321,7 @@ its name>`, e.g. `NFSMW_GPU=intel %command%` in Steam's launch options.
 
 The Windows version is a **beta**: here it has been tested on one laptop with Intel UHD
 Graphics and a 60 Hz screen, and players have reported it on NVIDIA and AMD graphics cards.
-Download `SpeedBreaker-0.2.5-windows-x64-beta.zip` from the [Releases page][all-releases],
+Download `SpeedBreaker-0.2.6-windows-x64-beta.zip` from the [Releases page][all-releases],
 right-click it, choose **Extract All**, and double-click
 `SpeedBreaker.exe` in the extracted folder (not inside the zip). SpeedBreaker isn't signed, so
 Windows may say **"Windows protected your PC"**: click **More info**, then **Run anyway**.
@@ -467,7 +467,7 @@ switcher).
 |---|---|---|
 | Fullscreen | On / Off | Off: a 1280x720 window you can resize. The game always starts as set here; on a Mac, the window's green button switches only until you quit, and the row then says NOW FULLSCREEN or NOW WINDOWED. Always on in SteamOS Game Mode. Not shown on iPhone and iPad, which are always full screen. |
 | V-Sync | On / Off | On. Off can tear, but shows frames sooner. |
-| Frame Rate | Auto / 60 fps / 30 fps | 60 fps on most devices. 30 fps keeps the game at full speed. Auto runs at 60, or at a steady 30 while the device is hot or can't hold 60. |
+| Frame Rate | Auto / 60 fps / 30 fps | 60 fps on most devices. 30 fps keeps the game at full speed. Auto runs at 60, or at a steady 30 while the game can't hold 60 (on iPhone, iPad and Mac also at once when the system reports the device as critically hot); at 30 it tries 60 again after a few minutes. |
 | Smooth Motion | On / Off | Off. On a Mac with a 120 Hz screen: up to 120 fps; on a SteamOS or Linux PC, 120 fps at 120 Hz and 90 at 90 Hz (it drops to an even 60 whenever pictures can't be shown on time; not on the Steam Deck). The game still runs at 60 steps a second, as on the console, and draws one more picture between each two; the controls answer a few milliseconds later. Heavy scenes ease off, down to an even 60 for a while. Takes effect the next time the game starts. Shown only where it works. |
 | Screen Resolution | Full / 75% | Full. iPhone and iPad only: 75% is slightly softer and saves graphics work. |
 | Aspect Ratio | Fill Screen / 16:9 | Fill Screen: wider screens get a wider view; 4:3, 3:2 and 16:10 screens (the Steam Deck, many Macs) a taller one. Since v0.1.9 the game renders the screen's own shape: a Steam Deck draws 1280x800 at 1x, a 1920x1200 screen 1920x1200 at 1.5x. 16:9 always shows the classic picture with bars. |
@@ -493,7 +493,7 @@ then Yes, puts it back.
 | Anisotropic Filtering | Auto / Off / 2x / 4x / 8x / 16x / Original | Auto: 16x on dedicated graphics cards and M-series iPads, and on a Mac at 1x Internal Resolution; 4x elsewhere. Original uses each texture's own setting, as on the 360. |
 | Mipmaps | On / Off | On, so distant textures don't shimmer |
 | Internal Resolution | Auto / 1x / 1.5x / 2x / 3x | Each entry shows the size it renders on your screen (1x (1280x720) on a 16:9 screen, 1x (1280x800) on a Steam Deck with Fill Screen), and Auto the one it picked. Auto: enough to cover your screen, within what the device can afford: the screen's own shape when that fits (a Steam Deck's 1280x800), otherwise whole scales (1x, 2x, 3x, or 3x2 on an ultrawide). On iPhone and iPad, Auto always picks 1x. With Fill Screen, the rows count the screen's shape: 1x on a 16:10 screen is 1280x800. |
-| Shadow Resolution | Auto / 1x / 1.5x / 2x | Auto: 2x when Internal Resolution renders at 2x or more, otherwise 1x; always 1x on Steam Deck and Steam Frame. Auto shows the shadow map size it picked, for example "Auto (3200x3200)". 1x (1600x1600) is the Xbox 360's map size, now spread over the whole picture so shadows reach its sides (a little softer than on the 360). 1.5x and 2x draw the sun's shadow map larger for sharper shadow edges, at more GPU time and memory. A 1x saved by an earlier version becomes Auto once, after the update. |
+| Shadow Resolution | Auto / 1x / 1.5x / 2x | Auto: 2x when Internal Resolution renders at 2x or more (on a Mac, a wider 3600x1600 map instead: as sharp across the picture for less GPU time), otherwise 1x; always 1x on Steam Deck and Steam Frame. Auto shows the shadow map size it picked, for example "Auto (3200x3200)", or "Auto (3600x1600)" on a Mac. 1x (1600x1600) is the Xbox 360's map size, now spread over the whole picture so shadows reach its sides (a little softer than on the 360). 1.5x and 2x draw the sun's shadow map larger for sharper shadow edges, at more GPU time and memory. A 1x saved by an earlier version becomes Auto once, after the update. |
 | Shadow Edges | Auto / Smooth / Classic | Auto: Smooth everywhere except the Steam Deck. Smooth softens the stair steps along the edges of car, building and pole shadows; Classic keeps the edges as the Xbox 360 drew them. On the Steam Deck, Auto is Classic because the busiest city scenes would otherwise drop an occasional frame; you can still choose Smooth there. The change takes effect at once, without a restart. |
 | Sharper UI | On / Off | On. Above 1x Internal Resolution, the menus' and the HUD's text, icons and panels are enlarged with a sharper filter instead of a blur, so they look crisper on 1440p and 4K screens. Where the finished picture is then enlarged to the screen by an uneven factor (for example 1440p to 4K), the UI's pixels also take FSR 1's edge-aware upscale and skip the anti-aliasing pass. The art, layout and colors are the game's own; at 1x on a 16:9 screen it changes nothing. |
 | Movie Upscaling | Original / Sharper | Sharper: the game's 720p movies (the intro and the cutscenes) are enlarged with a sharper, edge-aware filter: FSR 1's upscale where the movie reaches the screen at 1x, the same filter as Sharper UI above 1x, and a Lanczos filter on iPhone and iPad at 1x. Original keeps the movies as before. |
@@ -556,8 +556,9 @@ also shows which build you're running.
   pixels of 2x.
 - **On iPhone and iPad,** keep Internal Resolution at Auto (1x). On the tested iPad Pro (M2), 2x
   is too slow for races. The iPhone 18 Pro Max holds 60 fps at 1.5x, but on a cable it reached
-  iOS's "serious" heat level in about nine minutes (1x did in about six), and Frame Rate Auto then
-  drops to 30. Screen Resolution 75% saves more.
+  iOS's "serious" heat level in about nine minutes (1x did in about six). Since v0.2.6, Frame Rate
+  Auto keeps 60 there for as long as the game holds it, and drops to 30 when it can't. Screen
+  Resolution 75% saves more.
 - **Docked Deck or Steam Machine:** set the shortcut's Game Resolution to Native.
 - **See what's happening:** Settings > Advanced > Performance Overlay.
 
@@ -592,7 +593,18 @@ game expects from the Xbox 360: its system software, graphics, audio and control
 No. 60 fps is the game's own cap.
 
 **Can I bring my Xbox 360 saves?**
-No. Xbox 360 saves can't be imported, so your career starts fresh.
+Yes, since v0.2.6, and saves from another install too. Quit SpeedBreaker, put the save in the
+save folder, and start the game again. It takes an Xbox 360 save package, the save file taken out
+of one, a save's folder copied without the small file that goes beside it, and the `454107D9`
+folder the Xenia emulator keeps its saves in. A save comes in only if it passes the game's own
+checks, the ones it runs on its own saves. The save folder is
+`~/Library/Application Support/SpeedBreaker/save` on a Mac, `~/.local/share/speedbreaker/save` on
+SteamOS and Linux (`data/save` in [portable mode](#steam-deck-and-steam-machine)), and
+`%LOCALAPPDATA%\SpeedBreaker\save` on Windows; with a German or Spanish PAL disc it's
+`save-pal-de` or `save-pal-es` instead of `save`. On iPhone and iPad, put it in **Files > On My
+iPhone (or iPad) > SpeedBreaker**, where the disc image goes. What you put in moves to an
+`imported` folder there, a save that's already there under the same name is never replaced, and
+`import-log.txt` there says what came in and what didn't.
 
 **The installer refused my image. Why?**
 It always says what to do. The usual causes:
@@ -671,7 +683,7 @@ SpeedBreaker folder instead: `data/`, `data/game` and `cache/`.
 2. A notice says where the zip file went: your **Desktop** (on SteamOS, pick it up in Desktop
    Mode, or in the Desktop app on a Steam Frame), the **SpeedBreaker** folder in the Files app on
    iPhone and iPad, or the data folder above when there is no Desktop. Its name says which
-   version you were running, for example `speedbreaker-bug-report-v0.2.5-<date>_<time>.zip`.
+   version you were running, for example `speedbreaker-bug-report-v0.2.6-<date>_<time>.zip`.
 3. Open an [issue][issues], attach the zip, and say what you were doing, what you expected, what
    happened, and roughly how long into the session it happened.
 

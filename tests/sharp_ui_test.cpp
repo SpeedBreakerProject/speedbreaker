@@ -272,7 +272,7 @@ int main(int argc, char** argv)
     CHECK(r.find("if (sharpMode != gpu::sharp_ui::Mode::Off && SharpUiOn())\n        {\n            key.pad = uint32_t(sharpMode);") != std::string::npos,
         "renderer: the setting (or the A/B) decides, per draw");
     CHECK(r.find("return settings::GetBool(settings::Id::SharpUi);") != std::string::npos, "renderer: reads Sharper UI live");
-    CHECK(r.find("if (pipelinePending && key.pad)") != std::string::npos, "renderer: the plain pipeline while the variant compiles");
+    CHECK(r.find("if (pipelinePending && (key.pad & ~samplesBit))") != std::string::npos, "renderer: the plain pipeline while the variant compiles");
     CHECK(r.find("gpu::sharp_ui::Mode(key.pad & 3)") != std::string::npos, "renderer: BuildPipeline passes the mode");
     CHECK(r.find("| gpu::sharp_ui::VariantBits(sharp) |\n                ((uiMask & 3u) << 24) | (classicEdges ? 1u << 26 : 0);") != std::string::npos, "renderer: the variant key holds the mode");
     CHECK(r.find("const std::string* glsl = &ps.info.glsl;") != std::string::npos, "renderer: the plain GLSL is the default");
@@ -333,8 +333,13 @@ int main(int argc, char** argv)
     CHECK(r.find("key.pad |= gpu::sharp_ui::UiMaskKind(key.blend[0], small) << 2;") != std::string::npos, "renderer: the mask kind in the key");
     CHECK(r.find("if (scaled && !b && settings::GetBool(settings::Id::SharpUi) && UiMaskWanted())") != std::string::npos,
         "renderer: a mask for scaled real pictures with Sharper UI on");
-    CHECK(pr.find("return uint32_t(dw) % w != 0 || uint32_t(dh) % h != 0;") != std::string::npos, "presenter: integer enlargements untouched");
-    CHECK(pr.find("pass != upscale::Pass::Bicubic || s_swapHdr") != std::string::npos, "presenter: bicubic only, no HDR (bands followed)");
+    // (The rule moved to video/ui_mask_use.h with NFSMW_UI_MASK_LAZY: tests/ui_mask_use_test.cpp checks it against the old one.)
+    const std::string um = Read(rt / "video/ui_mask_use.h");
+    CHECK(um.find("return uint32_t(dw) % w != 0 || uint32_t(dh) % h != 0;") != std::string::npos, "UI pass rule: integer enlargements untouched");
+    CHECK(um.find("if (!on || !bicubic || hdr || !upscale::Enlarged(w, h, dw, dh))") != std::string::npos,
+        "UI pass rule: bicubic only, no HDR (bands followed)");
+    CHECK(pr.find("return mask && ui_mask::PassApplies(UiMaskOn(), pass == upscale::Pass::Bicubic, s_swapHdr, w, h, dw, dh);") != std::string::npos,
+        "presenter: the UI pass by that rule, with a mask");
     {
         const std::string g = video::fsr1::UiEasuGlsl();
         CHECK(g.find("if (w <= 0.0)\n        discard;") != std::string::npos, "UI pass: outside the mask it draws nothing");

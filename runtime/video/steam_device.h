@@ -25,6 +25,15 @@ namespace video
         return vendor == "Valve" && (product == "Jupiter" || product == "Galileo");
     }
 
+    // The Steam Machine: DMI vendor "Valve" with product "Fremont"
+    // (report/system_info.cpp's name for it). Not a SteamDevice: what the
+    // renderer decides by SteamDevice (shadow Auto, Smooth edges) stays
+    // Other there; cpu/efficiency.cpp reads it for its defaults only.
+    inline bool IsSteamMachineDmi(std::string_view vendor, std::string_view product)
+    {
+        return vendor == "Valve" && product == "Fremont";
+    }
+
     // The device from what the machine says: arm64 Linux is the Frame,
     // otherwise Linux with the Deck's DMI names is a Deck.
     inline SteamDevice SteamDeviceFrom(bool linuxArm64, std::string_view vendor, std::string_view product)

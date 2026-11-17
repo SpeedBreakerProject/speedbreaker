@@ -2,10 +2,14 @@
 #include <stdafx.h>
 #include "backoff.h"
 #include "host_cpu.h"
+#include "efficiency.h"
 
 #include <atomic>
+#include <bit>
+#include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
+#include <mutex>
 #include <thread>
 
 #if defined(__APPLE__)
@@ -124,7 +128,15 @@ namespace backoff
 #endif
         auto end = Clock::now();
         bool late = end - start > time + kLate;
-        if (late)
+        // The last 8 sleeps' lateness. With efficiency's kLateGuard (item #71)
+        // it takes 2 late sleeps of the last 8 to start the second of yields:
+        // a stretched timer (App Nap's ~10 ms) makes every sleep late, so that
+        // still starts it on the second one, while a thread preempted once
+        // (an iPhone at nominal: one sleep in about 50 thousand ends 2-7 ms
+        // late) no longer spins a core for a whole second each time.
+        thread_local uint8_t lateBits = 0;
+        lateBits = uint8_t((lateBits << 1) | (late ? 1 : 0));
+        if (late && (!efficiency::On(efficiency::kLateGuard) || std::popcount(lateBits) >= 2))
             yieldUntil = end + kYieldAfterLate;
         if (log)
         {
@@ -156,7 +168,10 @@ namespace backoff
             if (now - lastZero[kind] > std::chrono::microseconds(300))
                 firstZero[kind] = now;
             lastZero[kind] = now;
-            if (now - firstZero[kind] > std::chrono::milliseconds(1))
+            // 1 ms of yields, 0.25 ms with efficiency's kSleep0 (item #71).
+            const auto window = kind == kSleep0 && efficiency::On(efficiency::kSleep0) ? std::chrono::microseconds(250)
+                                                                                         : std::chrono::microseconds(1000);
+            if (now - firstZero[kind] > window)
             {
                 Sleep(kind, std::chrono::microseconds(100));
                 lastZero[kind] = Clock::now();
@@ -182,5 +197,66 @@ namespace backoff
             s_counters[kYield].calls.fetch_add(1, std::memory_order_relaxed);
             MaybeLog(Clock::now());
         }
+    }
+
+    namespace
+    {
+        // NoteGpuProgress's count, and the GPU waits waiting for it to move.
+        // A waiter counts itself in before it looks under the mutex, and a
+        // notifier adds before it looks for waiters (both sequentially
+        // consistent), so a step is never missed: either the waiter sees the
+        // new count, or the notifier sees the waiter and notifies under the
+        // mutex, which the waiter only releases inside its wait.
+        std::atomic<uint64_t> s_gpuProgress{ 0 };
+        std::atomic<int> s_gpuWaiters{ 0 };
+        std::mutex s_gpuMutex;
+        std::condition_variable s_gpuCv;
+    }
+
+    void NoteGpuProgress()
+    {
+        s_gpuProgress.fetch_add(1);
+        if (s_gpuWaiters.load() > 0)
+        {
+            std::lock_guard lock(s_gpuMutex);
+            s_gpuCv.notify_all();
+        }
+    }
+
+    void GpuWaitPoll(std::chrono::microseconds time)
+    {
+        if (!efficiency::On(efficiency::kGpuWait))
+        {
+            Sleep(kGpuWait, time);
+            return;
+        }
+        // The count at this thread's last poll: progress since then means
+        // what the game polls may have changed: let it look first.
+        thread_local uint64_t seen = ~0ull;
+        uint64_t now = s_gpuProgress.load(std::memory_order_acquire);
+        if (now == seen)
+        {
+            const auto start = Clock::now();
+            s_gpuWaiters.fetch_add(1);
+            {
+                std::unique_lock lock(s_gpuMutex);
+                s_gpuCv.wait_for(lock, std::chrono::milliseconds(1), [&] { return s_gpuProgress.load(std::memory_order_acquire) != seen; });
+            }
+            s_gpuWaiters.fetch_sub(1);
+            now = s_gpuProgress.load(std::memory_order_acquire);
+            if (LogEnabled())
+            {
+                NoteThread();
+                Counters& c = s_counters[kGpuWait];
+                uint64_t ns = uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - start).count());
+                c.sleeps.fetch_add(1, std::memory_order_relaxed);
+                c.sleptNs.fetch_add(ns, std::memory_order_relaxed);
+                uint64_t max = c.maxNs.load(std::memory_order_relaxed);
+                while (ns > max && !c.maxNs.compare_exchange_weak(max, ns, std::memory_order_relaxed))
+                {
+                }
+            }
+        }
+        seen = now;
     }
 }

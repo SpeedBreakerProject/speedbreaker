@@ -29,6 +29,8 @@
 #include <string>
 #include <vector>
 
+struct VkCommandBuffer_T;  // (VkCommandBuffer)
+
 namespace gpu::renderer
 {
     // `regs` is the command processor's register file (host order). Returns
@@ -59,6 +61,21 @@ namespace gpu::renderer
 
     // Submit recorded work and wait until the GPU has finished everything.
     void Flush();
+
+    // VK_ERROR_DEVICE_LOST seen anywhere (`where`: the call and the thread):
+    // logs where the GPU was (the submissions in flight; with GPU markers,
+    // the step it had finished and the one it had begun; the driver's
+    // checkpoints and fault description where it has them), then ends the
+    // game with a crash report. Once: another thread that meets the lost
+    // device waits for the first. A lost device never draws again.
+    [[noreturn]] void ReportDeviceLost(const char* where);
+    // NFSMW_GPU_MARKERS (gpu/gpu_markers.h): the presenter's command buffer
+    // for a frame is a step too: `begin` first in it, then (not `begin`) last.
+    // The presenter's thread; nothing without markers.
+    void MarkPresent(VkCommandBuffer_T* cmd, bool begin, const char* what);
+    // The hang report's GPU lines: the submissions in flight (each fence's
+    // state too) and, with GPU markers, where the GPU is. Any thread.
+    std::string DescribeGpu();
 
     // A CPU-visible effect of the command stream (a fence or memory write, the
     // read pointer): runs on the completion thread once the GPU has finished

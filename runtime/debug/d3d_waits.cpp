@@ -22,9 +22,11 @@ namespace
     // processor, and on the Steam Machine's CPU (two fast cores, four slow
     // ones: see hostcpu::ReserveFastCore) the scheduler kept the spinning
     // thread on a fast core. A wait still spins for its first 20 us, so short
-    // waits end on time; after that each poll sleeps 50 us (see backoff.h,
-    // which also covers macOS's stretched timers). NFSMW_GPU_WAIT_BACKOFF=0
-    // spins throughout.
+    // waits end on time; after that each poll waits for the command
+    // processor's next step, at most 1 ms (item #71; with
+    // NFSMW_EFFICIENCY=0 it sleeps 50 us as before: see backoff.h, which
+    // also covers macOS's stretched timers). NFSMW_GPU_WAIT_BACKOFF=0 spins
+    // throughout.
     void BackOff()
     {
         backoff::CountGpuWaitPoll();
@@ -38,7 +40,7 @@ namespace
         lastPoll = now;
         if (now - waitStart < std::chrono::microseconds(20))
             return;
-        backoff::Sleep(backoff::kGpuWait, std::chrono::microseconds(50));
+        backoff::GpuWaitPoll(std::chrono::microseconds(50));
         lastPoll = Clock::now();
     }
 }

@@ -6,11 +6,14 @@
 #include <cpu/guest_thread.h>
 #include <cpu/host_cpu.h>
 #include <cpu/guest_time.h>
+#include <cpu/backoff.h>
 #include <debug/timeline.h>
 #include <unordered_set>
 #include "block_ranges.h"
 #include "covers.h"
+#include "cube_aa.h"
 #include "edge_bars.h"
+#include "gpu_markers.h"
 #include "memory_plan.h"
 #include "pipeline_cache_header.h"
 #include "shader_translator.h"
@@ -23,6 +26,7 @@
 #include "sharp_ui.h"
 #include "anisotropy_auto.h"
 #include "shadow_auto.h"
+#include "shadow_ab.h"
 #include "split_views.h"
 #include "xenos/registers.h"
 
@@ -136,6 +140,14 @@ namespace gpu::renderer
         const uint32_t* s_regs = nullptr;
         PFN_vkCmdPushDescriptorSetKHR s_pushDescriptorSet = nullptr;
         Stats s_stats{};
+        // Every Apple build runs on an Apple GPU (Metal through MoltenVK; the Mac
+        // app is arm64 only): gpu::HostScaledResolves and gpu::AutoShadowScale
+        // take it.
+#ifdef __APPLE__
+        constexpr bool kAppleGpu = true;
+#else
+        constexpr bool kAppleGpu = false;
+#endif
         // NFSMW_GPU_EXP bitmask, for performance experiments: 1 skip draw
         // calls, 2 skip resolve copies, 4 skip texture loads, 8 bind 1x1
         // placeholders instead of textures.
@@ -217,11 +229,17 @@ namespace gpu::renderer
             return t;
         }
 
+        // VK_ERROR_DEVICE_LOST anywhere: the report on where the GPU was, then
+        // the end (below, after the completion thread).
+        [[noreturn]] void DeviceLost(const char* where);
+
         void Check(VkResult r, const char* what)
         {
             if (r != VK_SUCCESS)
             {
                 fprintf(stderr, "[renderer] %s failed: %d\n", what, int(r));
+                if (r == VK_ERROR_DEVICE_LOST)
+                    DeviceLost(what);
                 abort();
             }
         }
@@ -598,7 +616,8 @@ namespace gpu::renderer
         // Image (nothing kept) instead of aborting.
         Image CreateImage(VkImageType type, VkFormat format, VkExtent3D extent, uint32_t layers,
             VkImageUsageFlags usage, VkImageViewType viewType, VkImageAspectFlags aspect, VkImageCreateFlags flags = 0,
-            uint32_t levels = 1, const void* imageNext = nullptr, const void* viewNext = nullptr, bool fallible = false)
+            uint32_t levels = 1, const void* imageNext = nullptr, const void* viewNext = nullptr, bool fallible = false,
+            VkSampleCountFlagBits samples = VK_SAMPLE_COUNT_1_BIT)
         {
             HitchTimer hitchTimer(s_hitch.imageMs);
             s_hitch.images++;
@@ -612,7 +631,7 @@ namespace gpu::renderer
             ici.extent = extent;
             ici.mipLevels = levels;
             ici.arrayLayers = layers;
-            ici.samples = VK_SAMPLE_COUNT_1_BIT;
+            ici.samples = samples;
             ici.tiling = VK_IMAGE_TILING_OPTIMAL;  // (image memory blocks hold nothing linear)
             ici.usage = usage;
             ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -746,6 +765,13 @@ namespace gpu::renderer
             uint64_t number = 0;           // s_submissionCounter when submitted (write-watch guard)
             size_t unsignaled = 0;         // first write not yet covered by an event
             std::chrono::steady_clock::time_point submitted;
+            // For the device-loss and hang reports: the call site that
+            // submitted it (SubmitRecorded's `why`), the game frame, its
+            // draws, and its first and last GPU marker steps (0: none).
+            int why = 0;
+            uint64_t frame = 0;
+            uint32_t draws = 0;
+            uint32_t firstStep = 0, lastStep = 0;
             // NFSMW_OCCLUSION=1 (else always empty): the segments recorded
             // here, harvested at completion, then the END reports, in order.
             std::vector<ZpdSegment> zpdSegments;
@@ -773,6 +799,7 @@ namespace gpu::renderer
             if (how)
                 timeline::Mark(timeline::WriteAtComplete);
             write.fn();
+            backoff::NoteGpuProgress();  // a D3D GPU wait may be polling for it
         }
         // GPU busy time: sum over submissions of the time from max(submit,
         // previous completion) to completion (completion-thread wake-up).
@@ -815,6 +842,175 @@ namespace gpu::renderer
         // NFSMW_LOG_LATENCY: time with nothing in flight (under s_submitMutex).
         std::chrono::steady_clock::time_point s_emptySince = std::chrono::steady_clock::now();
         double s_emptyUs = 0;
+
+        // GPU markers (NFSMW_GPU_MARKERS, the presenter decides the level:
+        // VulkanContext::gpuMarkers; gpu/gpu_markers.h; GitHub #57, #99,
+        // #101): each step of the GPU's work gets a number, which the GPU
+        // writes into host-visible memory as the step begins (vkCmdFillBuffer,
+        // its own slot) and once the barrier after it has passed (the done
+        // word), so that after a device loss (DeviceLost) or in a hang report
+        // the log names the step the GPU had finished and the one it had
+        // begun. With VK_NV_device_diagnostic_checkpoints each step is also a
+        // checkpoint (level 2: each draw too), which the driver reports per
+        // pipeline stage after the loss. Fills are transfer commands, outside
+        // passes only: a pass is one step, begun before it starts and done at
+        // its end's barrier. Steps come from the command processor and the
+        // presenter (MarkPresent): their numbers and the record are shared.
+        struct GpuMarkers
+        {
+            uint32_t level = 0;  // constant after Initialize
+            VkBuffer buffer = VK_NULL_HANDLE;
+            VkDeviceMemory memory = VK_NULL_HANDLE;
+            const volatile uint32_t* words = nullptr;  // gpu::markers::kWords
+            std::atomic<uint32_t> latest{ 0 };          // the newest step recorded (any thread)
+            std::mutex mutex;                           // the rings' writes (the CP and the presenter)
+            gpu::markers::StepRing steps;
+            gpu::markers::DrawRing draws;
+            gpu::markers::Step* pass = nullptr;         // CP: the open pass's record (its draws), or nullptr
+            uint32_t open = 0, marked = 0;              // CP: the newest step begun, and marked done
+            uint32_t drawInStep = 0, drawSeq = 0;       // CP
+            PFN_vkCmdSetCheckpointNV setCheckpoint = nullptr;
+            PFN_vkGetQueueCheckpointDataNV getCheckpoints = nullptr;
+            PFN_vkGetDeviceFaultInfoEXT getFaultInfo = nullptr;
+            // The completion thread: the done word when it last changed, and when.
+            std::atomic<uint32_t> seenDone{ 0 };
+            std::atomic<int64_t> seenDoneNs{ 0 };
+        };
+        GpuMarkers s_markers;
+        // NFSMW_GPU_MARKERS_EXP bitmask, to measure what the markers cost: 1
+        // write them with vkCmdUpdateBuffer instead of vkCmdFillBuffer, 2 no
+        // begun writes (the done word only), 4 no checkpoints.
+        const uint32_t s_markerExp = [] { const char* v = std::getenv("NFSMW_GPU_MARKERS_EXP"); return v ? uint32_t(std::atoi(v)) : 0u; }();
+
+        // One marker word written from the GPU (outside a pass).
+        void MarkerWrite(VkCommandBuffer cmd, uint32_t word, uint32_t value)
+        {
+            if (s_markerExp & 1)
+                vkCmdUpdateBuffer(cmd, s_markers.buffer, VkDeviceSize(word) * 4, 4, &value);
+            else
+                vkCmdFillBuffer(cmd, s_markers.buffer, VkDeviceSize(word) * 4, 4, value);
+        }
+
+        int64_t SteadyNs() { return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
+
+        // A new step's number and record (any thread; `submission` and
+        // `frame`: the command processor's, else 0).
+        uint32_t NewStep(gpu::markers::Kind kind, uint64_t submission, uint64_t frame, const char* fmt, va_list args)
+        {
+            std::lock_guard lock(s_markers.mutex);
+            uint32_t id = gpu::markers::NextId(s_markers.latest.load(std::memory_order_relaxed));
+            gpu::markers::Step& s = s_markers.steps.Put(id);
+            s.id = id;
+            s.kind = kind;
+            s.submission = submission;
+            s.frame = frame;
+            s.at = report::SessionSeconds();
+            vsnprintf(s.text, sizeof(s.text), fmt, args);
+            s_markers.latest.store(id, std::memory_order_release);
+            return id;
+        }
+
+        // Command processor, outside a pass, recording: a step begins here.
+        __attribute__((format(printf, 2, 3))) uint32_t StepBegin(gpu::markers::Kind kind, const char* fmt, ...)
+        {
+            if (!s_markers.level || !s_recording)
+                return 0;
+            va_list args;
+            va_start(args, fmt);
+            uint32_t id = NewStep(kind, s_submissionCounter, s_frame, fmt, args);
+            va_end(args);
+            if (!(s_markerExp & 2))
+                MarkerWrite(s_cmd, gpu::markers::BegunWord(id), id);
+            if (s_markers.setCheckpoint)
+                s_markers.setCheckpoint(s_cmd, reinterpret_cast<void*>(uintptr_t(gpu::markers::Checkpoint(id, 0))));
+            s_markers.open = id;
+            s_markers.drawInStep = 0;
+            s_markers.pass = nullptr;
+            return id;
+        }
+
+        // Command processor, right after a barrier that waits for all the
+        // work before it (every stage, transfers included): the newest step
+        // begun is done.
+        void StepDone()
+        {
+            if (!s_markers.level || s_markers.open == s_markers.marked || !s_recording)
+                return;
+            MarkerWrite(s_cmd, gpu::markers::kDoneWord, s_markers.open);
+            s_markers.marked = s_markers.open;
+        }
+
+        // Command processor, in a pass, just before a draw is recorded.
+        void StepDraw(uint64_t vs, uint64_t ps, uint32_t count, uint32_t primitive)
+        {
+            if (gpu::markers::Step* s = s_markers.pass)
+            {
+                if (!s->draws++)
+                    s->firstVs = vs, s->firstPs = ps;
+                s->lastVs = vs;
+                s->lastPs = ps;
+            }
+            if (s_markers.level < 2 || !s_markers.setCheckpoint)
+                return;
+            uint32_t index = ++s_markers.drawInStep;
+            {
+                std::lock_guard lock(s_markers.mutex);
+                uint32_t seq = s_markers.drawSeq = s_markers.drawSeq + 1 ? s_markers.drawSeq + 1 : 1;
+                gpu::markers::Draw& d = s_markers.draws.Put(seq);
+                d = { seq, s_markers.open, index, vs, ps, count, primitive };
+            }
+            s_markers.setCheckpoint(s_cmd, reinterpret_cast<void*>(uintptr_t(gpu::markers::Checkpoint(s_markers.open, index))));
+        }
+
+        // Initialize: the marker buffer (host-visible, coherent: the CPU reads
+        // the GPU's writes without a flush, also once the device is lost).
+        // The level is set last: until then no step is marked.
+        void CreateGpuMarkers()
+        {
+            const uint32_t level = s_vk->gpuMarkers;
+            if (!level)
+                return;
+            VkBufferCreateInfo bci{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+            bci.size = VkDeviceSize(gpu::markers::kWords) * 4;
+            bci.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+            bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+            const VkMemoryPropertyFlags want = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+            VkMemoryRequirements req{};
+            uint32_t type = 0;
+            void* mapped = nullptr;
+            bool ok = vkCreateBuffer(s_dev, &bci, nullptr, &s_markers.buffer) == VK_SUCCESS;
+            if (ok)
+            {
+                vkGetBufferMemoryRequirements(s_dev, s_markers.buffer, &req);
+                type = FindMemoryType(req.memoryTypeBits, want);
+                ok = (s_memProps.memoryTypes[type].propertyFlags & want) == want;
+            }
+            VkMemoryAllocateInfo mai{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+            mai.allocationSize = req.size;
+            mai.memoryTypeIndex = type;
+            ok = ok && vkAllocateMemory(s_dev, &mai, nullptr, &s_markers.memory) == VK_SUCCESS &&
+                vkBindBufferMemory(s_dev, s_markers.buffer, s_markers.memory, 0) == VK_SUCCESS &&
+                vkMapMemory(s_dev, s_markers.memory, 0, VK_WHOLE_SIZE, 0, &mapped) == VK_SUCCESS;
+            if (!ok)
+            {
+                fprintf(stderr, "[renderer] GPU markers (NFSMW_GPU_MARKERS=%u): no host-visible coherent memory for them: off\n", level);
+                return;
+            }
+            memset(mapped, 0, size_t(bci.size));
+            s_markers.words = static_cast<const volatile uint32_t*>(mapped);
+            s_markers.setCheckpoint = (s_markerExp & 4) ? nullptr : s_vk->cmdSetCheckpoint;
+            s_markers.getCheckpoints = (s_markerExp & 4) ? nullptr : s_vk->getQueueCheckpointData;
+            s_markers.getFaultInfo = s_vk->getDeviceFaultInfo;
+            s_markers.level = level;
+            fprintf(stderr, "[renderer] GPU markers %u (NFSMW_GPU_MARKERS): each pass, resolve, upload, copy and clear writes its number from "
+                "the GPU (memory type %u, flags %X%s); checkpoints %s; device fault info %s. After a device loss or in a hang report the log "
+                "names the step the GPU had finished and the one it had begun.\n", level, type, unsigned(s_memProps.memoryTypes[type].propertyFlags),
+                s_markerExp ? std::format("; NFSMW_GPU_MARKERS_EXP={}: {}{}", s_markerExp, (s_markerExp & 1) ? "vkCmdUpdateBuffer" : "vkCmdFillBuffer",
+                    (s_markerExp & 2) ? ", done words only" : "").c_str() : "",
+                !s_markers.setCheckpoint ? "no (no VK_NV_device_diagnostic_checkpoints)" : level >= 2 ? "at each step and draw"
+                    : "at each step (NFSMW_GPU_MARKERS=2: each draw too)",
+                s_markers.getFaultInfo ? "yes (VK_EXT_device_fault)" : "no (no VK_EXT_device_fault)");
+        }
 
         // Occlusion queries counted on the GPU (NFSMW_OCCLUSION=1; the
         // presenter decides: VulkanContext::occlusionCounting). Command
@@ -977,6 +1173,10 @@ namespace gpu::renderer
             s_recording = true;
             s_stateEpoch++;
             s_recordStart = std::chrono::steady_clock::now();
+            sub.frame = s_frame;
+            sub.draws = 0;
+            sub.firstStep = gpu::markers::NextId(s_markers.latest.load(std::memory_order_relaxed));
+            sub.lastStep = 0;
             if (s_timestamps)
             {
                 vkCmdResetQueryPool(s_cmd, s_timestamps, s_slot * 2, 2);
@@ -1023,6 +1223,10 @@ namespace gpu::renderer
             Check(vkEndCommandBuffer(s_cmd), "vkEndCommandBuffer");
             Submission& sub = s_submissions[s_slot];
             sub.number = s_submissionCounter;
+            sub.why = why;
+            sub.lastStep = s_markers.open && gpu::markers::Behind(s_markers.open, sub.firstStep) != UINT32_MAX ? s_markers.open : 0;
+            if (!sub.lastStep)
+                sub.firstStep = 0;
             VkSubmitInfo si{ VK_STRUCTURE_TYPE_SUBMIT_INFO };
             si.commandBufferCount = 1;
             si.pCommandBuffers = &s_cmd;
@@ -1186,6 +1390,185 @@ namespace gpu::renderer
         }
 #endif
 
+        // NFSMW_TEST_DEVICE_LOST=<s>: from <s> seconds into the session the
+        // completion thread takes its fence for lost (VK_ERROR_DEVICE_LOST),
+        // so the device-loss report and its end can be checked without
+        // making a GPU stop (the report's markers read what the GPU really
+        // did at that moment).
+        bool TestDeviceLost()
+        {
+            static const double at = [] { const char* v = std::getenv("NFSMW_TEST_DEVICE_LOST"); return v ? std::atof(v) : 0.0; }();
+            return at > 0 && report::SessionSeconds() >= at;
+        }
+
+        // The completion thread: when the GPU's done marker last moved.
+        void NoteMarkerProgress()
+        {
+            if (!s_markers.words)
+                return;
+            uint32_t d = s_markers.words[gpu::markers::kDoneWord];
+            if (d != s_markers.seenDone.load(std::memory_order_relaxed))
+            {
+                s_markers.seenDone.store(d, std::memory_order_relaxed);
+                s_markers.seenDoneNs.store(SteadyNs(), std::memory_order_relaxed);
+            }
+        }
+
+        // A mutex for a report written while the game may be stuck: try for
+        // up to `ms`, and say so if it stays held (the report goes on without
+        // what it guards, or reads it unguarded where that is harmless).
+        template<typename M>
+        bool TryLockFor(M& m, int ms)
+        {
+            for (int i = 0; i < ms; i++)
+            {
+                if (m.try_lock())
+                    return true;
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+            return false;
+        }
+
+        const char* SubmitWhyName(int why)
+        {
+            static const char* const kNames[10] = { "?", "the upload ring full", "a Submit", "SubmitIfIdle", "SubmitIfDue", "a Flush",
+                "a write to an idle GPU", "a present", "a draw to a starving GPU", "a resolve, upload or wait" };
+            return why >= 0 && why < 10 ? kNames[why] : "?";
+        }
+
+        // The submissions in flight, oldest first, and the last one finished:
+        // lines for the device-loss and hang reports. `fences`: also each
+        // one's fence (vkGetFenceStatus, which never blocks).
+        std::vector<std::string> DescribeInFlight(const char* prefix, bool fences)
+        {
+            std::vector<std::string> out;
+            if (!TryLockFor(s_submitMutex, 200))
+            {
+                out.push_back(std::string(prefix) + "(the submission list is locked: not read)");
+                return out;
+            }
+            std::lock_guard lock(s_submitMutex, std::adopt_lock);
+            auto now = std::chrono::steady_clock::now();
+            out.push_back(std::format("{}submissions in flight: {} (the newest recorded: {}, the last finished: {})", prefix, s_inFlight.size(),
+                s_submissionCounter - 1, s_completedSubmission));
+            for (uint32_t slot : s_inFlight)
+            {
+                const Submission& sub = s_submissions[slot];
+                std::string line = std::format("{}  #{} (slot {}): frame {}, {} draws, submitted {:.2f} s ago by {}", prefix, sub.number, slot,
+                    sub.frame, sub.draws, std::chrono::duration<double>(now - sub.submitted).count(), SubmitWhyName(sub.why));
+                if (sub.lastStep)
+                    line += std::format(", steps {}-{}", sub.firstStep, sub.lastStep);
+                if (fences)
+                {
+                    VkResult r = vkGetFenceStatus(s_dev, sub.fence);
+                    line += r == VK_SUCCESS ? ", its fence signalled" : r == VK_NOT_READY ? ", its fence not signalled"
+                        : r == VK_ERROR_DEVICE_LOST ? ", its fence: device lost" : std::format(", its fence: {}", int(r));
+                }
+                out.push_back(line);
+            }
+            return out;
+        }
+
+        // The GPU markers' report lines (prefix on each), or why there are none.
+        std::vector<std::string> DescribeMarkers(const char* prefix)
+        {
+            std::vector<std::string> out;
+            if (!s_markers.words)
+            {
+                out.push_back(std::string(prefix) + "GPU markers off (NFSMW_GPU_MARKERS=1 names the step the GPU stopped in)");
+                return out;
+            }
+            const gpu::markers::GpuState g = gpu::markers::Read(s_markers.words, s_markers.latest.load(std::memory_order_acquire));
+            out = gpu::markers::Report(s_markers.steps, g, prefix);
+            if (int64_t at = s_markers.seenDoneNs.load(std::memory_order_relaxed))
+                out.push_back(std::format("{}the done marker last moved {:.2f} s before this (to step {}, as the completion thread saw it)", prefix,
+                    double(SteadyNs() - at) / 1e9, s_markers.seenDone.load(std::memory_order_relaxed)));
+            return out;
+        }
+
+        // After a loss: the driver's checkpoints and its fault description,
+        // where the device has them.
+        std::vector<std::string> DescribeLossDetails(const char* prefix)
+        {
+            std::vector<std::string> out;
+            if (s_markers.getCheckpoints)
+            {
+                const bool locked = TryLockFor(*s_vk->queueMutex, 200);
+                uint32_t n = 0;
+                s_markers.getCheckpoints(s_vk->queue, &n, nullptr);
+                std::vector<VkCheckpointDataNV> data(std::min<uint32_t>(n, 32), { VK_STRUCTURE_TYPE_CHECKPOINT_DATA_NV });
+                n = uint32_t(data.size());
+                if (n)
+                    s_markers.getCheckpoints(s_vk->queue, &n, data.data());
+                if (locked)
+                    s_vk->queueMutex->unlock();
+                out.push_back(std::format("{}checkpoints (VK_NV_device_diagnostic_checkpoints): {}{}", prefix, n, n ? "" : ", none reported"));
+                for (uint32_t i = 0; i < n; i++)
+                {
+                    char stage[48];
+                    snprintf(stage, sizeof(stage), "stage 0x%x", unsigned(data[i].stage));
+                    const char* name = data[i].stage == VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT ? "top of pipe"
+                        : data[i].stage == VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT ? "bottom of pipe" : stage;
+                    out.push_back(std::string(prefix) + "  " + gpu::markers::DescribeCheckpoint(name,
+                        uint64_t(reinterpret_cast<uintptr_t>(data[i].pCheckpointMarker)), s_markers.steps, s_markers.draws));
+                }
+            }
+            if (s_markers.getFaultInfo)
+            {
+                VkDeviceFaultCountsEXT counts{ VK_STRUCTURE_TYPE_DEVICE_FAULT_COUNTS_EXT };
+                VkResult r = s_markers.getFaultInfo(s_dev, &counts, nullptr);
+                std::vector<VkDeviceFaultAddressInfoEXT> addresses(std::min<uint32_t>(counts.addressInfoCount, 16));
+                std::vector<VkDeviceFaultVendorInfoEXT> vendor(std::min<uint32_t>(counts.vendorInfoCount, 16));
+                counts.addressInfoCount = uint32_t(addresses.size());
+                counts.vendorInfoCount = uint32_t(vendor.size());
+                counts.vendorBinarySize = 0;
+                VkDeviceFaultInfoEXT info{ VK_STRUCTURE_TYPE_DEVICE_FAULT_INFO_EXT };
+                info.pAddressInfos = addresses.empty() ? nullptr : addresses.data();
+                info.pVendorInfos = vendor.empty() ? nullptr : vendor.data();
+                if (r == VK_SUCCESS || r == VK_INCOMPLETE)
+                    r = s_markers.getFaultInfo(s_dev, &counts, &info);
+                out.push_back(std::format("{}device fault (VK_EXT_device_fault): {}{}", prefix, r == VK_SUCCESS || r == VK_INCOMPLETE ? info.description : "",
+                    r == VK_SUCCESS || r == VK_INCOMPLETE ? "" : std::format("not read ({})", int(r)).c_str()));
+                for (uint32_t i = 0; i < counts.addressInfoCount && (r == VK_SUCCESS || r == VK_INCOMPLETE); i++)
+                    out.push_back(std::format("{}  address: type {}, 0x{:x} (+-0x{:x})", prefix, int(addresses[i].addressType),
+                        addresses[i].reportedAddress, addresses[i].addressPrecision));
+                for (uint32_t i = 0; i < counts.vendorInfoCount && (r == VK_SUCCESS || r == VK_INCOMPLETE); i++)
+                    out.push_back(std::format("{}  vendor: {} (code 0x{:x}, data 0x{:x})", prefix, vendor[i].description,
+                        vendor[i].vendorFaultCode, vendor[i].vendorFaultData));
+            }
+            return out;
+        }
+
+        std::atomic<bool> s_deviceLost{ false };
+
+        [[noreturn]] void DeviceLost(const char* where)
+        {
+            // One report; any other thread that meets the lost device waits
+            // here for it (the process ends with the first).
+            if (s_deviceLost.exchange(true))
+                while (true)
+                    std::this_thread::sleep_for(std::chrono::seconds(1));
+            fprintf(stderr, "[gpu] DEVICE LOST: VK_ERROR_DEVICE_LOST from %s, %.2f s into the session, game frame %llu. The GPU stopped "
+                "answering (Windows resets a GPU that stops for 2 s) or the driver gave up on it; nothing can be drawn after this.\n",
+                where, report::SessionSeconds(), (unsigned long long)s_frame);
+            // (A reset may leave the lost work's fences signalled: the ThinkPad's
+            // first loss, 2026-11-14, had none in flight at the next submit. The
+            // markers say how far the GPU really got.)
+            for (const std::string& l : DescribeInFlight("[gpu]   ", false))
+                fprintf(stderr, "%s\n", l.c_str());
+            for (const std::string& l : DescribeMarkers("[gpu]   "))
+                fprintf(stderr, "%s\n", l.c_str());
+            for (const std::string& l : DescribeLossDetails("[gpu]   "))
+                fprintf(stderr, "%s\n", l.c_str());
+#ifdef _WIN32
+            fprintf(stderr, "[gpu] Windows records the reset itself (a LiveKernelEvent) a few seconds from now: the next start's log names "
+                "its fault bucket on its \"GPU resets Windows recorded\" line.\n");
+#endif
+            fprintf(stderr, "[gpu] the game ends here, with a crash report (it holds this log's last lines).\n");
+            report::FlushLog();
+            abort();
+        }
+
         void CompletionThread()
         {
 #ifdef __APPLE__
@@ -1208,15 +1591,27 @@ namespace gpu::renderer
                 size_t done = 0;
                 while (true)
                 {
-                    bool finished = vkGetFenceStatus(s_dev, sub.fence) == VK_SUCCESS;
+                    // A lost device answers VK_ERROR_DEVICE_LOST here for
+                    // good: before v0.2.6 this loop took that for "not yet"
+                    // and asked again forever, while the command processor
+                    // waited for this submission (GitHub #101: a frozen race,
+                    // nfsmw-gpu-done inside the driver, never a crash report).
+                    const VkResult status = TestDeviceLost() ? VK_ERROR_DEVICE_LOST : vkGetFenceStatus(s_dev, sub.fence);
+                    if (status == VK_ERROR_DEVICE_LOST)
+                        DeviceLost(TestDeviceLost() ? "NFSMW_TEST_DEVICE_LOST (the completion thread's vkGetFenceStatus)"
+                                                    : "vkGetFenceStatus (the completion thread)");
+                    bool finished = status == VK_SUCCESS;
                     bool watching = false;
+                    VkResult event = VK_EVENT_SET;
                     {
                         std::lock_guard lock(s_submitMutex);
                         while (!finished && done < sub.writes.size() && sub.writes[done].event &&
-                            vkGetEventStatus(s_dev, sub.writes[done].event) == VK_EVENT_SET)
+                            (event = vkGetEventStatus(s_dev, sub.writes[done].event)) == VK_EVENT_SET)
                             { timeline::Mark(timeline::WriteByEvent); RunWrite(sub.writes[done++], 0); }
                         watching = done < sub.writes.size() && sub.writes[done].event;
                     }
+                    if (event == VK_ERROR_DEVICE_LOST)
+                        DeviceLost("vkGetEventStatus (the completion thread)");
                     if (finished)
                         break;
                     if (watching)
@@ -1228,8 +1623,12 @@ namespace gpu::renderer
                         VkResult r = vkWaitForFences(s_dev, 1, &sub.fence, VK_TRUE, 1'000'000);
                         if (r == VK_SUCCESS)
                             break;
+                        if (r == VK_ERROR_DEVICE_LOST)
+                            DeviceLost("vkWaitForFences (the completion thread)");
+                        NoteMarkerProgress();
                     }
                 }
+                NoteMarkerProgress();
                 auto now = std::chrono::steady_clock::now();
                 {
                     // NFSMW_LOG_LATENCY=1: submit -> completion-wake latency.
@@ -1422,6 +1821,7 @@ namespace gpu::renderer
             mb.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
             vkCmdPipelineBarrier(s_cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
                 0, 1, &mb, 0, nullptr, 0, nullptr);
+            StepDone();
             s_vertexPending.clear();
             s_vertexPendingLo = UINT32_MAX;
             s_vertexPendingHi = 0;
@@ -1431,17 +1831,26 @@ namespace gpu::renderer
 
         // `src` stages' work (and, in Vulkan, everything logically earlier)
         // -> every stage after but the vertex ones: on MoltenVK nothing waits
-        // before a vertex stage. Outside rendering only.
+        // before a vertex stage. Outside rendering only. With GPU markers the
+        // source takes transfers too, so the done marker after it follows
+        // the one before (they are transfers): only the marker writes are
+        // transfers there that the barrier would not wait for already.
         void NarrowBarrier(VkPipelineStageFlags src, VkAccessFlags srcAccess)
         {
             VkMemoryBarrier mb{ VK_STRUCTURE_TYPE_MEMORY_BARRIER };
             mb.srcAccessMask = srcAccess;
             mb.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+            if (s_markers.level)
+            {
+                src |= VK_PIPELINE_STAGE_TRANSFER_BIT;
+                mb.srcAccessMask |= VK_ACCESS_TRANSFER_WRITE_BIT;
+            }
             vkCmdPipelineBarrier(s_cmd, src,
                 VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
                     VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
                     VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
                 0, 1, &mb, 0, nullptr, 0, nullptr);
+            StepDone();
         }
 
         // At a pass's end. Its attachment writes go before what reads or
@@ -1506,8 +1915,15 @@ namespace gpu::renderer
             VkMemoryBarrier mb{ VK_STRUCTURE_TYPE_MEMORY_BARRIER };
             mb.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
             mb.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
-            vkCmdPipelineBarrier(s_cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
-                0, 1, &mb, 0, nullptr, 0, nullptr);
+            // (With GPU markers transfers too: see NarrowBarrier.)
+            VkPipelineStageFlags src = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+            if (s_markers.level)
+            {
+                src |= VK_PIPELINE_STAGE_TRANSFER_BIT;
+                mb.srcAccessMask |= VK_ACCESS_TRANSFER_WRITE_BIT;
+            }
+            vkCmdPipelineBarrier(s_cmd, src, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &mb, 0, nullptr, 0, nullptr);
+            StepDone();
         }
 
         void ToGeneral(VkImage image, VkImageAspectFlags aspect, uint32_t layers)
@@ -2134,6 +2550,13 @@ namespace gpu::renderer
             bool blendable;
             Image image;
             VkImageView sampleView = VK_NULL_HANDLE;  // depth aspect only, for resolves
+            // NFSMW_CUBE_AA (gpu/cube_aa.h): the car's environment cube
+            // surface with a factor of its own or, with msaa, a 4-sample
+            // image the passes draw into and resolve into `image` (the
+            // colour's average; a depth target's `image` is then not kept
+            // up: nothing reads the cube's depth).
+            bool cube = false;
+            Image msImage;
             // Its image when it can be lent to a texture (a deferred shadow
             // resolve's source; image and sampleView are its): see ShadowLend.
             std::shared_ptr<PooledDepth> shared;
@@ -2157,6 +2580,17 @@ namespace gpu::renderer
             std::shared_ptr<PooledDepth> depth;
             gpu::RenderScale scale;
             uint64_t writeSequence;
+            // What the draws sampling it last read: WriteSequence of
+            // `sampledSize` bytes at its address, and the WriteEpoch() read
+            // before it (0: none yet, the epoch starts at 1). The map is
+            // 10 MB of guest pages and every draw receiving the sun's shadow
+            // looks it up; none of these lookups is kept by the texture cache
+            // (no Texture behind the view), so each one walked all its pages:
+            // 0.9 ms a frame in the city and 1.8 ms at its busiest on the
+            // Steam Deck (GitHub #90). An unchanged epoch means no page
+            // anywhere was written, as in CheckTextureEntry.
+            uint64_t sampledSequence = 0, sampledEpoch = 0;
+            uint32_t sampledSize = 0;
         };
         std::unordered_map<uint32_t, ShadowResolveTarget> s_shadowTargetsByResolve;
 
@@ -2285,6 +2719,17 @@ namespace gpu::renderer
         // size (the window, fullscreen, the aspect ratio setting).
         gpu::RenderScale s_renderScale;
         gpu::RenderScale s_shadowScale;
+        // NFSMW_CUBE_AA=off|ss|msaa (gpu/cube_aa.h; default ss, operator
+        // 2026-11-13): the car's environment cube surface (the mirror's
+        // picture and the car body's reflections) with the game's four
+        // samples a pixel.
+        gpu::cube_aa::Mode s_cubeAA = gpu::cube_aa::Mode::Supersample;
+        // NFSMW_CUBE_AA=alt (a test aid, as NFSMW_PASS_BARRIER=alt): off, ss
+        // and msaa in turn, a [perf] window (120 frames) each, so one run
+        // shows the same standing picture and the same scene's GPU time
+        // under all three (CubeAAAlt).
+        bool s_cubeAAAlt = false;
+        bool s_cubeAAMsaaOk = true;
         int32_t s_shadowResolutionSetting = settings::kShadowResolutionDefault;
         // Shadow Edges (gpu/shadow_auto.h ShadowEdgesSmooth): -1 until read;
         // the sun shadow receivers draw their Classic variant while
@@ -2302,25 +2747,67 @@ namespace gpu::renderer
             return !(v && v[0] == '0');
         }();
 
+        // NFSMW_SHADOW_AB (gpu/shadow_ab.h, a diagnostic, GitHub #90): the
+        // variant in force (-1: none) and each variant's GPU time.
+        struct ShadowAbState
+        {
+            bool started = false;
+            std::chrono::steady_clock::time_point start;
+            int64_t phase = -1;
+            int variant = -1;
+            uint64_t lastExecNs = 0;
+            std::vector<uint64_t> ns, frames;
+        };
+        ShadowAbState s_shadowAb;
+        const gpu::shadow_ab::Variant* ShadowAbVariant()
+        {
+            return s_shadowAb.variant < 0 ? nullptr : &gpu::shadow_ab::EnvPlan().variants[size_t(s_shadowAb.variant)];
+        }
+        // The shadow map's scale when a diagnostic forces it (NFSMW_SHADOW_AB's
+        // variant, else NFSMW_SHADOW_SCALE; gpu/shadow_ab.h), and which one
+        // did; null when Shadow Resolution decides, as always without them.
+        const gpu::RenderScale* ForcedShadowScale(const char** by = nullptr)
+        {
+            if (const gpu::shadow_ab::Variant* v = ShadowAbVariant(); v && v->hasScale)
+            {
+                if (by)
+                    *by = "NFSMW_SHADOW_AB";
+                return &v->scale;
+            }
+            if (by)
+                *by = "NFSMW_SHADOW_SCALE";
+            return gpu::shadow_ab::EnvScale();
+        }
+
         // The shadow map's scale for Shadow Resolution's `setting`: Auto
         // (gpu/shadow_auto.h) follows the scene's current scale, so it moves
         // with Internal Resolution (ApplyLiveSettings).
         gpu::RenderScale WantedShadowScale(int32_t setting)
         {
-            return gpu::ShadowScale(setting == settings::kShadowResolutionAuto ? gpu::AutoShadowHalves(s_renderScale, video::ThisSteamDevice()) : uint32_t(setting));
+            if (const gpu::RenderScale* forced = ForcedShadowScale())
+                return *forced;
+            return setting == settings::kShadowResolutionAuto ? gpu::AutoShadowScale(s_renderScale, kAppleGpu, video::ThisSteamDevice()) : gpu::ShadowScale(uint32_t(setting));
         }
 
-        // For the log: "2x", "Auto: 2x2 (the scene at 2x2)", or on a Steam
-        // Deck or Frame "Auto: 1x1 (Steam Deck; the scene at 2x2)".
+        // For the log: "2x2", "Auto: 2.25x1 (a 3600x1600 map; the scene at
+        // 2x2)" on a Mac ("Auto: 2x2 (a 3200x3200 map; ...)" on other GPUs),
+        // or on a Steam Deck or Frame "Auto: 1x1 (a 1600x1600 map; Steam
+        // Deck; the scene at 2x2)".
         std::string ShadowResolutionName()
         {
+            const char* by = nullptr;
+            if (ForcedShadowScale(&by))
+                return std::format("{} (a {}x{} map, {})", gpu::ScaleName(s_shadowScale), gpu::shadow_ab::MapWidth(s_shadowScale),
+                    gpu::shadow_ab::MapHeight(s_shadowScale), by);
             if (s_shadowResolutionSetting != settings::kShadowResolutionAuto)
                 return gpu::ScaleName(s_shadowScale);
             const video::SteamDevice device = video::ThisSteamDevice();
             if (device != video::SteamDevice::Other)
-                return std::format("Auto: {} ({}; the scene at {})", gpu::ScaleName(s_shadowScale),
-                    video::SteamDeviceName(device), gpu::ScaleName(s_renderScale));
-            return std::format("Auto: {} (the scene at {})", gpu::ScaleName(s_shadowScale), gpu::ScaleName(s_renderScale));
+                return std::format("Auto: {} (a {}x{} map; {}; the scene at {})", gpu::ScaleName(s_shadowScale),
+                    gpu::shadow_ab::MapWidth(s_shadowScale), gpu::shadow_ab::MapHeight(s_shadowScale), video::SteamDeviceName(device),
+                    gpu::ScaleName(s_renderScale));
+            return std::format("Auto: {} (a {}x{} map; the scene at {})", gpu::ScaleName(s_shadowScale), gpu::shadow_ab::MapWidth(s_shadowScale),
+                gpu::shadow_ab::MapHeight(s_shadowScale), gpu::ScaleName(s_renderScale));
         }
 
         // For the log: "Smooth", "Classic", "Auto: Smooth", or on a Steam
@@ -2342,10 +2829,21 @@ namespace gpu::renderer
         void UpdateShadowEdges()
         {
             const int32_t setting = settings::GetInt(settings::Id::ShadowEdges);
-            if (setting == s_shadowEdgesSetting)
+            // NFSMW_SHADOW_AB's variant (gpu/shadow_ab.h): -1 none, else Classic or Smooth.
+            static int abWas = -1;
+            const gpu::shadow_ab::Variant* variant = ShadowAbVariant();
+            const int ab = variant ? variant->smooth : -1;
+            if (setting == s_shadowEdgesSetting && ab == abWas)
                 return;
             s_shadowEdgesSetting = setting;
+            abWas = ab;
             s_shadowEdgesSmooth = gpu::ShadowEdgesSmooth(setting, video::ThisSteamDevice());
+            if (ab >= 0)
+            {
+                s_shadowEdgesSmooth = ab > 0;
+                fprintf(stderr, "[renderer] shadow edges %s (NFSMW_SHADOW_AB)\n", s_shadowEdgesSmooth ? "Smooth" : "Classic");
+                return;
+            }
             fprintf(stderr, "[renderer] shadow edges %s\n", ShadowEdgesName(setting, s_shadowEdgesSmooth).c_str());
         }
 
@@ -2490,6 +2988,47 @@ namespace gpu::renderer
                 s_scalePitchMax);
             fprintf(stderr, "[renderer] shadow resolution %s\n", ShadowResolutionName().c_str());
             UpdateShadowEdges();
+            if (const char* v = std::getenv("NFSMW_CUBE_AA"))
+            {
+                s_cubeAAAlt = !strcmp(v, "alt");
+                if (!s_cubeAAAlt && !gpu::cube_aa::ParseMode(v, s_cubeAA))
+                    fprintf(stderr, "[renderer] NFSMW_CUBE_AA=%s ignored (off, ss or msaa): %s\n", v, gpu::cube_aa::ModeName(s_cubeAA));
+            }
+            // (Set or not: the default is ss.)
+            {
+                if (s_cubeAA == gpu::cube_aa::Mode::Msaa || s_cubeAAAlt)
+                {
+                    // (The cube's own formats: every pass on it takes 4-sample attachments.)
+                    for (VkFormat format : { ColorFormat(0), VK_FORMAT_D32_SFLOAT_S8_UINT })
+                    {
+                        const bool depth = format == VK_FORMAT_D32_SFLOAT_S8_UINT;
+                        VkImageFormatProperties ifp{};
+                        VkResult r = vkGetPhysicalDeviceImageFormatProperties(s_vk->physical, format, VK_IMAGE_TYPE_2D, VK_IMAGE_TILING_OPTIMAL,
+                            depth ? VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT : VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, 0, &ifp);
+                        if (r != VK_SUCCESS || !(ifp.sampleCounts & VK_SAMPLE_COUNT_4_BIT))
+                        {
+                            fprintf(stderr, "[renderer] NFSMW_CUBE_AA=msaa: no 4-sample %s attachments here (format %d): off\n",
+                                depth ? "depth" : "colour", int(format));
+                            s_cubeAA = gpu::cube_aa::Mode::Off;
+                            s_cubeAAMsaaOk = false;
+                        }
+                    }
+                }
+                if ((s_cubeAA != gpu::cube_aa::Mode::Off || s_cubeAAAlt) && !s_untiled)
+                {
+                    fprintf(stderr, "[renderer] cube AA needs untiled rendering (NFSMW_TILING=1 is set): off\n");
+                    s_cubeAA = gpu::cube_aa::Mode::Off;
+                    s_cubeAAAlt = false;
+                }
+                if (s_cubeAAAlt)
+                    fprintf(stderr, "[renderer] cube AA alt (a test aid): off, ss%s in turn, 120 frames each\n", s_cubeAAMsaaOk ? ", msaa" : "");
+                if (s_cubeAA != gpu::cube_aa::Mode::Off)
+                    fprintf(stderr, "[renderer] cube AA %s: the pitch-%u surface under MSAA %s (%llu pixels shaded for six faces, %llu samples)\n",
+                        gpu::cube_aa::ModeName(s_cubeAA), gpu::cube_aa::kPitch,
+                        s_cubeAA == gpu::cube_aa::Mode::Msaa ? "draws into 4-sample images, resolved each pass"
+                            : "renders 2x2 host pixels a guest pixel, averaged by its resolve",
+                        (unsigned long long)gpu::cube_aa::ShadedPixels(s_cubeAA), (unsigned long long)gpu::cube_aa::StoredSamples(s_cubeAA));
+            }
         }
 
         bool ScaledPitch(uint32_t pitch)
@@ -2558,6 +3097,19 @@ namespace gpu::renderer
                 rt->scale = s_renderScale;
             if (depth && pitch == 1600)
                 rt->scale = s_shadowScale;
+            // NFSMW_CUBE_AA (gpu/cube_aa.h): the cube's surface is sized as
+            // the console's (its draws never leave the face) and gets four
+            // samples a pixel: 2x2 host pixels, or a 4-sample image below.
+            const uint32_t msaaLog2 = uint32_t(Reg<reg::RB_SURFACE_INFO>().msaa_samples);
+            rt->cube = gpu::cube_aa::Applies(s_cubeAA, pitch, wide);
+            if (rt->cube)
+            {
+                const gpu::cube_aa::Size size = gpu::cube_aa::TargetSize(base, pitch, msaaLog2, !depth && Is64bpp(format), rows);
+                rt->guestWidth = size.width;
+                rt->guestHeight = size.height;
+                if (s_cubeAA == gpu::cube_aa::Mode::Supersample)
+                    rt->scale.x = rt->scale.y = gpu::AxisScale{ gpu::cube_aa::kFactor, 1 };
+            }
             // (Rounded up: a pitch that isn't whole blocks at 1.5x still
             // has room for its last host column.)
             rt->width = rt->scale.x.Size(rt->guestWidth);
@@ -2584,11 +3136,19 @@ namespace gpu::renderer
             {
                 rt->sampleView = rt->image.view;
             }
+            const bool multisampled = rt->cube && s_cubeAA == gpu::cube_aa::Mode::Msaa;
+            if (multisampled)
+                rt->msImage = CreateImage(VK_IMAGE_TYPE_2D, rt->vkFormat, { rt->width, rt->height, 1 }, 1,
+                    depth ? VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT : VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, VK_IMAGE_VIEW_TYPE_2D, aspect, 0, 1,
+                    nullptr, nullptr, false, VK_SAMPLE_COUNT_4_BIT);
 
             // New EDRAM contents: zero.
             EndPass();
             Begin();
+            StepBegin(gpu::markers::Kind::Clear, "a new EDRAM target cleared: base %u %s format %u pitch %u, %ux%u%s", base, depth ? "depth" : "color",
+                format, pitch, rt->width, rt->height, multisampled ? " (and its 4-sample image)" : "");
             ToGeneral(rt->image.image, aspect, 1);
+            VkClearValue first{};
             VkImageSubresourceRange range{ aspect, 0, 1, 0, 1 };
             if (depth)
             {
@@ -2602,23 +3162,51 @@ namespace gpu::renderer
                 }
 #endif
                 vkCmdClearDepthStencilImage(s_cmd, rt->image.image, VK_IMAGE_LAYOUT_GENERAL, &v, 1, &range);
+                first.depthStencil = v;
             }
             else
             {
                 VkClearColorValue v{};
                 vkCmdClearColorImage(s_cmd, rt->image.image, VK_IMAGE_LAYOUT_GENERAL, &v, 1, &range);
             }
+            if (multisampled)
+            {
+                // (Every sample the same, by a pass that only clears.)
+                ToGeneral(rt->msImage.image, aspect, 1);
+                VkRenderingAttachmentInfoKHR att{ VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO_KHR };
+                att.imageView = rt->msImage.view;
+                att.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+                att.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+                att.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+                att.clearValue = first;
+                VkRenderingInfoKHR ri{ VK_STRUCTURE_TYPE_RENDERING_INFO_KHR };
+                ri.renderArea = { { 0, 0 }, { rt->width, rt->height } };
+                ri.layerCount = 1;
+                if (depth)
+                    ri.pDepthAttachment = ri.pStencilAttachment = &att;
+                else
+                {
+                    ri.colorAttachmentCount = 1;
+                    ri.pColorAttachments = &att;
+                }
+                s_vk->cmdBeginRendering(s_cmd, &ri);
+                s_vk->cmdEndRendering(s_cmd);
+            }
             FullBarrier();
 
-            fprintf(stderr, "[renderer] EDRAM target: base %u %s format %u pitch %u -> %ux%u%s\n",
+            fprintf(stderr, "[renderer] EDRAM target: base %u %s format %u pitch %u -> %ux%u%s%s\n",
                 base, depth ? "depth" : "color", format, pitch, rt->guestWidth, rt->guestHeight,
-                !rt->scale.IsOne() ? std::format(" (host {}x{})", rt->width, rt->height).c_str() : "");
+                !rt->scale.IsOne() ? std::format(" (host {}x{})", rt->width, rt->height).c_str() : "",
+                !rt->cube ? "" : std::format(" (cube AA {}: guest msaa {}{})", gpu::cube_aa::ModeName(s_cubeAA), 1u << msaaLog2,
+                    multisampled ? ", 4-sample image" : "").c_str());
             return rt;
         }
 
         void DestroyTarget(RenderTarget& rt)
         {
             InvalidateShadowResolve(&rt);
+            if (rt.msImage.image)
+                DestroyImage(rt.msImage);
             if (rt.shared)
             {
                 // The pool's (a texture or a deferred resolve may still use it).
@@ -2655,6 +3243,21 @@ namespace gpu::renderer
         bool s_passActive = false;
         VkExtent2D s_passExtent{};  // the attachments' common size
         VkRect2D s_passArea{};      // what this pass loads and stores (tile GPUs move only this)
+
+        // Samples a pixel of a pass on these targets (4 colour, depth; any
+        // null): 4 when each one attached has a 4-sample image
+        // (NFSMW_CUBE_AA=msaa: the cube's colour and depth, which share
+        // their surface), else 1 and the pass draws into their own images.
+        uint32_t PassSamples(RenderTarget* const color[4], RenderTarget* depth)
+        {
+            uint32_t with = depth && depth->msImage.image ? 1 : 0, without = depth && !depth->msImage.image ? 1 : 0;
+            for (int i = 0; i < 4; i++)
+                if (color[i])
+                    (color[i]->msImage.image ? with : without)++;
+            if (with && without)
+                LogOnce(0x89ull << 56, "cube AA: a pass attaches targets with and without 4-sample images: drawn with one sample");
+            return with && !without ? gpu::cube_aa::kSamples : 1;
+        }
         // NFSMW_PASS_MERGE bitmask (Draw; default 3 with kFewerPasses, else
         // 0), fewer passes around the sun: 1 skip draws that write nothing (its
         // occlusion quad), 2 draw into the open pass a draw whose targets are
@@ -2782,6 +3385,11 @@ namespace gpu::renderer
             EndPass();
             Begin();
             uint32_t w = UINT32_MAX, h = UINT32_MAX;
+            // NFSMW_CUBE_AA=msaa: the 4-sample images are what the pass
+            // loads, draws into and stores; each colour one is resolved (the
+            // samples' average) into the target's own image, which every
+            // reader outside a pass (the resolve) reads as before.
+            const bool multisampled = PassSamples(color, depth) > 1;
             VkRenderingAttachmentInfoKHR colors[4]{};
             for (int i = 0; i < 4; i++)
             {
@@ -2791,6 +3399,13 @@ namespace gpu::renderer
                 colors[i].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
                 colors[i].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
                 colors[i].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+                if (color[i] && multisampled)
+                {
+                    colors[i].imageView = color[i]->msImage.view;
+                    colors[i].resolveMode = VK_RESOLVE_MODE_AVERAGE_BIT;
+                    colors[i].resolveImageView = color[i]->image.view;
+                    colors[i].resolveImageLayout = VK_IMAGE_LAYOUT_GENERAL;
+                }
                 if (color[i])
                 {
                     w = std::min(w, color[i]->width);
@@ -2801,7 +3416,7 @@ namespace gpu::renderer
             VkRenderingAttachmentInfoKHR ds{ VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO_KHR };
             if (depth)
             {
-                ds.imageView = depth->image.view;
+                ds.imageView = multisampled ? depth->msImage.view : depth->image.view;
                 ds.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
                 ds.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
                 ds.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
@@ -2891,7 +3506,7 @@ namespace gpu::renderer
                 const bool whole = ds.loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR && s_passArea.offset.x == 0 && s_passArea.offset.y == 0 &&
                     s_passArea.extent.width == depth->width && s_passArea.extent.height == depth->height;
                 LendTargetWrite(depth, whole);
-                ds.imageView = depth->image.view;
+                ds.imageView = multisampled ? depth->msImage.view : depth->image.view;
             }
             VkRenderingInfoKHR ri{ VK_STRUCTURE_TYPE_RENDERING_INFO_KHR };
             ri.renderArea = s_passArea;
@@ -2924,6 +3539,20 @@ namespace gpu::renderer
                     uint32_t(now.uploads - s_gapLast.uploads), uint32_t(now.submits - s_gapLast.submits), (now.shadowBytes - s_gapLast.shadowBytes) / 1024 });
                 s_gapLast = now;
                 s_passQueryNext += 2;
+            }
+            if (s_markers.level)
+            {
+                // The pass is one step (its draws counted into its record).
+                char desc[136];
+                int n = snprintf(desc, sizeof(desc), "area %ux%u@%d,%d", s_passArea.extent.width, s_passArea.extent.height,
+                    s_passArea.offset.x, s_passArea.offset.y);
+                for (int i = 0; i < 4 && n > 0 && size_t(n) < sizeof(desc); i++)
+                    if (color[i])
+                        n += snprintf(desc + n, sizeof(desc) - n, " C%d[b%u f%u p%u]", i, color[i]->base, color[i]->format, color[i]->pitch);
+                if (depth && n > 0 && size_t(n) < sizeof(desc))
+                    snprintf(desc + n, sizeof(desc) - n, " D[b%u p%u]%s", depth->base, depth->pitch, multisampled ? " 4x" : "");
+                if (uint32_t id = StepBegin(gpu::markers::Kind::Pass, "%s", desc))
+                    s_markers.pass = s_markers.steps.Find(id, &gpu::markers::Step::id);
             }
             s_vk->cmdBeginRendering(s_cmd, &ri);
             s_passActive = true;
@@ -3054,7 +3683,8 @@ namespace gpu::renderer
             uint32_t depthControl;   // RB_DEPTHCONTROL (0 without a depth target, or one attached for the pass only)
             uint32_t raster;         // cull | front CW << 2 | depth clamp << 3 | depth bias << 4
             uint32_t pad;            // bits 0-1: Sharper UI's gpu::sharp_ui::Mode (0: the plain pixel shader); 2-3: its UI mask kind;
-                                     // 4: Shadow Edges' Classic (a sun shadow receiver's translation without PCF)
+                                     // 4: Shadow Edges' Classic (a sun shadow receiver's translation without PCF);
+                                     // 5: four samples a pixel (NFSMW_CUBE_AA=msaa: the cube's 4-sample images)
 
             bool operator==(const PipelineKey& o) const { return memcmp(this, &o, sizeof(*this)) == 0; }
         };
@@ -3150,7 +3780,8 @@ namespace gpu::renderer
             rs.lineWidth = 1.0f;
 
             VkPipelineMultisampleStateCreateInfo ms{ VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO };
-            ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+            // (NFSMW_CUBE_AA=msaa: a draw into the cube's 4-sample images.)
+            ms.rasterizationSamples = (key.pad >> 5) & 1 ? VK_SAMPLE_COUNT_4_BIT : VK_SAMPLE_COUNT_1_BIT;
 
             VkPipelineDepthStencilStateCreateInfo dss{ VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO };
             if (key.depthFormat != 0)
@@ -4150,6 +4781,7 @@ namespace gpu::renderer
             dirty.erase(std::unique(dirty.begin(), dirty.end()), dirty.end());
             EndPass();
             Begin();
+            StepBegin(gpu::markers::Kind::Copy, "scaled resolve memory: %zu page-table entries updated", dirty.size());
             for (size_t i = 0; i < dirty.size();)
             {
                 size_t j = i + 1;
@@ -4466,11 +5098,6 @@ void main()
         // Machine's 3x; on Apple GPUs at every scale); NFSMW_SCALED_HOST=0:
         // never, 1: at every scale.
         const int s_scaledHostSetting = [] { const char* v = std::getenv("NFSMW_SCALED_HOST"); return v ? std::atoi(v) : -1; }();
-#ifdef __APPLE__
-        constexpr bool kAppleGpu = true;
-#else
-        constexpr bool kAppleGpu = false;
-#endif
         bool ScaledHostOn(const gpu::RenderScale& s)
         {
             return s_scaledHostSetting >= 0 ? s_scaledHostSetting != 0 : gpu::HostScaledResolves(s, kAppleGpu);
@@ -4930,11 +5557,19 @@ void main()
             if (shadowMap)
             {
                 auto it = s_shadowTargetsByResolve.find(base);
-                const ShadowResolveTarget* resolved = it == s_shadowTargetsByResolve.end() ? nullptr : &it->second;
+                ShadowResolveTarget* resolved = it == s_shadowTargetsByResolve.end() ? nullptr : &it->second;
                 uint64_t sampleSequence = 0;
                 if (resolved)
                 {
-                    sampleSequence = writewatch::WriteSequence(base, size);
+                    // The epoch first: a write during the walk is seen by the next lookup.
+                    const uint64_t epoch = writewatch::WriteEpoch();
+                    if (resolved->sampledEpoch != epoch || resolved->sampledSize != size)
+                    {
+                        resolved->sampledSequence = writewatch::WriteSequence(base, size);
+                        resolved->sampledEpoch = epoch;
+                        resolved->sampledSize = size;
+                    }
+                    sampleSequence = resolved->sampledSequence;
                     if (resolved->scale == s_shadowScale && resolved->depth && resolved->depth->sampleView &&
                         DepthSampleable() && f.tiled && pitchTexels == 1600 &&
                         ((f.endianness == xenos::Endian::kNone && f.swizzle == 0x688) ||
@@ -5157,6 +5792,8 @@ void main()
                             };
                             if (!t.uploaded && slice == 0)
                                 ToGeneral(t.image.image, VK_IMAGE_ASPECT_COLOR_BIT, layers);
+                            StepBegin(gpu::markers::Kind::Upload, "texture %08X %ux%u format %u, slice %u: untiled into its image", base, width,
+                                height, format, slice);
                             s_stateEpoch++;
                             vkCmdBindPipeline(s_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, s_untileStorePipeline);
                             s_pushDescriptorSet(s_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, s_untileStoreLayout, 0, AddSharedParts(w, 2), w);
@@ -5187,6 +5824,8 @@ void main()
                             { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, VK_NULL_HANDLE, 0, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &s_sharedInfo[0], nullptr },
                             { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, VK_NULL_HANDLE, 1, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &ring, nullptr },
                         };
+                        StepBegin(gpu::markers::Kind::Upload, "texture %08X %ux%u format %u, slice %u: untiled to staging", sliceBase, width,
+                            height, format, slice);
                         s_stateEpoch++;
                         vkCmdBindPipeline(s_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, s_untilePipeline);
                         s_pushDescriptorSet(s_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, s_untileLayout, 0, AddSharedParts(w, 2), w);
@@ -5197,6 +5836,7 @@ void main()
                         FullBarrier();
                         if (!t.uploaded && slice == 0)
                             ToGeneral(t.image.image, VK_IMAGE_ASPECT_COLOR_BIT, layers);
+                        StepBegin(gpu::markers::Kind::Copy, "texture %08X, slice %u: staging copied into its image", sliceBase, slice);
                         VkBufferImageCopy region{};
                         region.bufferOffset = staging;
                         region.bufferRowLength = rowTexels;
@@ -5245,6 +5885,8 @@ void main()
                                 { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, VK_NULL_HANDLE, 0, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &s_sharedInfo[0], nullptr },
                                 { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, VK_NULL_HANDLE, 1, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &ring, nullptr },
                             };
+                            StepBegin(gpu::markers::Kind::Upload, "texture %08X mip %u (%ux%u), layer %u: untiled to staging", base, level, lw, lh,
+                                layer);
                             s_stateEpoch++;
                             vkCmdBindPipeline(s_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, s_untilePipeline);
                             s_pushDescriptorSet(s_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, s_untileLayout, 0, AddSharedParts(w, 2), w);
@@ -5252,6 +5894,7 @@ void main()
                             uint32_t groupsX = fi.convert != 0 || fi.bpbLog2 >= 2 ? lbw : levelRowWords;
                             vkCmdDispatch(s_cmd, (groupsX + 7) / 8, (lbh + 7) / 8, 1);
                             FullBarrier();
+                            StepBegin(gpu::markers::Kind::Copy, "texture %08X mip %u, layer %u: staging copied into its image", base, level, layer);
                             VkBufferImageCopy region{};
                             region.bufferOffset = staging;
                             region.bufferRowLength = levelRowTexels;
@@ -6244,6 +6887,7 @@ void main()
             mb.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
             vkCmdPipelineBarrier(s_cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &mb, 0, nullptr, 0, nullptr);
             VkBufferCopy copy{ rangeBase, 0, rangeBytes };
+            StepBegin(gpu::markers::Kind::Copy, "NFSMW_SHADOWMAP probe: guest memory %08X (%u bytes) copied for the host", rangeBase, rangeBytes);
             vkCmdCopyBuffer(s_cmd, s_shared, p.buffer, 1, &copy);
             mb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
             mb.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
@@ -6416,6 +7060,8 @@ void main()
                 w[5] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, VK_NULL_HANDLE, 5, 0, 1,
                     VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &hi, nullptr, nullptr };
                 s_stateEpoch++;
+                StepBegin(gpu::markers::Kind::Resolve, "a deferred shadow resolve run: %ux%u depth -> %08X (%s%s)", rc.width, rc.height,
+                    rc.destBase, texture ? "its texture" : "", guest ? (texture ? " and guest memory" : "guest memory") : "");
                 vkCmdBindPipeline(s_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, ResolvePipeline(false, gpu::RenderScale{}));
                 s_pushDescriptorSet(s_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, s_resolveLayout, 0, AddSharedParts(w, 6), w);
                 vkCmdPushConstants(s_cmd, s_resolveLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, s_resolvePush, &rc);
@@ -6549,6 +7195,8 @@ void main()
                     region.srcSubresource = { VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT, 0, 0, 1 };
                     region.dstSubresource = region.srcSubresource;
                     region.extent = { rt->width, rt->height, 1 };
+                    StepBegin(gpu::markers::Kind::Copy, "a lent depth target (base %u pitch %u, %ux%u) copied into a fresh image", rt->base, rt->pitch,
+                        rt->width, rt->height);
                     vkCmdCopyImage(s_cmd, old->image.image, VK_IMAGE_LAYOUT_GENERAL, rt->image.image, VK_IMAGE_LAYOUT_GENERAL, 1, &region);
                     FullBarrier();
                     s_lendCounts.copies++;
@@ -6669,6 +7317,7 @@ void main()
             w[1] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, VK_NULL_HANDLE, 1, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &ti, nullptr, nullptr };
             w[2] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, VK_NULL_HANDLE, 2, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &bi, nullptr };
             s_stateEpoch++;
+            StepBegin(gpu::markers::Kind::Compute, "NFSMW_SHADOW_VERIFY: a deferred shadow resolve's image checked (%ux%u)", t.width, t.height);
             vkCmdBindPipeline(s_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, s_shadowVerifyPipeline);
             s_pushDescriptorSet(s_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, s_shadowVerifyLayout, 0, 3, w);
             uint32_t size[2] = { t.width, t.height };
@@ -6922,7 +7571,26 @@ void main()
                     // directly when the scene and shadow scales differ.
                     const bool shadowFallbackWanted = directShadowResolve && !s_renderScale.IsOne();
                     const bool scaledTextureWanted = !directShadowResolve && ScaledWanted(rangeBase, rangeBytes);
-                    const bool scaledMemoryNeeded = shadowFallbackWanted || (!directShadowResolve && !source->scale.IsOne() && source->scale == s_renderScale);
+                    // (Nor for the cube's own factor, NFSMW_CUBE_AA=ss, which
+                    // may equal the scene's: its samples are only averaged
+                    // into the 256x256 face its readers expect.)
+                    const bool scaledMemoryNeeded = shadowFallbackWanted ||
+                        (!directShadowResolve && !source->cube && !source->scale.IsOne() && source->scale == s_renderScale);
+                    if (source->cube)
+                    {
+                        // NFSMW_CUBE_AA: what the trimmed, or 4-sample,
+                        // target can't give a resolve as before (none seen:
+                        // every resolve of the cube's surface is a face's
+                        // colour, 256x256 at 0,0).
+                        if (depthSource && source->msImage.image)
+                            LogOnce((0x89ull << 56) | 2, "cube AA: frame %llu resolve of the cube's depth (dest %08X): its 4-sample image isn't "
+                                "resolved, the copy is stale", (unsigned long long)s_frame, destBase);
+                        if (r.x0 + shiftX < 0 || r.y0 + shiftY < 0 || r.x1 + shiftX > int32_t(source->guestWidth) ||
+                            r.y1 + shiftY > int32_t(source->guestHeight))
+                            LogOnce((0x89ull << 56) | 3, "cube AA: frame %llu resolve (%d,%d)-(%d,%d) (tile shift %d,%d) reads past the cube's "
+                                "%ux%u surface (dest %08X)", (unsigned long long)s_frame, r.x0, r.y0, r.x1, r.y1, shiftX, shiftY,
+                                source->guestWidth, source->guestHeight, destBase);
+                    }
                     const bool scaledMemoryReady = scaledMemoryNeeded && EnsureScaledMemory() && source->scale == s_scaled.scale;
                     bool scaledWrite = !source->scale.IsOne() && wholeBlocks && bl == 2 && !destInfo.copy_dest_array &&
                         scaledMemoryReady && (shadowFallbackWanted || scaledTextureWanted);
@@ -7280,6 +7948,10 @@ void main()
                     s_stateEpoch++;
                     bool coalesced = scaledWrite && source->scale == s_scaled.scale && s_scaled.coalesce &&
                         CoalescedFits(source->scale);  // 32x2 pixels a group
+                    if (!(defer && !s_shadowVerify))
+                        StepBegin(gpu::markers::Kind::Resolve, "%s target base %u format %u pitch %u -> %08X, %ux%u at %d,%d%s%s%s",
+                            depthSource ? "depth" : "color", source->base, source->format, source->pitch, rc.destBase, rc.width, rc.height,
+                            r.x0, r.y0, fused ? " (into its cached texture too)" : "", scaledWrite ? " (scaled)" : "", defer ? " (deferred, verified)" : "");
                     vkCmdBindPipeline(s_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, ResolvePipeline(coalesced, source->scale));
                     s_pushDescriptorSet(s_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, s_resolveLayout, 0, AddSharedParts(w, 6), w);
                     vkCmdPushConstants(s_cmd, s_resolveLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0,
@@ -7694,7 +8366,8 @@ void main()
             vkGetPhysicalDeviceProperties(s_vk->physical, &props);
             // gpu::ScaledPoolMegabytes sizes the scene pool. When this pool
             // also stores shadows at their own scale, ShadowPoolMegabytes
-            // supplies the 256 MB (1.5x) or 384 MB (2x) minimum.
+            // supplies the 256 MB (1.5x), 288 MB (9/4 x 1) or 384 MB (2x)
+            // minimum.
             uint64_t megabytes = gpu::ScaledPoolMegabytes(s_scaled.scale, props.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU);
             if (s_scaled.scale == s_shadowScale)
                 megabytes = std::max(megabytes, gpu::ShadowPoolMegabytes(s_shadowScale));
@@ -7796,6 +8469,7 @@ void main()
                     s_scaledUntilePipeline, "#define TO_BUFFER\n");
             EndPass();
             Begin();
+            StepBegin(gpu::markers::Kind::Clear, "scaled resolve memory: its page table cleared");
             vkCmdFillBuffer(s_cmd, s_scaled.table, 0, VK_WHOLE_SIZE, 0);
             FullBarrier();
             s_scaled.enabled = true;
@@ -7860,6 +8534,7 @@ void main()
                 VkDescriptorImageInfo ii{ VK_NULL_HANDLE, t.storeView, VK_IMAGE_LAYOUT_GENERAL };
                 w[2] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, VK_NULL_HANDLE, 2, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
                     &ii, nullptr, nullptr };
+                StepBegin(gpu::markers::Kind::Upload, "scaled texture %08X %ux%u: untiled into its image", base, t.width, t.height);
                 vkCmdBindPipeline(s_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, s_scaledStorePipeline);
                 s_pushDescriptorSet(s_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, s_scaledStoreLayout, 0, 3, w);
                 vkCmdPushConstants(s_cmd, s_scaledStoreLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
@@ -7867,6 +8542,7 @@ void main()
                 ComputeBarrier();
                 return;
             }
+            StepBegin(gpu::markers::Kind::Upload, "scaled texture %08X %ux%u: untiled to scratch", base, t.width, t.height);
             vkCmdBindPipeline(s_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, s_scaledUntilePipeline);
             s_pushDescriptorSet(s_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, s_scaledUntileLayout, 0, 3, w);
             vkCmdPushConstants(s_cmd, s_scaledUntileLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
@@ -7878,6 +8554,7 @@ void main()
             region.bufferRowLength = t.width;
             region.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
             region.imageExtent = { t.width, t.height, 1 };
+            StepBegin(gpu::markers::Kind::Copy, "scaled texture %08X: scratch copied into its image", base);
             vkCmdCopyBufferToImage(s_cmd, s_scaled.scratch, t.image.image, VK_IMAGE_LAYOUT_GENERAL, 1, &region);
             FullBarrier();
         }
@@ -7909,6 +8586,7 @@ void main()
                 const gpu::RenderScale& sc = s_scaled.scale;
                 struct { uint32_t count, slotWords, listWord, pad, scaleX, scaleY, denX, denY; } pc = { count, s_scaled.slotWords,
                     uint32_t(list / 4), 0, sc.x.num, sc.y.num, sc.x.den, sc.y.den };
+                StepBegin(gpu::markers::Kind::Compute, "scaled resolve memory: %u fresh pages filled from guest memory", count);
                 s_stateEpoch++;
                 vkCmdBindPipeline(s_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, s_scaledFillPipeline);
                 s_pushDescriptorSet(s_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, s_scaledFillLayout, 0, AddSharedParts(w, 3), w);
@@ -7997,9 +8675,21 @@ void main()
         // image (each pixel the most of its 3x3: a glyph's soft edge weighs
         // as its middle does), handed to the presenter, then clears it.
         // NFSMW_UI_MASK=0 turns it off (on with Sharper UI otherwise).
+        // NFSMW_UI_MASK_LAZY=1 (the default; 0: as before, video/ui_mask_use.h):
+        // built only for front images the presenter's UI pass uses. Once
+        // `armed` (the first scaled front image, where the images are made,
+        // as before), front-end draws take the mask-writing variant as
+        // before (the same pipelines); while not `live` they write a 1x1
+        // image instead (`dummy`: the store's bounds check keeps all but
+        // pixel 0,0 out) and the resolve and clear are skipped. `live` starts
+        // on: until the presenter has drawn a picture of this size, the mask
+        // is built.
         struct UiMaskState
         {
             bool checked = false, supported = false;
+            bool armed = false;  // the draws take the mask-writing variant
+            bool live = true;    // this frame's draws write `accum` (else `dummy`)
+            Image dummy;
             Image accum;
             uint32_t accumW = 0, accumH = 0;
             Image out[2];
@@ -8028,6 +8718,12 @@ void main()
     imageStore(weights, g, vec4(float(m) / 255.0));
 }
 )";
+
+        bool UiMaskLazy()
+        {
+            static const bool on = [] { const char* v = std::getenv("NFSMW_UI_MASK_LAZY"); return !(v && v[0] == '0'); }();
+            return on;
+        }
 
         bool UiMaskWanted()
         {
@@ -8066,6 +8762,7 @@ void main()
             for (Image& o : s_uiMask.out)
                 o = CreateImage(VK_IMAGE_TYPE_2D, VK_FORMAT_R8_UNORM, { w, h, 1 }, 1, VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
                     VK_IMAGE_VIEW_TYPE_2D, VK_IMAGE_ASPECT_COLOR_BIT);
+            StepBegin(gpu::markers::Kind::Clear, "Sharper UI's mask images made (%ux%u)", w, h);
             ToGeneral(s_uiMask.accum.image, VK_IMAGE_ASPECT_COLOR_BIT, 1);
             for (Image& o : s_uiMask.out)
                 ToGeneral(o.image, VK_IMAGE_ASPECT_COLOR_BIT, 1);
@@ -8161,6 +8858,7 @@ void main()
         void RecordBlackProbe(const Image& front, uint32_t width, uint32_t height)
         {
             uint32_t entry = s_black.next++ % kBlackEntries;
+            StepBegin(gpu::markers::Kind::Compute, "NFSMW_BLACK_CHECK: the front image's lit texels counted (%ux%u)", width, height);
             vkCmdFillBuffer(s_cmd, s_black.buffer, VkDeviceSize(entry) * sizeof(uint32_t), sizeof(uint32_t), 0);
             VkMemoryBarrier mb{ VK_STRUCTURE_TYPE_MEMORY_BARRIER, nullptr, VK_ACCESS_TRANSFER_WRITE_BIT,
                 VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT };
@@ -8297,6 +8995,13 @@ void main()
             s_resolveDenPipelines[0][0][0] = s_resolvePipeline;
             s_resolveDenPipelines[1][0][0] = s_resolveCoalescedPipeline;
             PrewarmResolvePipelines(s_renderScale);
+            if (s_cubeAA == gpu::cube_aa::Mode::Supersample || s_cubeAAAlt)
+            {
+                // (At Internal Resolution 1x no other source is scaled.)
+                gpu::RenderScale cube;
+                cube.x = cube.y = gpu::AxisScale{ gpu::cube_aa::kFactor, 1 };
+                PrewarmResolvePipelines(cube);
+            }
         }
 
         // ---------------------------------------------------------------
@@ -8819,6 +9524,7 @@ void main()
             s_dummyStorage = CreateImage(VK_IMAGE_TYPE_2D, VK_FORMAT_R32_UINT, { 1, 1, 1 }, 1, VK_IMAGE_USAGE_STORAGE_BIT,
                 VK_IMAGE_VIEW_TYPE_2D, VK_IMAGE_ASPECT_COLOR_BIT);
             Begin();
+            StepBegin(gpu::markers::Kind::Clear, "the renderer's placeholder images cleared");
             ToGeneral(s_dummyStorage.image, VK_IMAGE_ASPECT_COLOR_BIT, 1);
             VkClearColorValue white{ { 1.0f, 1.0f, 1.0f, 1.0f } };
             for (int i = 0; i < 3; i++)
@@ -9010,6 +9716,63 @@ void main()
             ResetScaledMemory(!s_renderScale.IsOne());
             fprintf(stderr, "[renderer] shadow resolution %s: %zu targets and %zu shadow textures replaced in %.1f ms\n",
                 ShadowResolutionName().c_str(), targets, textures,
+                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count());
+        }
+
+        // NFSMW_CUBE_AA=alt: the cube's targets made again for the frames
+        // after `frame` (their clears still waiting moved over, cut at the
+        // new target's edge). The cached cube texture stays: its faces are
+        // 256x256 in every mode.
+        void CubeAAAlt(uint64_t frame)
+        {
+            using gpu::cube_aa::Mode;
+            static const Mode order[3] = { Mode::Off, Mode::Supersample, Mode::Msaa };
+            Mode mode = order[frame / 120 % 3];
+            if (mode == Mode::Msaa && !s_cubeAAMsaaOk)
+                mode = Mode::Off;
+            const auto start = std::chrono::steady_clock::now();
+            size_t targets = 0;
+            if (mode != s_cubeAA)
+            {
+                Flush();
+                s_cubeAA = mode;
+                for (auto& [key, slot] : s_targets)
+                {
+                    RenderTarget& was = *slot;
+                    if (!(was.wide && was.pitch == gpu::cube_aa::kPitch))
+                        continue;
+                    std::vector<PendingClear> moved;
+                    std::erase_if(s_pendingClears, [&](const PendingClear& pc) {
+                        if (pc.rt != &was)
+                            return false;
+                        const uint32_t x0 = was.scale.x.GuestEdge(uint32_t(pc.rect.offset.x));
+                        const uint32_t y0 = was.scale.y.GuestEdge(uint32_t(pc.rect.offset.y));
+                        const uint32_t x1 = was.scale.x.GuestEdge(uint32_t(pc.rect.offset.x) + pc.rect.extent.width);
+                        const uint32_t y1 = was.scale.y.GuestEdge(uint32_t(pc.rect.offset.y) + pc.rect.extent.height);
+                        moved.push_back({ nullptr, { { int32_t(x0), int32_t(y0) }, { x1 - x0, y1 - y0 } }, pc.value });
+                        return true;
+                    });
+                    const uint32_t base = was.base, format = was.format, pitch = was.pitch;
+                    const bool depth = was.depth, wide = was.wide;
+                    DestroyTarget(was);
+                    slot = CreateTarget(base, format, depth, pitch, wide);
+                    for (PendingClear& pc : moved)
+                    {
+                        const int32_t x1 = std::min(pc.rect.offset.x + int32_t(pc.rect.extent.width), int32_t(slot->guestWidth));
+                        const int32_t y1 = std::min(pc.rect.offset.y + int32_t(pc.rect.extent.height), int32_t(slot->guestHeight));
+                        if (x1 <= pc.rect.offset.x || y1 <= pc.rect.offset.y)
+                            continue;
+                        pc.rt = slot.get();
+                        pc.rect = HostRect(slot->scale, pc.rect.offset.x, pc.rect.offset.y, x1, y1);
+                        s_pendingClears.push_back(pc);
+                    }
+                    targets++;
+                }
+                for (RecentTarget& recent : s_recentTargets)
+                    recent = {};
+            }
+            fprintf(stderr, "[cube-aa] alt: frames %llu-%llu run with %s (%zu targets replaced in %.1f ms)\n", (unsigned long long)(frame + 1),
+                (unsigned long long)(frame + 120), gpu::cube_aa::ModeName(s_cubeAA), targets,
                 std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count());
         }
 
@@ -9304,6 +10067,7 @@ void main()
         if (s_untiledArea)
             fprintf(stderr, "[renderer] NFSMW_UNTILED_AREA%s: untiled passes load and store their draws' guest viewport, not the whole target\n",
                 s_untiledArea == 2 ? "=alt (every other [perf] window)" : "");
+        CreateGpuMarkers();
         std::thread(CompletionThread).detach();
         if (s_imagePool)
             std::thread(MemoryThread).detach();
@@ -9800,9 +10564,11 @@ void main()
         }
         // Before the textures are looked up: a draw into scaled targets
         // samples scaled textures (every attachment shares the pitch, so the scale).
+        // (Not the cube's own factor, NFSMW_CUBE_AA=ss: its draws take the
+        // textures, and the pipelines, they took at one sample a pixel.)
         s_drawScaled = false;
         for (RenderTarget* rt : { color[0], color[1], color[2], color[3], depth })
-            if (rt && !rt->scale.IsOne())
+            if (rt && !rt->cube && !rt->scale.IsOne())
                 s_drawScaled = true;
 
         // NFSMW_LOG_TILES=1: register state of the first draws under MSAA (predicated tiling).
@@ -10028,7 +10794,7 @@ void main()
             key.pad = uint32_t(sharpMode);
             // UI-C: the draw's coverage into the UI mask (not over only small
             // textures: the dims' and fades' white fill).
-            if (UiMaskWanted() && s_uiMask.accum.view)
+            if (UiMaskWanted() && s_uiMask.armed)
             {
                 bool small = true;
                 for (uint32_t n = 0; n < 32; n++)
@@ -10078,14 +10844,22 @@ void main()
         if (!s_shadowEdgesSmooth && s_ps->info.shadowPcfGroups && !(key.pad & 3))
             key.pad |= 1u << 4;
 
+        // NFSMW_CUBE_AA=msaa (gpu/cube_aa.h): a draw into the cube's
+        // 4-sample images takes a 4-sample pipeline (BeginPass attaches
+        // them by the same rule).
+        const uint32_t hostSamples = PassSamples(color, depth);
+        const uint32_t samplesBit = hostSamples > 1 ? 1u << 5 : 0u;
+        key.pad |= samplesBit;
+
         if ((key.pad >> 2) & 3)
             layoutChoice = &GetUiMaskTextureLayout(*s_vs, *s_ps);
         bool pipelinePending;
         VkPipeline pipeline = GetPipeline(key, layoutChoice->pipeline, pipelinePending);
-        if (pipelinePending && key.pad)
+        if (pipelinePending && (key.pad & ~samplesBit))
         {
-            // The variant still compiling (just turned on): the plain one meanwhile.
-            key.pad = 0;
+            // The variant still compiling (just turned on): the plain one meanwhile
+            // (with the pass's samples: no other fits it).
+            key.pad = samplesBit;
             layoutChoice = &GetTextureLayout(*s_vs, *s_ps);
             pipeline = GetPipeline(key, layoutChoice->pipeline, pipelinePending);
         }
@@ -10098,8 +10872,13 @@ void main()
         VkDescriptorImageInfo uiMaskInfo{ VK_NULL_HANDLE, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_GENERAL };
         if ((key.pad >> 2) & 3)
         {
-            uiMaskInfo.imageView = s_uiMask.accum.view;
-            s_uiMask.written = true;
+            if ((s_uiMask.live || !s_uiMask.dummy.view) && s_uiMask.accum.view)
+            {
+                uiMaskInfo.imageView = s_uiMask.accum.view;
+                s_uiMask.written = true;
+            }
+            else
+                uiMaskInfo.imageView = s_uiMask.dummy.view;  // NFSMW_UI_MASK_LAZY: a front image no UI pass reads
         }
 
         // Textures (may upload through the ring and so flush: before the
@@ -10393,6 +11172,26 @@ void main()
         int untiledWhy = 4;
         if (untiledPass)
             sc = UntiledScissor(attached, int32_t(w), int32_t(h), &untiledWhy);
+        // NFSMW_CUBE_AA: the cube's target is its surface's size, not the
+        // 1280 columns untiled rendering gives an MSAA surface (tile 0 never
+        // draws past the surface on the console either). A viewport that
+        // reaches past it (none seen: each face's is 256x256 at 0,0) is cut
+        // at its edge as there, and said once.
+        if (untiledPass && std::any_of(attached, attached + 5, [](RenderTarget* rt) { return rt && rt->cube; }) &&
+            (Reg<reg::PA_CL_VTE_CNTL>().value & 0xF) == 0xF)
+        {
+            const float ax = std::fabs(RegF(XE_GPU_REG_PA_CL_VPORT_XSCALE)), ox = RegF(XE_GPU_REG_PA_CL_VPORT_XOFFSET);
+            const float ay = std::fabs(RegF(XE_GPU_REG_PA_CL_VPORT_YSCALE)), oy = RegF(XE_GPU_REG_PA_CL_VPORT_YOFFSET);
+            if (std::isfinite(ax + ox + ay + oy))
+            {
+                const gpu::split_views::GuestRect v = gpu::split_views::ViewportPixels(ax, ox, ay, oy, 0.0f, 0.0f,
+                    Reg<reg::PA_SU_VTX_CNTL>().pix_center == xenos::PixelCenter::kD3DZero, 8192, 8192);
+                if (v.x1 > int32_t(w) || v.y1 > int32_t(h))
+                    LogOnce((0x89ull << 56) | 1, "cube AA: frame %llu vs_%016llx ps_%016llx: viewport %dx%d@%d,%d reaches past the cube's %ux%u "
+                        "surface: cut at its edge", (unsigned long long)s_frame, (unsigned long long)s_vs->hash, (unsigned long long)s_ps->hash,
+                        v.x1 - v.x0, v.y1 - v.y0, v.x0, v.y0, targetW, targetH);
+            }
+        }
         int32_t x0 = std::clamp(sc.x0, 0, int32_t(w)), y0 = std::clamp(sc.y0, 0, int32_t(h));
         int32_t x1 = std::clamp(sc.x1, x0, int32_t(w)), y1 = std::clamp(sc.y1, y0, int32_t(h));
         // NFSMW_UNTILED_AREA: a draw whose area its targets' open pass doesn't
@@ -10689,9 +11488,10 @@ void main()
             // (GitHub #87, gpu/edge_bars.h).
             // NFSMW_EDGE_PIECES=0 turns it off (an A/B switch).
             static const bool edgePieces = [] { const char* v = std::getenv("NFSMW_EDGE_PIECES"); return !(v && v[0] == '0'); }();
-            // Vert+: the Options hub's graffiti tags, revealed in place below
-            // the 16:9 frame's top: moved up so their art's top is the
-            // screen's (GitHub #87, gpu/edge_bars.h's raise). Same switch.
+            // The Options hub's graffiti tags, revealed in place below the
+            // 16:9 frame's top: moved up so their art's top is the screen's
+            // (GitHub #87, gpu/edge_bars.h's raise), at every screen shape
+            // (Vert+, 16:9 and Hor+: an iPhone's too). Same switch.
             // Asked before the edge piece: mid-reveal a tag's quad crosses
             // the band edge like one.
             if (plan.fill == gpu::bars::Fill::None && edgePieces)
@@ -11309,13 +12109,17 @@ void main()
             // cleared to black (gpu::bars::OverscanRows); and the Showcase's
             // vignette leaves a thin border of the garage undimmed all round
             // it: it is stretched to the screen's edges
-            // (gpu::bars::PlanVignette).
+            // (gpu::bars::PlanVignette); the Options hub's graffiti tags
+            // leave a gap of the scene above them: they are raised to the
+            // screen's top (gpu::bars::PlanRaise).
             // A front-end draw as above (the front-end matrix in c0..c3,
             // ePolys at fetch constant 95, read by the vertex shader); nothing
             // is measured, and only one quad gets as far as reading its
             // vertices: over a small t0 its first colour only (a black frame
             // needs black, gpu::bars::Candidate), over a large t0
-            // (gpu::bars::BackdropCandidate, VignetteCandidate) all four.
+            // (gpu::bars::BackdropCandidate, VignetteCandidate,
+            // RaiseCandidate) all four; a raise candidate's picture is read
+            // once for its first ink row (gpu::bars::FirstInkRow).
             if (const float feX = game::FrontEndScaleX(); feX > 0.0f)
             {
                 float c[16];
@@ -11329,6 +12133,8 @@ void main()
                         (vi.constRelative || (vi.constUsed[0] & 0xFull) == 0xFull);
                     barPlan = planEdgeFills(c, game::FrontEndScaleY(), s, sv, feShader, true);
                     logEdgeFill(barPlan, s, sv);
+                    if (barPlan.fill == gpu::bars::Fill::Raise)
+                        memcpy(pc.posScale, barPlan.posScale, sizeof(pc.posScale));
                     if (barPlan.fill == gpu::bars::Fill::Layer)
                         memcpy(pc.posScale, barPlan.posScale, sizeof(pc.posScale));
                     if (barPlan.fill == gpu::bars::Fill::Vignette)
@@ -11428,7 +12234,14 @@ void main()
         // layouts (same set-0 layout and push-constant range); set 1 is
         // pushed again whenever the layout changes. Compute work and a new
         // command buffer reset it (s_stateEpoch).
-        struct BoundState
+        // One 4 KB page, aligned: every draw compares and stores into it (the
+        // push constants are 116 bytes, copied with 32-byte stores), and a
+        // store that straddles a page boundary waits until every older store
+        // has gone out. On the Steam Machine those are the draw's write-
+        // combined stores into the ring in CPU-mapped VRAM, so in a layout
+        // where `pc` crossed a page each draw waited for them: ~25 % more
+        // command-processor time a draw (found before v0.2.6 shipped).
+        struct alignas(4096) BoundState
         {
             uint64_t epoch = 0;
             VkPipeline pipeline = VK_NULL_HANDLE;
@@ -11442,6 +12255,7 @@ void main()
             VkDescriptorImageInfo textures[97];
             DrawConstants pc{};
         };
+        static_assert(sizeof(BoundState) <= 4096, "BoundState must fit the one page it is aligned to");
         static BoundState bound;
         // The first draw after a reset sets everything: dynamic state must be
         // set before a draw uses it, whatever the values.
@@ -11605,10 +12419,13 @@ void main()
         if (zpdCount)
         {
             // Weighted by the guest's samples per pixel (its MSAA; the host
-            // renders 1) over host pixels per guest pixel (the render scale).
+            // renders 1, or the cube's 4 with NFSMW_CUBE_AA=msaa) over host
+            // pixels per guest pixel (the render scale): gpu/cube_aa.h.
             const uint64_t segments = s_zpdSegNext;
             // (At 1.5x a host pixel is 4/9 of a guest one: msaa x 4 / 9.)
-            ZpdBeginSegment((1u << uint32_t(surface.msaa_samples)) * scale.PixelsDen(), scale.PixelsNum());
+            const gpu::cube_aa::Weight zpdWeight =
+                gpu::cube_aa::OcclusionWeight(uint32_t(surface.msaa_samples), hostSamples, scale.PixelsNum(), scale.PixelsDen());
+            ZpdBeginSegment(zpdWeight.num, zpdWeight.den);
             s_zpdCounts.draws++;
             if (ZpdLogging())
             {
@@ -11620,10 +12437,13 @@ void main()
                     (unsigned long long)s_frame, (unsigned long long)s_vs->hash, (unsigned long long)s_ps->hash, vertexCount,
                     s_zpdQuery < 0 ? "not counted (this command buffer's queries are used up)"
                         : std::format("{} {}", s_zpdSegNext != segments ? "new segment" : "segment", s_zpdSegNext - 1).c_str(),
-                    (1u << uint32_t(surface.msaa_samples)) * scale.PixelsDen(), scale.PixelsNum(), targets.c_str(), scissor.extent.width,
+                    zpdWeight.num, zpdWeight.den, targets.c_str(), scissor.extent.width,
                     scissor.extent.height, scissor.offset.x, scissor.offset.y);
             }
         }
+        s_submissions[s_slot].draws++;
+        if (s_markers.level)
+            StepDraw(s_vs->hash, s_ps->hash, vertexCount, uint32_t(initiator.prim_type));
         if (useIndices)
         {
             vkCmdBindIndexBuffer(s_cmd, s_ring, indexOffset, indices16 ? VK_INDEX_TYPE_UINT16 : VK_INDEX_TYPE_UINT32);
@@ -11689,6 +12509,55 @@ void main()
             SubmitRecorded(2);
     }
 
+    void ReportDeviceLost(const char* where)
+    {
+        DeviceLost(where);
+    }
+
+    void MarkPresent(VkCommandBuffer_T* cmd, bool begin, const char* what)
+    {
+        // The presenter's thread only (its frame's number between the two).
+        static uint32_t step = 0;
+        if (!s_markers.level)
+            return;
+        if (begin)
+        {
+            std::lock_guard lock(s_markers.mutex);
+            uint32_t id = gpu::markers::NextId(s_markers.latest.load(std::memory_order_relaxed));
+            gpu::markers::Step& s = s_markers.steps.Put(id);
+            s.id = id;
+            s.kind = gpu::markers::Kind::Present;
+            s.at = report::SessionSeconds();
+            snprintf(s.text, sizeof(s.text), "%s", what);
+            s_markers.latest.store(id, std::memory_order_release);
+            step = id;
+            if (!(s_markerExp & 2))
+                MarkerWrite(cmd, gpu::markers::BegunWord(id), id);
+            if (s_markers.setCheckpoint)
+                s_markers.setCheckpoint(cmd, reinterpret_cast<void*>(uintptr_t(gpu::markers::Checkpoint(id, 0))));
+            return;
+        }
+        // Its own done word, after everything before it in this command
+        // buffer (the renderer's barriers don't order this one's writes).
+        VkMemoryBarrier mb{ VK_STRUCTURE_TYPE_MEMORY_BARRIER };
+        mb.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
+        mb.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &mb, 0, nullptr, 0, nullptr);
+        MarkerWrite(cmd, gpu::markers::kPresentDoneWord, step);
+    }
+
+    std::string DescribeGpu()
+    {
+        if (!s_vk)
+            return "";
+        std::string text;
+        for (const std::string& l : DescribeInFlight("", true))
+            text += l + "\n";
+        for (const std::string& l : DescribeMarkers(""))
+            text += l + "\n";
+        return text;
+    }
+
     void SubmitIfIdle()
     {
         if (!s_vk || !s_recording)
@@ -11742,6 +12611,7 @@ void main()
         if (!s_vk || g_eagerWrites)
         {
             write();
+            backoff::NoteGpuProgress();
             return;
         }
         // Attach to the newest submission: the one being recorded (it then
@@ -11766,6 +12636,7 @@ void main()
         {
             lock.unlock();
             write();
+            backoff::NoteGpuProgress();
             return;
         }
         s_submissions[s_inFlight.back()].writes.push_back({ std::move(write) });
@@ -11973,6 +12844,8 @@ void main()
             s_frontFixedScale = sc;
         }
         VkPipelineLayout frontLayout = fixedFront ? s_frontFixedLayout : s_frontLayout;
+        StepBegin(gpu::markers::Kind::Present, "the front buffer %08X (%ux%u%s) into the front image (%ux%u%s), for the presenter", pc.base, width,
+            height, pc.tiled ? ", tiled" : "", outW, outH, b ? ", an in-between picture" : "");
         vkCmdBindPipeline(s_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, fixedFront ? s_frontFixedPipeline : s_frontPipeline);
         s_pushDescriptorSet(s_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, frontLayout, 0, AddSharedParts(w, 4), w);
         vkCmdPushConstants(s_cmd, frontLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
@@ -11985,8 +12858,10 @@ void main()
         VkImageView uiMaskView = VK_NULL_HANDLE;
         if (scaled && !b && settings::GetBool(settings::Id::SharpUi) && UiMaskWanted())
         {
-            EnsureUiMaskImages(outW, outH);
-            if (s_uiMask.written)
+            s_uiMask.armed = true;  // (the images exist from here on: the draws take the mask-writing variant)
+            if (s_uiMask.live)
+                EnsureUiMaskImages(outW, outH);
+            if (s_uiMask.live && s_uiMask.written)
             {
                 if (!s_uiMask.pipeline)
                 {
@@ -12005,6 +12880,7 @@ void main()
                     { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, VK_NULL_HANDLE, 1, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &dst, nullptr, nullptr },
                 };
                 const int32_t size[2] = { int32_t(outW), int32_t(outH) };
+                StepBegin(gpu::markers::Kind::Compute, "Sharper UI's weights for the presenter (%ux%u)", outW, outH);
                 vkCmdBindPipeline(s_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, s_uiMask.pipeline);
                 s_pushDescriptorSet(s_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, s_uiMask.layout, 0, 2, mw);
                 vkCmdPushConstants(s_cmd, s_uiMask.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(size), size);
@@ -12016,6 +12892,33 @@ void main()
                 FullBarrier();
                 s_uiMask.written = false;
                 uiMaskView = out.view;
+            }
+            // The next front image's draws: the mask only if the presenter's
+            // UI pass will read it (video::UiMaskUseful; NFSMW_UI_MASK_LAZY).
+            // NFSMW_UI_MASK_LAZY_AB=1 (a diagnostic): lazy on and off by turns
+            // every 4 images (on where the image's number has bit 2 set; the
+            // next real picture is video::SubmittedImages() + 2), so captures
+            // a few frames apart compare the two ways in one session; the
+            // presenter names each capture's image and state.
+            static const bool lazyAb = [] { const char* v = std::getenv("NFSMW_UI_MASK_LAZY_AB"); return v && v[0] == '1'; }();
+            const bool lazyNext = lazyAb ? (((video::SubmittedImages() + 2) >> 2) & 1) != 0 : UiMaskLazy();
+            const bool live = !lazyNext || video::UiMaskUseful(outW, outH);
+            if (live != s_uiMask.live)
+            {
+                static int lines = 0;
+                if (lines++ < 16)
+                    fprintf(stderr, "[renderer] UI mask %s for %ux%u front images (NFSMW_UI_MASK_LAZY: %s)\n", live ? "built" : "skipped",
+                        outW, outH, live ? "the presenter's UI pass applies, or no word yet" : "the presenter's UI pass doesn't apply");
+                if (live)
+                    EnsureUiMaskImages(outW, outH);
+                else if (!s_uiMask.dummy.view)
+                {
+                    s_uiMask.dummy = CreateImage(VK_IMAGE_TYPE_2D, VK_FORMAT_R32_UINT, { 1, 1, 1 }, 1, VK_IMAGE_USAGE_STORAGE_BIT,
+                        VK_IMAGE_VIEW_TYPE_2D, VK_IMAGE_ASPECT_COLOR_BIT);
+                    ToGeneral(s_uiMask.dummy.image, VK_IMAGE_ASPECT_COLOR_BIT, 1);
+                }
+                s_uiMask.written = false;
+                s_uiMask.live = live;
             }
         }
 #ifdef _WIN32
@@ -12085,6 +12988,7 @@ void main()
             region.bufferOffset = at;
             region.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
             region.imageExtent = { width, height, 1 };
+            StepBegin(gpu::markers::Kind::Copy, "a front image capture (NFSMW_CHECK_FRONT), %ux%u", width, height);
             vkCmdCopyImageToBuffer(s_cmd, front.image, VK_IMAGE_LAYOUT_GENERAL, s_ring, 1, &region);
             Flush();
             if (FILE* f = fopen(checkPath.c_str(), "wb"))
@@ -12104,11 +13008,59 @@ void main()
         return true;
     }
 
+    // NFSMW_SHADOW_AB (gpu/shadow_ab.h): the phase's variant, and its frames' GPU time.
+    static void ShadowAbOnSwap()
+    {
+        const auto& plan = gpu::shadow_ab::EnvPlan();
+        if (plan.period <= 0.0)
+            return;
+        ShadowAbState& ab = s_shadowAb;
+        const auto now = std::chrono::steady_clock::now();
+        const size_t n = plan.variants.size();
+        if (!ab.started)
+        {
+            ab.started = true;
+            ab.start = now;
+            ab.ns.assign(n, 0);
+            ab.frames.assign(n, 0);
+            ab.lastExecNs = s_gpuExecNs.load();
+        }
+        const double t = std::chrono::duration<double>(now - ab.start).count();
+        const int64_t phase = int64_t(t / plan.period);
+        // The frame that just ended belonged to the variant in force.
+        const uint64_t exec = s_gpuExecNs.load();
+        if (ab.variant >= 0 && t >= plan.from && t - double(ab.phase) * plan.period >= 0.5)
+        {
+            ab.ns[size_t(ab.variant)] += exec - ab.lastExecNs;
+            ab.frames[size_t(ab.variant)]++;
+        }
+        ab.lastExecNs = exec;
+        if (phase != ab.phase)
+        {
+            if (ab.phase >= 0 && phase % int64_t(n) == 0 && t >= plan.from)
+            {
+                std::string line;
+                for (size_t i = 0; i < n; i++)
+                    line += std::format(" | {}: {} frames, GPU {:.3f} ms", plan.variants[i].name, ab.frames[i],
+                        ab.frames[i] ? double(ab.ns[i]) / 1e6 / double(ab.frames[i]) : 0.0);
+                fprintf(stderr, "[shadowab] t=%.2f totals%s\n", t, line.c_str());
+            }
+            ab.phase = phase;
+            ab.variant = int(phase % int64_t(n));
+            const auto& v = plan.variants[size_t(ab.variant)];
+            gpu::shadow_ab::g_fit.store(v.fit, std::memory_order_relaxed);
+            fprintf(stderr, "[shadowab] t=%.2f phase %lld: %s\n", t, (long long)phase, v.name.c_str());
+        }
+    }
+
     void OnSwap(uint64_t frame)
     {
         HfrDrawMatchSwap(frame);  // DIAG (v0.1.5 HFR scoping)
+        ShadowAbOnSwap();
         if (s_vk)
             ApplyLiveSettings();
+        if (s_vk && s_cubeAAAlt && frame % 120 == 0)
+            CubeAAAlt(frame);
         if (s_uploadLog)
         {
             UploadLog& log = *s_uploadLog;
@@ -12334,7 +13286,7 @@ void main()
         if (setting != settings::kShadowResolutionAuto)
             return gpu::ShadowScale(uint32_t(setting));
         const gpu::RenderScale scene = InternalResolutionScale(settings::GetInt(settings::Id::InternalResolution), regionW, regionH);
-        return gpu::ShadowScale(gpu::AutoShadowHalves(scene, video::ThisSteamDevice()));
+        return gpu::AutoShadowScale(scene, kAppleGpu, video::ThisSteamDevice());
     }
 
     void Shutdown()
@@ -12487,7 +13439,9 @@ void main()
         MemoryStats m{};
         for (const auto& [key, rt] : s_targets)
         {
-            m.targets += rt->image.bytes;
+            // msImage: the cube's 4-sample image under NFSMW_CUBE_AA=msaa
+            // (0 bytes otherwise); it is the target's memory as well.
+            m.targets += rt->image.bytes + rt->msImage.bytes;
             m.targetCount++;
         }
         for (const auto& [key, t] : s_textures)
@@ -12505,7 +13459,10 @@ void main()
             }
         };
         for (const auto& [key, rt] : s_targets)
+        {
             own(rt->image);
+            own(rt->msImage);
+        }
         for (const auto& [key, t] : s_textures)
             own(t->image);
         for (const Image* image : { &s_front, &s_frontScaled, &s_frontBetween, &s_frontBetweenScaled, &s_dummy[0], &s_dummy[1], &s_dummy[2], &s_dummyStorage })

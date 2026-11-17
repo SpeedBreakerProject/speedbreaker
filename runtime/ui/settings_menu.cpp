@@ -179,8 +179,9 @@ namespace ui
         // render for the picture on this screen now ("1x (1280x800)" on a
         // Steam Deck filled; the table's "1x (720p)" is a 16:9 screen's),
         // and Auto what it picked. Shadow Resolution's Auto names the map
-        // size it picked ("Auto (3200x3200)"), Shadow Edges' Auto its look
-        // ("Auto (Classic)" on a Steam Deck). No window: the table's.
+        // size it picked ("Auto (3600x1600)" on a Mac, "Auto (3200x3200)" on
+        // other GPUs at 2x), Shadow Edges' Auto its look ("Auto (Classic)"
+        // on a Steam Deck). No window: the table's.
         std::string ValueText(const settings::Option& o, double value)
         {
             std::string text = settings::FormatValue(o.id, value);

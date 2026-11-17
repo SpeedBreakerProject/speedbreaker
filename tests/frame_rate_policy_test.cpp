@@ -4,7 +4,8 @@
 //   build/frame_rate_policy_test [log[@<sec>:<state>,...] ...]
 // Without arguments: the synthetic cases. With logs: also replays each one's
 // [perf] lines (120 frames each, fed as four 30-frame samples as the command
-// processor does) and prints the switches Auto would have made, with an
+// processor does) and prints the switches Auto would have made (the classic
+// rules, then the gentle ones), with an
 // optional thermal schedule (as NFSMW_THERMAL_SIM). At 30 the replay has no
 // frames of its own to read: it uses the log's costs as a stand-in. A line
 // spanning a race's end and a menu smears both into its four samples (the
@@ -342,6 +343,124 @@ namespace
         CHECK(tries == 4 && d.switches.size() == 9, "%d tries, %zu switches", tries, d.switches.size());
     }
 
+    // --- The gentle rules (SetGentle(true): the runtime's default from v0.2.6) ---
+
+    Driver GentleDriver()
+    {
+        Driver d;
+        d.policy.SetGentle(true);
+        return d;
+    }
+
+    void GentleKeeps60WhileHeld()
+    {
+        // Serious throughout, but 60 held (CP 4, GPU 10): it stays at 60.
+        Driver d = GentleDriver();
+        d.Run(1800, State::Serious, 60, 4, 10);
+        CHECK(d.switches.empty(), "serious, 60 held: %zu switches", d.switches.size());
+        // Critical still drops at once, as the classic rules do.
+        Driver c = GentleDriver();
+        c.Run(0.5, State::Critical, 60, 4, 10);
+        CHECK(c.switches.size() == 1 && c.switches[0].rate == 30 && c.switches[0].reason == FrameRateReason::Hot,
+            "critical: %zu switches", c.switches.size());
+        // Reset keeps the rules.
+        c.policy.Reset();
+        CHECK(c.policy.Gentle(), "Reset dropped the gentle rules");
+        CHECK(!AutoFrameRatePolicy::DropsOnState(State::Serious, true) && AutoFrameRatePolicy::DropsOnState(State::Serious, false) &&
+                AutoFrameRatePolicy::DropsOnState(State::Critical, true) && !AutoFrameRatePolicy::DropsOnState(State::Fair, false),
+            "DropsOnState");
+    }
+
+    void GentleDropsWhenNotHeld()
+    {
+        // Serious and 56 fps at a full frame's GPU cost (throttled): 30 once
+        // the window holds 10 s, as can't-hold (a shade under 60 is enough
+        // when hot).
+        Driver d = GentleDriver();
+        d.Run(60, State::Serious, 56, 6, 16.5f);
+        CHECK(d.switches.size() == 1 && d.switches[0].reason == FrameRateReason::CantHold60, "%zu switches", d.switches.size());
+        if (!d.switches.empty())
+            CHECK(d.switches[0].at >= 10 && d.switches[0].at < 11, "dropped at %.1f s", d.switches[0].at);
+        // The same 56 fps at nominal or fair is a scene, not the clocks: 54
+        // stays the line there, as the classic rules have it.
+        for (State s : { State::Nominal, State::Fair, State::Unknown })
+        {
+            Driver n = GentleDriver();
+            n.Run(300, s, 56, 6, 16.5f);
+            CHECK(n.switches.empty(), "thermal %d, 56 fps: %zu switches", int(s), n.switches.size());
+        }
+        // 56 fps that costs little (CP 6, GPU 11): not for want of time.
+        Driver cheap = GentleDriver();
+        cheap.Run(300, State::Serious, 56, 6, 11);
+        CHECK(cheap.switches.empty(), "serious, 56 fps at 11 ms: %zu switches", cheap.switches.size());
+        // Short dips at serious (5 s at 50 fps every 40 s) don't make most
+        // of a window: no drop.
+        Driver b = GentleDriver();
+        for (int i = 0; i < 20; i++)
+        {
+            b.Run(35, State::Serious, 60, 6, 14);
+            b.Run(5, State::Serious, 50, 8, 18);
+        }
+        CHECK(b.switches.empty(), "serious bursts: %zu switches", b.switches.size());
+    }
+
+    void GentleTriesWhileSerious()
+    {
+        // Can't hold 60 at serious (56 fps), cheap at 30 (CP 5): a try after
+        // kTrySec at 30 although still serious. It fails, drops again after
+        // the dwell, and backs off: the next try waits twice as long.
+        Driver d = GentleDriver();
+        d.Run(1500, State::Serious, 56, 5, 16.5f, 5, 12);
+        CHECK(d.switches.size() >= 5, "%zu switches", d.switches.size());
+        if (d.switches.size() >= 5)
+        {
+            CHECK(d.switches[0].reason == FrameRateReason::CantHold60, "first %s", ReasonName(d.switches[0].reason));
+            double firstTry = d.switches[1].at - d.switches[0].at;
+            CHECK(d.switches[1].rate == 60 && d.switches[1].reason == FrameRateReason::Try && firstTry >= AutoFrameRatePolicy::kTrySec - 1 &&
+                    firstTry < AutoFrameRatePolicy::kTrySec + 2, "first try after %.1f s (%s)", firstTry, ReasonName(d.switches[1].reason));
+            double redrop = d.switches[2].at - d.switches[1].at;
+            CHECK(redrop >= AutoFrameRatePolicy::kDwellSec && redrop < AutoFrameRatePolicy::kDwellSec + 2 && d.switches[2].backoff == 1,
+                "dropped %.1f s after the try, back-off %d", redrop, d.switches[2].backoff);
+            double secondTry = d.switches[3].at - d.switches[2].at;
+            CHECK(secondTry >= 2 * AutoFrameRatePolicy::kTrySec - 1 && secondTry < 2 * AutoFrameRatePolicy::kTrySec + 2,
+                "second try after %.1f s", secondTry);
+        }
+        // The throttled phone that holds 60 again once at 30 a while (its
+        // clocks back up): the try sticks, still serious.
+        Driver r = GentleDriver();
+        r.Run(20, State::Serious, 56, 5, 16.5f, 5, 12);
+        CHECK(r.switches.size() == 1, "%zu switches", r.switches.size());
+        r.Run(600, State::Serious, 60, 5, 12, 5, 12);
+        CHECK(r.switches.size() == 2 && r.switches[1].rate == 60 && r.switches[1].reason == FrameRateReason::Try,
+            "%zu switches", r.switches.size());
+        // Critical: no try until it is down to serious.
+        Driver c = GentleDriver();
+        c.Run(600, State::Critical, 60, 5, 12, 5, 12);
+        CHECK(c.switches.size() == 1, "critical: %zu switches", c.switches.size());
+        // Cooling to fair brings 60 back by headroom after kCoolSec, as before.
+        Driver f = GentleDriver();
+        f.Run(20, State::Serious, 56, 5, 16.5f, 5, 12);
+        f.Run(100, State::Fair, 60, 5, 12, 5, 12);
+        CHECK(f.switches.size() == 2 && f.switches[1].reason == FrameRateReason::Headroom, "%zu switches, %s", f.switches.size(),
+            f.switches.size() > 1 ? ReasonName(f.switches[1].reason) : "-");
+    }
+
+    void GentleFlapsAreBounded()
+    {
+        // Serious for an hour, 60 never held (55 fps), cheap at 30: tries
+        // back off to one every 8 x kTrySec; at most 13 switches in the hour.
+        Driver d = GentleDriver();
+        d.Run(3600, State::Serious, 55, 5, 16.5f, 5, 12);
+        CHECK(d.switches.size() <= 13, "%zu switches an hour", d.switches.size());
+        for (size_t i = 1; i < d.switches.size(); i++)
+            CHECK(d.switches[i].at - d.switches[i - 1].at >= AutoFrameRatePolicy::kDwellSec - 1e-9, "switches at %.1f and %.1f s",
+                d.switches[i - 1].at, d.switches[i].at);
+        // The classic rules on the same hour: one drop at once, never back.
+        Driver c;
+        c.Run(3600, State::Serious, 55, 5, 16.5f, 5, 12);
+        CHECK(c.switches.size() == 1 && c.switches[0].at < 1, "classic: %zu switches", c.switches.size());
+    }
+
     // --- Replays ---
 
     State StateNamed(const std::string& name)
@@ -353,7 +472,7 @@ namespace
         return State::Unknown;
     }
 
-    void Replay(const std::string& arg)
+    void Replay(const std::string& arg, bool gentle)
     {
         std::string path = arg;
         std::vector<std::pair<double, State>> schedule;
@@ -383,10 +502,12 @@ namespace
             cpRe(R"(CP busy ([0-9.]+) ms/frame)"), gpuRe(R"(GPU busy ([0-9.]+) ms \(executing ([0-9.]+))"),
             drawsRe(R"(per frame: ([0-9.]+) draws)");
         AutoFrameRatePolicy policy;
+        policy.SetGentle(gentle);
         std::string line;
         double t = 0, last = 0;
         int lines = 0;
-        printf("== %s%s%s\n", path.c_str(), schedule.empty() ? "" : " @", schedule.empty() ? "" : arg.substr(arg.find('@') + 1).c_str());
+        printf("== %s%s%s (%s rules)\n", path.c_str(), schedule.empty() ? "" : " @", schedule.empty() ? "" : arg.substr(arg.find('@') + 1).c_str(),
+            gentle ? "gentle" : "classic");
         while (std::getline(in, line))
         {
             std::smatch m;
@@ -436,8 +557,15 @@ int main(int argc, char** argv)
     MenusAreNoEvidence();
     ReheatBacksOff();
     GpuBoundHeadset();
+    GentleKeeps60WhileHeld();
+    GentleDropsWhenNotHeld();
+    GentleTriesWhileSerious();
+    GentleFlapsAreBounded();
     for (int i = 1; i < argc; i++)
-        Replay(argv[i]);
+    {
+        Replay(argv[i], false);
+        Replay(argv[i], true);
+    }
     printf("%s (%d failure%s)\n", g_failures ? "FAILED" : "ok", g_failures, g_failures == 1 ? "" : "s");
     return g_failures ? 1 : 0;
 }

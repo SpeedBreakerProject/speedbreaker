@@ -5,7 +5,9 @@
 // and the whole plan the renderer asks for (PlanFill) on the draws as
 // dumped. From the repo root:
 //   clang++ -std=c++20 -O2 -UNDEBUG -Iruntime tests/edge_bars_test.cpp -o build/edge_bars_test
-//   build/edge_bars_test
+//   build/edge_bars_test runtime/gpu/renderer.cpp
+// (renderer.cpp is read to check it applies the raise on both paths; without
+// it those checks are skipped.)
 // The match cases run again under deliberately wrong thresholds (Planted):
 // each must fail at least one case, so a threshold nobody tests can't drift.
 // The fill, cover, colour, band-row and plan code was checked the same way,
@@ -17,7 +19,10 @@
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
+#include <fstream>
 #include <iterator>
+#include <sstream>
+#include <string>
 #include <utility>
 
 // On Windows gpu/renderer.cpp includes the header after <windows.h>, whose
@@ -1233,29 +1238,88 @@ static void EdgePieceTests()
                     }
 }
 
-// ---- Raises (GitHub #87) ----
+// ---- Raises (GitHub #87; on every screen shape since v0.2.6) ----
 // The Options hub's graffiti tags as logged (test-only per-draw log with
 // texture coordinates, 1800x1131, view scale y 0.8952): the left tag's first
 // reveal frame (band y 0.950..1.342, v -0.933 at the top, 0.059 at the
 // bottom: v = 0, the art's top, at 0.973) and at rest (0.582..0.974, v
 // 0.004..0.996); the right tag at rest (0.361..0.950). Each must be moved so
 // the art's top lands on clip 1 (the screen's top edge), the same amount at
-// every frame of the reveal; nothing at 16:9.
-static Quad UvRect(float x0, float x1, float y0, float y1, float sy, uint32_t argb, float vTop, float vBottom, UvVertex out[4])
+// every frame of the reveal, at every screen shape: under Vert+ (#87), and
+// at 16:9 and under Hor+ (an iPhone in landscape, 2868x1320: view scale x
+// 0.8182, y 1; a 32:9 screen), where the band is the screen's height and the
+// art's own gap above the tags showed (#87, on an iPhone).
+// x is narrowed by the view's x scale (the front end's centred 16:9 block).
+static Quad UvRect(float x0, float x1, float y0, float y1, float sy, uint32_t argb, float vTop, float vBottom, UvVertex out[4], float sx = 1.0f)
 {
-    const float Y0 = y0 * sy, Y1 = y1 * sy;
-    out[0] = { x0, Y1, argb, 0.004f, vTop };
-    out[1] = { x1, Y1, argb, 0.996f, vTop };
-    out[2] = { x1, Y0, argb, 0.996f, vBottom };
-    out[3] = { x0, Y0, argb, 0.004f, vBottom };
+    const float Y0 = y0 * sy, Y1 = y1 * sy, X0 = x0 * sx, X1 = x1 * sx;
+    out[0] = { X0, Y1, argb, 0.004f, vTop };
+    out[1] = { X1, Y1, argb, 0.996f, vTop };
+    out[2] = { X1, Y0, argb, 0.996f, vBottom };
+    out[3] = { X0, Y0, argb, 0.004f, vBottom };
     return {};
 }
+// The screen shapes the raise is checked at: view scales x, y.
+struct RaiseShape
+{
+    const char* name;
+    float sx, sy;
+};
+static const RaiseShape kRaiseShapes[] = {
+    { "1280x800 (Deck)", 1.0f, 0.9f },
+    { "1728x1117", 1.0f, 0.896207f },
+    { "1800x1131 (#87's MacBook)", 1.0f, 0.8952f },
+    { "1920x1200", 1.0f, 0.9f },
+    { "2560x1664", 1.0f, 0.866667f },
+    { "1200x800", 1.0f, 0.84375f },
+    { "2732x2048 (iPad, 4:3)", 1.0f, 0.75f },
+    { "1920x1080 (16:9)", 1.0f, 1.0f },
+    { "2868x1320 (iPhone 18 Pro Max)", 0.818182f, 1.0f },
+    { "2556x1179 (iPhone)", 0.820031f, 1.0f },
+    { "3440x1440 (21:9)", 0.744186f, 1.0f },
+    { "3840x1080 (32:9)", 0.5f, 1.0f },
+};
+// The left tag's art top at rest (v = 0) and the right tag's, band units.
+constexpr float kLeftArtTop = 0.974f + 0.004f / 0.992f * 0.392f, kRightArtTop = 0.950f + 0.004f / 0.992f * 0.589f;
+
+// The draw a tag is (logged at 1800x1131): one quad of the front-end shader,
+// alpha blending, over t0 1470B000, 128x128 k_8_8_8_8 (format 6).
+static Draw TagDraw(const Matrix& m, float sx, float sy, const float ps[4])
+{
+    Draw d = S2Draw(m, sx, sy, ps);
+    d.t0Width = d.t0Height = 128;
+    d.t0Format = 6;
+    return d;
+}
+// PlanRaise over the quad's ePolys (words 0..2 the position taken back
+// through the matrix, 3 the colour, 4 and 5 u and v).
+static Plan RunRaise(const Draw& d, const UvVertex q[4], const Matrix& m, bool seen, float inkV = 0.0f, bool* revealing = nullptr)
+{
+    return PlanRaise(
+        d,
+        [&](uint32_t k, uint32_t j, uint32_t& word) {
+            if (k >= 4 || j >= 6)
+                return false;
+            const float f[6] = { q[k].x / m.c[0], q[k].y / m.c[5], 0.0f, 0.0f, q[k].u, q[k].v };
+            std::memcpy(&word, &f[j], 4);
+            if (j == 3)
+                word = q[k].argb;
+            return true;
+        },
+        [&](bool r) {
+            if (revealing)
+                *revealing = r;
+            return r || seen;
+        },
+        inkV);
+}
+
 static void RaiseTests()
 {
     printf("\nraises:\n");
-    const float shapes[] = { 0.9f, 0.896207f, 0.8952f, 0.866667f, 0.84375f, 0.75f };
-    for (const float sy : shapes)
+    for (const RaiseShape& shape : kRaiseShapes)
     {
+        const float sx = shape.sx, sy = shape.sy;
         UvVertex q[4];
         auto raised = [&](float shift, float artTop) { return artTop * sy + shift; };  // the art's top, clip y, after the shift
         // The left tag over its reveal: the quad's bottom moves down, v moves
@@ -1264,47 +1328,47 @@ static void RaiseTests()
         for (int f = 0; f <= 12; f++)
         {
             const float bottom = 0.950f - 0.0264f * f, h = 0.392f;
-            const float artTop = 0.974f + 0.004f / 0.992f * 0.392f, artH = 0.392f / 0.992f;  // the rest frame's v = 0
+            const float artTop = kLeftArtTop, artH = 0.392f / 0.992f;  // the rest frame's v = 0
             const float vB = (artTop - bottom) / artH, vT = (artTop - (bottom + h)) / artH;
-            UvRect(-0.658f, -0.437f, bottom, bottom + h, sy, 0xFD7E7E7E, vT, vB, q);
+            UvRect(-0.658f, -0.437f, bottom, bottom + h, sy, 0xFD7E7E7E, vT, vB, q, sx);
             bool revealing = false;
-            const float shift = MatchRaise(q, 1.0f, sy, {}, &revealing);
-            CHECK(shift > 0.0f && std::fabs(raised(shift, artTop) - 1.0f) < 1e-4f, "left tag reveal frame %d at sy %.4f: art top at clip %f", f,
-                sy, raised(shift, artTop));
-            CHECK(revealing, "left tag frame %d at sy %.4f: revealing %d", f, sy, int(revealing));
+            const float shift = MatchRaise(q, sx, sy, {}, &revealing);
+            CHECK(shift > 0.0f && std::fabs(raised(shift, artTop) - 1.0f) < 1e-4f, "left tag reveal frame %d at %s: art top at clip %f", f,
+                shape.name, raised(shift, artTop));
+            CHECK(revealing, "left tag frame %d at %s: revealing %d", f, shape.name, int(revealing));
             if (f == 0)
                 firstShift = shift;
-            CHECK(std::fabs(shift - firstShift) < 1e-4f, "left tag frame %d at sy %.4f: shift %f vs %f (must not change)", f, sy, shift, firstShift);
+            CHECK(std::fabs(shift - firstShift) < 1e-4f, "left tag frame %d at %s: shift %f vs %f (must not change)", f, shape.name, shift,
+                firstShift);
         }
-        UvRect(-0.658f, -0.437f, 0.582f, 0.974f, sy, 0xFD7E7E7E, 0.004f, 0.996f, q);
+        UvRect(-0.658f, -0.437f, 0.582f, 0.974f, sy, 0xFD7E7E7E, 0.004f, 0.996f, q, sx);
         bool restRevealing = true;
-        float shift = MatchRaise(q, 1.0f, sy, {}, &restRevealing);
-        CHECK(!restRevealing, "the left tag at rest is no reveal (a still picture there is raised only after one) at sy %.4f", sy);
-        const float artTopRest = 0.974f + 0.004f / 0.992f * 0.392f;
-        CHECK(std::fabs(raised(shift, artTopRest) - 1.0f) < 1e-4f && std::fabs(shift - firstShift) < 1e-4f,
-            "left tag at rest at sy %.4f: art top %f, shift %f vs the reveal's %f", sy, raised(shift, artTopRest), shift, firstShift);
-        UvRect(0.322f, 0.653f, 0.361f, 0.950f, sy, 0xFD7E7E7E, 0.004f, 0.996f, q);
-        shift = MatchRaise(q, 1.0f, sy);
-        CHECK(std::fabs(raised(shift, 0.950f + 0.004f / 0.992f * 0.589f) - 1.0f) < 1e-4f, "right tag at rest at sy %.4f", sy);
+        float shift = MatchRaise(q, sx, sy, {}, &restRevealing);
+        CHECK(!restRevealing, "the left tag at rest is no reveal (a still picture there is raised only after one) at %s", shape.name);
+        CHECK(std::fabs(raised(shift, kLeftArtTop) - 1.0f) < 1e-4f && std::fabs(shift - firstShift) < 1e-4f,
+            "left tag at rest at %s: art top %f, shift %f vs the reveal's %f", shape.name, raised(shift, kLeftArtTop), shift, firstShift);
+        UvRect(0.322f, 0.653f, 0.361f, 0.950f, sy, 0xFD7E7E7E, 0.004f, 0.996f, q, sx);
+        shift = MatchRaise(q, sx, sy);
+        CHECK(std::fabs(raised(shift, kRightArtTop) - 1.0f) < 1e-4f, "right tag at rest at %s", shape.name);
         // Left alone.
-        UvRect(0.322f, 0.653f, 0.361f, 0.950f, sy, 0x387E7E7E, 0.004f, 0.996f, q);
-        CHECK(MatchRaise(q, 1.0f, sy) == 0.0f, "a translucent glow at sy %.4f", sy);
-        UvRect(0.322f, 0.653f, 0.30f, 0.80f, sy, 0xFD7E7E7E, 0.004f, 0.996f, q);
-        CHECK(MatchRaise(q, 1.0f, sy) == 0.0f, "art ending at 0.80 (before artTopMin) at sy %.4f", sy);
-        UvRect(0.322f, 0.653f, 0.508f, 1.027f, sy, 0xFF000000, 0.004f, 0.996f, q);
-        CHECK(MatchRaise(q, 1.0f, sy) == 0.0f, "the header (art past the band: the edge piece's) at sy %.4f", sy);
-        UvRect(0.322f, 0.653f, 0.80f, 0.97f, sy, 0xFD7E7E7E, 0.004f, 0.996f, q);
-        CHECK(MatchRaise(q, 1.0f, sy) == 0.0f, "a HUD-sized piece at sy %.4f", sy);
-        UvRect(0.322f, 0.653f, 0.361f, 0.950f, sy, 0xFD7E7E7E, 0.996f, 0.004f, q);
-        CHECK(MatchRaise(q, 1.0f, sy) == 0.0f, "art upside down (its top at the bottom: none there) at sy %.4f", sy);
-        UvRect(0.322f, 0.653f, 0.361f, 0.950f, sy, 0xFD7E7E7E, 0.004f, 0.996f, q);
+        UvRect(0.322f, 0.653f, 0.361f, 0.950f, sy, 0x387E7E7E, 0.004f, 0.996f, q, sx);
+        CHECK(MatchRaise(q, sx, sy) == 0.0f, "a translucent glow at %s", shape.name);
+        UvRect(0.322f, 0.653f, 0.30f, 0.80f, sy, 0xFD7E7E7E, 0.004f, 0.996f, q, sx);
+        CHECK(MatchRaise(q, sx, sy) == 0.0f, "art ending at 0.80 (before artTopMin) at %s", shape.name);
+        UvRect(0.322f, 0.653f, 0.508f, 1.027f, sy, 0xFF000000, 0.004f, 0.996f, q, sx);
+        CHECK(MatchRaise(q, sx, sy) == 0.0f, "the header (art past the band: the edge piece's) at %s", shape.name);
+        UvRect(0.322f, 0.653f, 0.80f, 0.97f, sy, 0xFD7E7E7E, 0.004f, 0.996f, q, sx);
+        CHECK(MatchRaise(q, sx, sy) == 0.0f, "a HUD-sized piece at %s", shape.name);
+        UvRect(0.322f, 0.653f, 0.361f, 0.950f, sy, 0xFD7E7E7E, 0.996f, 0.004f, q, sx);
+        CHECK(MatchRaise(q, sx, sy) == 0.0f, "art upside down (its top at the bottom: none there) at %s", shape.name);
+        UvRect(0.322f, 0.653f, 0.361f, 0.950f, sy, 0xFD7E7E7E, 0.004f, 0.996f, q, sx);
         for (auto& v : q)
             v.u = 0.25f + v.u * 0.5f;
-        CHECK(MatchRaise(q, 1.0f, sy) == 0.0f, "a part of a picture (u spans half) at sy %.4f", sy);
+        CHECK(MatchRaise(q, sx, sy) == 0.0f, "a part of a picture (u spans half) at %s", shape.name);
         // The bottom edge, mirrored: art whose v = 0 is at band -0.95 (its top toward clip -y).
-        UvRect(0.322f, 0.653f, -0.950f, -0.361f, sy, 0xFD7E7E7E, 0.996f, 0.004f, q);
-        shift = MatchRaise(q, 1.0f, sy);
-        CHECK(shift < 0.0f && std::fabs((-0.950f - 0.004f / 0.992f * 0.589f) * sy + shift + 1.0f) < 1e-4f, "bottom mirror at sy %.4f", sy);
+        UvRect(0.322f, 0.653f, -0.950f, -0.361f, sy, 0xFD7E7E7E, 0.996f, 0.004f, q, sx);
+        shift = MatchRaise(q, sx, sy);
+        CHECK(shift < 0.0f && std::fabs((-0.950f - 0.004f / 0.992f * 0.589f) * sy + shift + 1.0f) < 1e-4f, "bottom mirror at %s", shape.name);
     }
     // The art's visible top: the picture's first ink row (alpha in the top
     // byte), its centre with bilinear filtering.
@@ -1320,20 +1384,44 @@ static void RaiseTests()
         CHECK(FirstInkRow(pic(4, 0x20), 128, 128) == -1, "alpha 20 is no ink (white RGB in clear texels neither)");
         CHECK(FirstInkRow([](uint32_t, uint32_t, uint32_t&) { return false; }, 128, 128) == -1, "unreadable: -1");
         CHECK(FirstInkV(4, 128) == 4.5f / 128.0f && FirstInkV(0, 128) == 0.0f && FirstInkV(-1, 128) == 0.0f, "FirstInkV");
-        // With the ink 4.5 texels down the picture, that row lands on clip 1.
-        const float sy = 0.8952f, inkV = FirstInkV(4, 128);
-        UvVertex q[4];
-        UvRect(0.322f, 0.653f, 0.361f, 0.950f, sy, 0xFD7E7E7E, 0.004f, 0.996f, q);
-        const float shift = MatchRaise(q, 1.0f, sy, {}, nullptr, inkV);
-        const float yInk = 0.950f + (inkV - 0.004f) / (0.996f - 0.004f) * (0.361f - 0.950f);  // band y of v = inkV
-        CHECK(std::fabs(yInk * sy + shift - 1.0f) < 1e-4f, "the first ink row's centre on clip 1 (%f)", yInk * sy + shift);
+        // With the ink 4.5 texels down the picture, that row lands on clip 1,
+        // at every shape (the iPhone's and 16:9 among them).
+        const float inkV = FirstInkV(4, 128);
+        for (const RaiseShape& shape : kRaiseShapes)
+        {
+            UvVertex q[4];
+            UvRect(0.322f, 0.653f, 0.361f, 0.950f, shape.sy, 0xFD7E7E7E, 0.004f, 0.996f, q, shape.sx);
+            const float shift = MatchRaise(q, shape.sx, shape.sy, {}, nullptr, inkV);
+            const float yInk = 0.950f + (inkV - 0.004f) / (0.996f - 0.004f) * (0.361f - 0.950f);  // band y of v = inkV
+            CHECK(std::fabs(yInk * shape.sy + shift - 1.0f) < 1e-4f, "the first ink row's centre on clip 1 at %s (%f)", shape.name,
+                yInk * shape.sy + shift);
+        }
     }
     {
         UvVertex q[4];
+        // Under Vert+ the amount is #87's, unchanged: 1 - art top x sy.
+        UvRect(-0.658f, -0.437f, 0.582f, 0.974f, 0.8952f, 0xFD7E7E7E, 0.004f, 0.996f, q);
+        CHECK(std::fabs(MatchRaise(q, 1.0f, 0.8952f) - (1.0f - kLeftArtTop * 0.8952f)) < 1e-6f, "16:10 (#87's 1800x1131): shift %.6f, #87's %.6f",
+            MatchRaise(q, 1.0f, 0.8952f), 1.0f - kLeftArtTop * 0.8952f);
+        // 16:9 and Hor+: the art's own gap, 1 - its top (left 0.024, right
+        // 0.046 of the band: ~13 and ~30 rows of 1320 on the iPhone), the
+        // same whatever the view's x scale.
         UvRect(-0.658f, -0.437f, 0.582f, 0.974f, 1.0f, 0xFD7E7E7E, 0.004f, 0.996f, q);
-        CHECK(MatchRaise(q, 1.0f, 1.0f) == 0.0f, "16:9: no raise");
-        UvRect(-0.658f, -0.437f, 0.582f, 0.974f, 1.0f, 0xFD7E7E7E, 0.004f, 0.996f, q);
-        CHECK(MatchRaise(q, 0.75f, 1.0f) == 0.0f, "Hor+: no raise");
+        const float s169 = MatchRaise(q, 1.0f, 1.0f);
+        CHECK(std::fabs(s169 - (1.0f - kLeftArtTop)) < 1e-6f && s169 > 0.02f, "16:9: the left tag raised by %.5f (its gap %.5f)", s169,
+            1.0f - kLeftArtTop);
+        UvRect(-0.658f, -0.437f, 0.582f, 0.974f, 1.0f, 0xFD7E7E7E, 0.004f, 0.996f, q, 0.818182f);
+        CHECK(std::fabs(MatchRaise(q, 0.818182f, 1.0f) - s169) < 1e-6f, "the iPhone (x 0.8182): the left tag raised by %.5f, 16:9's %.5f",
+            MatchRaise(q, 0.818182f, 1.0f), s169);
+        UvRect(-0.658f, -0.437f, 0.582f, 0.974f, 1.0f, 0xFD7E7E7E, 0.004f, 0.996f, q, 0.5f);
+        CHECK(std::fabs(MatchRaise(q, 0.5f, 1.0f) - s169) < 1e-6f, "32:9: the left tag raised by %.5f", MatchRaise(q, 0.5f, 1.0f));
+        UvRect(0.322f, 0.653f, 0.361f, 0.950f, 1.0f, 0xFD7E7E7E, 0.004f, 0.996f, q, 0.818182f);
+        CHECK(std::fabs(MatchRaise(q, 0.818182f, 1.0f) - (1.0f - kRightArtTop)) < 1e-6f, "the iPhone: the right tag raised by %.5f (its gap %.5f)",
+            MatchRaise(q, 0.818182f, 1.0f), 1.0f - kRightArtTop);
+        // No view scale (none set yet) or one past 1 (SetAspectScale never
+        // sets one): nothing.
+        CHECK(MatchRaise(q, 0.818182f, 0.0f) == 0.0f && MatchRaise(q, 0.0f, 1.0f) == 0.0f && MatchRaise(q, 1.0f, 1.25f) == 0.0f,
+            "no view scale, or one past 1: no raise");
         RaiseRule r;
         r.artTopMin = 0.98f;
         UvRect(0.322f, 0.653f, 0.361f, 0.950f, 0.8952f, 0xFD7E7E7E, 0.004f, 0.996f, q);
@@ -1347,9 +1435,149 @@ static void RaiseTests()
         UvRect(0.322f, 0.653f, 0.361f, 0.950f, 0.8952f, 0x387E7E7E, 0.004f, 0.996f, q);
         CHECK(MatchRaise(q, 1.0f, 0.8952f, r) != 0.0f, "planted minAlpha 0x30 leaves the glow");
     }
+    // The whole plan on the tag's draw (PlanRaise: the register checks, the
+    // ePolys, the admit, the posScale), at every shape: the draw's own
+    // posScale with its y offset moved by the shift, nothing else changed.
+    {
+        float ps[4];
+        FrontEndPs(ps);
+        for (const RaiseShape& shape : kRaiseShapes)
+        {
+            const Matrix m = FrontEndMatrix(shape.sx, shape.sy);
+            const Draw d = TagDraw(m, shape.sx, shape.sy, ps);
+            CHECK(RaiseCandidate(d), "the tag's registers at %s", shape.name);
+            UvVertex q[4];
+            // Mid-reveal (frame 6 of the left tag's).
+            const float bottom = 0.950f - 0.0264f * 6, h = 0.392f, artH = 0.392f / 0.992f;
+            UvRect(-0.658f, -0.437f, bottom, bottom + h, shape.sy, 0xFD7E7E7E, (kLeftArtTop - (bottom + h)) / artH, (kLeftArtTop - bottom) / artH, q,
+                shape.sx);
+            bool revealing = false;
+            Plan p = RunRaise(d, q, m, false, 0.0f, &revealing);
+            const float want = 1.0f - kLeftArtTop * shape.sy;
+            CHECK(p.fill == Fill::Raise && revealing, "the tag mid-reveal at %s: fill %d, revealing %d", shape.name, int(p.fill), int(revealing));
+            CHECK(std::fabs(p.posScale[3] - (ps[3] + ps[1] * want)) < 1e-5f && p.posScale[0] == ps[0] && p.posScale[1] == ps[1] &&
+                    p.posScale[2] == ps[2],
+                "the tag's posScale at %s: %.5f %.5f %.5f %.5f, want y offset %.5f", shape.name, p.posScale[0], p.posScale[1], p.posScale[2],
+                p.posScale[3], ps[3] + ps[1] * want);
+            // At rest: only once seen revealing (the title's logo, the same
+            // shape, never is).
+            UvRect(-0.658f, -0.437f, 0.582f, 0.974f, shape.sy, 0xFD7E7E7E, 0.004f, 0.996f, q, shape.sx);
+            CHECK(RunRaise(d, q, m, false).fill == Fill::None, "a still picture of the tag's shape never seen revealing at %s", shape.name);
+            p = RunRaise(d, q, m, true);
+            CHECK(p.fill == Fill::Raise && std::fabs(p.posScale[3] - (ps[3] + ps[1] * want)) < 1e-5f,
+                "the tag at rest after its reveal at %s: the same amount", shape.name);
+            // The register checks still refuse what they refused.
+            Draw x = d;
+            x.t0Format = 0;
+            CHECK(!RaiseCandidate(x), "a picture that isn't 32-bit at %s", shape.name);
+            x = d;
+            x.leftAlone = false;
+            CHECK(!RaiseCandidate(x), "a draw another rule took at %s", shape.name);
+            x = d;
+            x.t0Width = x.t0Height = 32;
+            CHECK(!RaiseCandidate(x), "the white 32x32 texture (a dialog's box) at %s", shape.name);
+            x = d;
+            x.count = 8;
+            CHECK(!RaiseCandidate(x), "two quads (text) at %s", shape.name);
+            CHECK(RunRaise(x, q, m, true).fill == Fill::None, "PlanRaise refuses what RaiseCandidate refuses at %s", shape.name);
+        }
+    }
 }
 
-int main()
+// ---- gpu/renderer.cpp uses the raise (both paths) ----
+static std::string Squash(const std::string& source)
+{
+    std::string code, r;
+    std::istringstream in(source);
+    for (std::string line; std::getline(in, line);)
+    {
+        size_t c = line.find("//");
+        code += (c == std::string::npos ? line : line.substr(0, c)) + "\n";
+    }
+    for (char c : code)
+        if (c != ' ' && c != '\n' && c != '\t')
+            r += c;
+    return r;
+}
+
+static size_t Count(const std::string& s, const std::string& what)
+{
+    size_t n = 0;
+    for (size_t at = s.find(what); at != std::string::npos; at = s.find(what, at + 1))
+        n++;
+    return n;
+}
+
+// The renderer's raise wiring; returns the failures (quiet: for the planted copies).
+static int RaiseRendererChecks(const std::string& source, bool quiet)
+{
+    const int before = g_failures;
+    const bool was = g_quiet;
+    g_quiet = quiet;
+    const std::string all = Squash(source);
+    // planEdgeFills asks PlanRaise (behind the edge-piece switch, for a draw
+    // nothing earlier took), before PlanEdgePiece.
+    const size_t raise = all.find("plan=gpu::bars::PlanRaise(draw,read,admit,gpu::bars::FirstInkV(inkRow,draw.t0Height));");
+    const size_t piece = all.find("if(plan.fill==gpu::bars::Fill::None&&edgePieces)plan=gpu::bars::PlanEdgePiece(draw,read);");
+    CHECK(raise != std::string::npos && piece != std::string::npos && raise < piece, "planEdgeFills asks PlanRaise before PlanEdgePiece");
+    CHECK(raise != std::string::npos && all.rfind("if(plan.fill==gpu::bars::Fill::None&&edgePieces){", raise) != std::string::npos,
+        "PlanRaise only for a draw nothing else took, behind NFSMW_EDGE_PIECES");
+    // Both paths (wide or tall screens, and 16:9) ask planEdgeFills and
+    // apply the raise's posScale to the draw itself.
+    CHECK(Count(all, "barPlan=planEdgeFills(c,") == 2, "planEdgeFills asked on both paths: %zu", Count(all, "barPlan=planEdgeFills(c,"));
+    const std::string apply = "if(barPlan.fill==gpu::bars::Fill::Raise)memcpy(pc.posScale,barPlan.posScale,sizeof(pc.posScale));";
+    CHECK(Count(all, apply) == 2, "the raise's posScale applied on both paths: %zu", Count(all, apply));
+    // The 16:9 path's: after its planEdgeFills call.
+    const size_t plan169 = all.find("barPlan=planEdgeFills(c,game::FrontEndScaleY(),s,sv,feShader,true);");
+    const size_t apply169 = plan169 == std::string::npos ? plan169 : all.find(apply, plan169);
+    CHECK(apply169 != std::string::npos && apply169 - plan169 < 400, "the 16:9 path applies the raise right after planning");
+    g_quiet = was;
+    return g_failures - before;
+}
+
+static void RaiseRendererTests(const char* path)
+{
+    printf("\nraise wiring in %s:\n", path);
+    std::ifstream f(path);
+    CHECK(f.good(), "cannot read %s", path);
+    if (!f.good())
+        return;
+    std::stringstream ss;
+    ss << f.rdbuf();
+    const std::string source = ss.str();
+    CHECK(RaiseRendererChecks(source, false) == 0, "renderer.cpp's raise wiring");
+    // Planted: copies with the wiring cut, each must fail.
+    struct Cut
+    {
+        const char* what;
+        const char* from;
+        const char* to;
+    };
+    const Cut cuts[] = {
+        { "the 16:9 path doesn't apply the raise (v0.2.5)",
+            "                    if (barPlan.fill == gpu::bars::Fill::Raise)\n                        memcpy(pc.posScale, barPlan.posScale, sizeof(pc.posScale));\n", "" },
+        { "the wide/tall path doesn't apply it",
+            "                        if (barPlan.fill == gpu::bars::Fill::Raise)\n                            memcpy(pc.posScale, barPlan.posScale, sizeof(pc.posScale));\n", "" },
+        { "PlanRaise never asked", "plan = gpu::bars::PlanRaise(draw, read, admit, gpu::bars::FirstInkV(inkRow, draw.t0Height));", ";" },
+        { "the 16:9 path never plans", "barPlan = planEdgeFills(c, game::FrontEndScaleY(), s, sv, feShader, true);", ";" },
+    };
+    for (const Cut& c : cuts)
+    {
+        std::string copy = source;
+        const size_t at = copy.find(c.from);
+        CHECK(at != std::string::npos, "planted '%s': its text is not in renderer.cpp", c.what);
+        if (at == std::string::npos)
+            continue;
+        copy.replace(at, std::strlen(c.from), c.to);
+        const int saved = g_failures;
+        const int failed = RaiseRendererChecks(copy, true);
+        g_failures = saved;
+        printf("planted renderer '%s': %d check(s) failed\n", c.what, failed);
+        CHECK(failed > 0, "planted renderer '%s' passed every check", c.what);
+    }
+}
+
+int main(int argc, char** argv)
 {
     printf("match:\n");
     MatchCases(Rule{});
@@ -1763,6 +1991,10 @@ int main()
     BackdropTests();
     EdgePieceTests();
     RaiseTests();
+    if (argc > 1)
+        RaiseRendererTests(argv[1]);
+    else
+        printf("(no renderer.cpp given: the raise wiring checks skipped)\n");
 
     printf("\n%s (%d failure%s)\n", g_failures ? "FAILED" : "all passed", g_failures, g_failures == 1 ? "" : "s");
     return g_failures ? 1 : 0;
