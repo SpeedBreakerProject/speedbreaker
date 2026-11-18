@@ -247,6 +247,112 @@ namespace report
             }
             return text;
         }
+
+        // GPU resets Windows recorded in the last 14 days (GitHub #57, #99,
+        // #101): Windows Error Reporting's LiveKernelEvent records in the
+        // Application log (event 1001: P1 141 = a GPU engine that stopped
+        // answering and was reset, 117 = one that recovered), each with its
+        // fault bucket once WER has read the dump, which says why: on the
+        // ThinkPad's UHD 620 (2026-11-14) LKD_0x141_Tdr:C_AppFault_IMAGE_
+        // igdkmd64.sys_GEN9CFL_0_PAGEFAULT, a GPU page fault the app caused.
+        // A device loss writes it ten seconds or so after the game has
+        // ended, so the next session's log (and bug report) carries it. The
+        // number and the newest three (UTC time, P1, bucket); nothing else
+        // of the record (its file paths name the user's folders). wevtapi is
+        // looked up, as powrprof above: a Windows without it still starts.
+        std::string GpuResetsText()
+        {
+            HMODULE wevtapi = LoadLibraryExW(L"wevtapi.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+            if (!wevtapi)
+                return "not read (no wevtapi.dll)";
+            using QueryFn = HANDLE(WINAPI*)(HANDLE, LPCWSTR, LPCWSTR, DWORD);
+            using NextFn = BOOL(WINAPI*)(HANDLE, DWORD, HANDLE*, DWORD, DWORD, DWORD*);
+            using RenderFn = BOOL(WINAPI*)(HANDLE, HANDLE, DWORD, DWORD, PVOID, DWORD*, DWORD*);
+            using CloseFn = BOOL(WINAPI*)(HANDLE);
+            auto query = reinterpret_cast<QueryFn>(GetProcAddress(wevtapi, "EvtQuery"));
+            auto next = reinterpret_cast<NextFn>(GetProcAddress(wevtapi, "EvtNext"));
+            auto render = reinterpret_cast<RenderFn>(GetProcAddress(wevtapi, "EvtRender"));
+            auto close = reinterpret_cast<CloseFn>(GetProcAddress(wevtapi, "EvtClose"));
+            std::string text;
+            if (!query || !next || !render || !close)
+                text = "not read (wevtapi without EvtQuery)";
+            else
+            {
+                constexpr DWORD kChannelPath = 0x1, kReverse = 0x200, kRenderXml = 1;  // EvtQueryChannelPath, EvtQueryReverseDirection, EvtRenderEventXml
+                HANDLE results = query(nullptr, L"Application",
+                    L"*[System[Provider[@Name='Windows Error Reporting'] and (EventID=1001) and TimeCreated[timediff(@SystemTime) <= 1209600000]]]",
+                    kChannelPath | kReverse);
+                if (!results)
+                    text = std::format("not read (EvtQuery error {})", GetLastError());
+                else
+                {
+                    uint32_t resets = 0, read = 0;
+                    std::vector<std::string> newest;
+                    HANDLE events[16];
+                    DWORD returned = 0;
+                    std::wstring xml;
+                    while (read < 400 && next(results, 16, events, 2000, 0, &returned))
+                    {
+                        for (DWORD i = 0; i < returned; i++, read++)
+                        {
+                            DWORD used = 0, props = 0;
+                            xml.assign(4096, L'\0');
+                            if (!render(nullptr, events[i], kRenderXml, DWORD(xml.size() * sizeof(wchar_t)), xml.data(), &used, &props) &&
+                                GetLastError() == ERROR_INSUFFICIENT_BUFFER)
+                            {
+                                xml.assign(used / sizeof(wchar_t) + 1, L'\0');
+                                render(nullptr, events[i], kRenderXml, DWORD(xml.size() * sizeof(wchar_t)), xml.data(), &used, &props);
+                            }
+                            close(events[i]);
+                            const std::string x = Utf8(xml.c_str());
+                            // EventData: bucket, its type, the event's name, the response, the cab, P1...
+                            std::vector<std::string> data;
+                            for (size_t at = x.find("<EventData>"); at != std::string::npos && data.size() < 6;)
+                            {
+                                size_t open = x.find("<Data", at);
+                                if (open == std::string::npos)
+                                    break;
+                                size_t start = x.find('>', open), end = x.find("</Data>", open), empty = x.find("/>", open);
+                                if (start == std::string::npos)
+                                    break;
+                                if (empty != std::string::npos && empty < start)  // <Data/>
+                                {
+                                    data.emplace_back();
+                                    at = empty + 2;
+                                    continue;
+                                }
+                                if (end == std::string::npos)
+                                    break;
+                                data.push_back(x.substr(start + 1, end - start - 1));
+                                at = end + 7;
+                            }
+                            // (The first record of a reset, before WER has read its dump, has no bucket; other
+                            // live kernel events (USB, Wi-Fi...) aren't the GPU's.)
+                            if (data.size() < 6 || data[2] != "LiveKernelEvent" || data[0].empty() || (data[5] != "141" && data[5] != "117"))
+                                continue;
+                            resets++;
+                            if (newest.size() < 3)
+                            {
+                                std::string when;
+                                if (size_t t = x.find("SystemTime='"); t != std::string::npos && t + 31 <= x.size())
+                                    when = x.substr(t + 12, 10) + " " + x.substr(t + 23, 8) + " UTC";
+                                else if (size_t t2 = x.find("SystemTime=\""); t2 != std::string::npos && t2 + 31 <= x.size())
+                                    when = x.substr(t2 + 12, 10) + " " + x.substr(t2 + 23, 8) + " UTC";
+                                // (Only these few characters: a bucket names a driver and a reason.)
+                                std::string bucket = data[0].substr(0, 120);
+                                newest.push_back(std::format("{} {} {}", when, data[5].substr(0, 8), bucket));
+                            }
+                        }
+                    }
+                    close(results);
+                    text = resets ? std::format("{} in the last 14 days; the newest: ", resets) : "none in the last 14 days";
+                    for (size_t i = 0; i < newest.size(); i++)
+                        text += (i ? "; " : "") + newest[i];
+                }
+            }
+            FreeLibrary(wevtapi);
+            return text;
+        }
 #else
         std::string OsText()
         {
@@ -449,6 +555,11 @@ namespace report
         text += "RAM: " + MemoryText() + "\n";
 #ifdef _WIN32
         text += "Power: " + PowerText() + "\n";
+        {
+            // (Read once: the log's summary and the reports' are the same.)
+            static const std::string resets = GpuResetsText();
+            text += "GPU resets Windows recorded: " + resets + "\n";
+        }
 #endif
         {
             std::lock_guard lock(s_mutex);

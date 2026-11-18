@@ -45,6 +45,12 @@ namespace video
     // (UI-C: R8, the image's size, VK_IMAGE_LAYOUT_GENERAL; null: none).
     void SubmitUiMask(VkImageView mask);
 
+    // Any thread (NFSMW_UI_MASK_LAZY, video/ui_mask_use.h): whether a UI mask
+    // for a width x height front image would be used: false only when the
+    // presenter's last picture had exactly that size and its UI pass didn't
+    // apply to it.
+    bool UiMaskUseful(uint32_t width, uint32_t height);
+
     // Any thread: how many images (front buffers and images, in-between
     // pictures included) have been submitted so far. NFSMW_SHARP_UI_AB (a
     // diagnostic, gpu/renderer.cpp) turns Sharper UI on and off by turns
@@ -148,6 +154,16 @@ namespace video
         // renderer resets them in its command buffers).
         bool occlusionCounting = false;
         PFN_vkResetQueryPool resetQueryPool = nullptr;
+        // NFSMW_GPU_MARKERS (gpu/gpu_markers.h; the presenter decides it, as
+        // it enables the device's extensions for it): 0 off, 1 each step of
+        // the GPU's work numbered from the GPU, 2 each draw too (checkpoints).
+        // The driver's checkpoints (VK_NV_device_diagnostic_checkpoints) and
+        // fault description (VK_EXT_device_fault) where the device has them
+        // and markers are on (else nullptr).
+        uint32_t gpuMarkers = 0;
+        PFN_vkCmdSetCheckpointNV cmdSetCheckpoint = nullptr;
+        PFN_vkGetQueueCheckpointDataNV getQueueCheckpointData = nullptr;
+        PFN_vkGetDeviceFaultInfoEXT getDeviceFaultInfo = nullptr;
 #ifdef _WIN32
         // Windows on an Intel integrated GPU: the defaults measured on one
         // (presenter.cpp, IntegratedGpuDefaults). The renderer's part:

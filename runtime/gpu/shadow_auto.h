@@ -1,13 +1,24 @@
 // SpeedBreaker runtime. GPL-3.0-or-later (see COPYING).
 //
 // Settings > Graphics > Shadow Resolution's Auto (the default since v0.2.4,
-// GitHub #90), as gpu/renderer.cpp applies it: 2x while the scene renders at
-// 2x or more, else 1x. Since v0.2.2 the 1600x1600 map is fitted to the whole
-// view (#81), about half the 360's texels per metre at 16:9; 2x gives them
-// back. Its cost follows the GPU that Internal Resolution's Auto already
-// judged: M1 Pro at 2x ~+2 ms of GPU, 60 fps held (#81); a GTX 1070
-// held 60 at 2x/2x (#84); an Intel UHD 620 on Windows, already GPU-bound at
-// ~28 fps at 1x, lost 14.8 ms at 2x (#90), and Auto keeps it at 1x
+// GitHub #90), as gpu/renderer.cpp applies it: while the scene renders at 2x
+// or more, the wider map, 9/4 x 1 (3600x1600), on Apple GPUs and the 2x map
+// (3200x3200) on every other GPU; else 1x (1600x1600). Since v0.2.2 the
+// 1600x1600 map is fitted to the whole view (#81): about 2.25 times the reach
+// across the view (the map's x), the same along it (its y), so about 43 % of
+// v0.2.1's texels per metre across near the car. 9/4 across gives 94 to 100 %
+// of them back with 2.25 times the map's texels; 2x gives 83 to 89 % across
+// and twice v0.2.1's along with 4 times (#90).
+//
+// Which one follows what each GPU had room for: the one that improves the
+// picture without costing performance (#90). On an M1 Pro at 2560x1440 and
+// 2x the 2x map was +3.4 to +3.9 ms of GPU a race frame and +190 to +280 MB
+// over 1x, the room the frame had; 9/4 x 1 at 1920x1080 and 2x +0.9 to +1.0
+// ms where 2x was +2.1 to +2.3. The Steam Machine at 3440x1440 (Auto
+// 2.688x2) pays +1.2 to +1.6 ms for the 2x map and still holds 60.0 fps with
+// no late frames (GPU 9.6 of 16.7 ms), with the better picture; a GTX 1070
+// held 60 at 2x/2x (#84). An Intel UHD 620 on Windows, already GPU-bound at
+// ~28 fps at 1x, lost 14.8 ms at the 2x map (#90): Auto keeps it at 1x
 // there (its Internal Resolution budget is 1). Vulkan-free, for
 // tests/shadow_auto_test.cpp.
 //
@@ -17,9 +28,10 @@
 // Auto's 2x1 at 2560x720 is 1x).
 //
 // Not on a Steam Deck or a Steam Frame (video/steam_device.h): 1x there at
-// any output. Docked to a 1080p screen both render at 2x2, and 2x shadows
+// any output. Docked to a 1080p screen both render at 2x2, and the 2x map
 // cost the Deck ~5.4 ms of GPU and ~12 fps in races (53 -> 41 fps; the Frame
-// is hotter and slower still at 1080p; #90).
+// is hotter and slower still at 1080p; #90); the wider map still costs frames
+// in its heaviest city scene (#90).
 //
 // Shadow Edges' Auto (ShadowEdgesSmooth, GitHub #90): Smooth (the receivers'
 // PCF) everywhere but a Steam Deck. Measured with the early out and shared
@@ -36,14 +48,22 @@
 
 namespace gpu
 {
-    // Shadow Resolution's Auto in half steps (user/settings.h: 2 is 1x, 4 is
-    // 2x) for a scene rendered at `scene` on `device`.
-    inline uint32_t AutoShadowHalves(const RenderScale& scene, video::SteamDevice device = video::SteamDevice::Other)
+    // Auto's map on Apple GPUs where it isn't 1x: 9/4 across the view (the
+    // map's x), 1 along it: 3600x1600.
+    inline constexpr RenderScale kAutoShadowWide{ { 9, 4 }, { 1, 1 } };
+
+    // Shadow Resolution's Auto for a scene rendered at `scene` on an Apple GPU
+    // or not (appleGpu, as HostScaledResolves takes it) and on `device`: the
+    // map's scale, an axis each. (The setting's own steps, 1x / 1.5x / 2x,
+    // are ShadowScale's and square.)
+    inline RenderScale AutoShadowScale(const RenderScale& scene, bool appleGpu, video::SteamDevice device = video::SteamDevice::Other)
     {
         if (device != video::SteamDevice::Other)
-            return 2;
+            return RenderScale::Whole(1, 1);
         const auto atLeastTwo = [](const AxisScale& a) { return a.num >= 2 * a.den; };
-        return atLeastTwo(scene.x) && atLeastTwo(scene.y) ? 4 : 2;
+        if (!atLeastTwo(scene.x) || !atLeastTwo(scene.y))
+            return RenderScale::Whole(1, 1);
+        return appleGpu ? kAutoShadowWide : RenderScale::Whole(2, 2);
     }
 
     // Shadow Edges (user/settings.h ShadowEdgesMode: 0 Auto, 1 Smooth, 2

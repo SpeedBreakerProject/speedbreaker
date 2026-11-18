@@ -4,6 +4,87 @@ What changed in each SpeedBreaker release, newest first. Each release's notes on
 its entry here, and the game shows the entry once, the first time a new version starts (offline:
 it's built into the game).
 
+## v0.2.6
+
+### What's new
+
+- **Bringing in a save** (GitHub issues #83 and #105, reported by ferarucatalin124 and ashdask):
+  a save from an Xbox 360 or from another install now comes into the game. Quit SpeedBreaker,
+  put the save in the save folder, and start the game again. It takes an Xbox 360 save package,
+  the save file taken out of one, a save's folder copied without the small file that goes beside
+  it, and the 454107D9 folder the Xenia emulator keeps its saves in. A save comes in only if it
+  passes the game's own checks, the ones it runs on its own saves. What you put in moves to an
+  `imported` folder inside the save folder, a save that's already there under the same name is
+  never replaced, and `import-log.txt` there says what came in and what didn't. The save folder
+  is `~/Library/Application Support/SpeedBreaker/save` on a Mac, `%LOCALAPPDATA%\SpeedBreaker\save`
+  on Windows, and `~/.local/share/speedbreaker/save` on Linux and the Steam Deck. On iPhone and
+  iPad, put it in the Files app under On My iPhone (or On My iPad) > SpeedBreaker instead, where
+  the game's files go; the `imported` folder and `import-log.txt` are there too, and the log also
+  says why a file there wasn't taken.
+- **Sharper shadows for less work on a Mac**: where Shadow Resolution's Auto picked 2x (Internal
+  Resolution at 2x or more), a Mac now gets a wider 3600x1600 shadow map instead of 3200x3200.
+  It gives back nearly all the detail across the picture that v0.2.2's fix for shadows missing at
+  the sides (#81) took away, and on an M1 Pro MacBook Pro it takes 1.5 to 1.7 ms less GPU time a
+  frame in a race than 2x, and about 190 MB less memory. The row shows "Auto (3600x1600)". Other
+  graphics cards keep 2x, and Steam Deck and Steam Frame keep 1x (GitHub issue #90).
+- **A gentler Frame Rate Auto on iPhone, iPad and Mac** (GitHub issue #71): Auto no longer drops
+  to 30 just because the system reports the device as hot ("serious") while the game still holds
+  60. It keeps 60 for as long as the game holds it, and drops to 30 when it can't, or at once at
+  "critical", the last step before the system starts shutting things down. At 30 it tries 60
+  again after a few minutes, even while the device is still warm, instead of waiting for it to
+  cool all the way down, which can take half an hour on a phone; a try that doesn't hold waits
+  longer before the next. Frame Rate's default is still 60.
+
+### Fixed
+
+- **The rear-view mirror and the reflections on the car**: their picture had stair-stepped edges at
+  every setting, because SpeedBreaker drew the car's surroundings with one sample a pixel where the
+  game asks for four. Now they get four (drawn at twice the size each way and averaged), so the
+  mirror's edges and lamp posts are smooth, close to the Xbox 360's. It costs about 0.4 ms of GPU
+  time a frame in a race on a Steam Deck, and nothing measurable on an M1 Pro Mac (GitHub
+  issue #89, reported by dregomz).
+- Shadow Resolution above 1x: the game checked the whole shadow map for changes at every draw that
+  uses it, and now checks again only after new data is written. On a Steam Deck, measured with the
+  3600x1600 map, that takes about 1 ms a frame off the render thread, and the busiest city stretch
+  we test runs at about 57 fps instead of 52. 1.5x and 2x went through the same check, so if you
+  chose one of them yourself, it runs lighter too.
+- iPhone, iPad, Mac, Steam Deck and Steam Machine: the game spends less of the CPU waiting, with
+  the same picture and frame rate (GitHub issue #71). Threads that wait for the GPU, for new work
+  or for their next turn now check less often and go to sleep sooner, and one late wake-up no
+  longer makes a thread spin for a whole second. In a race on an iPhone 18 Pro Max that's 6 to 16 %
+  less CPU and 9 to 21 % less CPU energy (13 to 42 % less in the menus), and on an M1 Pro Mac 4 to
+  12 % less CPU power, at the same 60 fps. On a Steam Deck only the wait for new work and the late
+  wake-up fix are on, because the other two cost frames in the busiest scenes there: about 8 % less
+  CPU in a race and 13 % less in the menus, also at 60 fps. On a Steam Machine all but the wait for
+  the GPU are on, because that one costs frames in the busiest scenes there: about 14 % less CPU in
+  a race and 15 % less in the menus, also at 60 fps. Thanks to Simonxdd for pointing at the busy
+  waits.
+- When the graphics driver stops answering and the system resets the GPU (reported with Intel
+  graphics on Windows: GitHub issues #57, #99 and #101, from Astrax2005, AhmadAbd9843 and
+  swifty-tekno), the game now closes within a few seconds and writes a crash report. Before, it
+  could also freeze for good, with no report. The resets themselves aren't fixed yet; the report
+  now says more about where they happen.
+- Sharper UI: where its last pass has nothing to do (the picture isn't enlarged, or is enlarged by
+  a whole number, as at a Mac's default), the game no longer prepares that pass every frame. On an
+  M1 Pro Mac that's about 0.2 to 0.45 ms less GPU time a frame, with the same picture.
+- On an iPhone, at 16:9 and on ultrawide screens, the menus' graffiti tags now start at the top
+  edge of the screen, as they do on a 16:10 Mac since v0.2.3 (GitHub issue #87).
+
+### More about it
+
+- NFSMW_CUBE_AA=off draws the mirror's surroundings the old way, for comparing.
+- With a German or Spanish PAL disc, saves are in `save-pal-de` or `save-pal-es` instead of
+  `save`, and that's where a save to bring in goes.
+- NFSMW_EFFICIENCY=0 makes the game wait the v0.2.5 way, and NFSMW_AUTO_FPS=classic gives Frame
+  Rate's Auto its v0.2.5 rules, for comparing. NFSMW_CPU_LOG=<seconds> (iPhone, iPad, Mac, Linux
+  and the Steam Deck) adds a line to the log with each thread's CPU use, and on iPhone, iPad and
+  Mac the CPU energy.
+- NFSMW_GPU_MARKERS=1 (or 2, for every draw) marks the GPU's progress through each frame, so the
+  crash report after a reset says which part of the picture it had finished and which it was
+  drawing. It's off by default: on Intel graphics it costs about 1 to 1.5 ms of GPU time a frame.
+  On Windows, the log also lists the GPU resets Windows recorded in the last 14 days.
+- NFSMW_UI_MASK_LAZY=0 prepares Sharper UI's last pass every frame, as v0.2.5 did.
+
 ## v0.2.5
 
 ### What's new

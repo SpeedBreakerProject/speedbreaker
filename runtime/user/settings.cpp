@@ -399,7 +399,7 @@ namespace settings
               .env = "NFSMW_RESOLUTION", .defaultValue = kResolutionAuto, .entries = kResolutionEntries },
             { .id = Id::ShadowResolution, .category = Category::Graphics, .type = Type::Enum, .apply = Apply::Live,
               .table = "video", .key = "shadow_resolution", .label = "Shadow Resolution",
-              .description = "Sharper sun shadows: draw the game's 1600x1600 shadow map at 1.5x or 2x. 1x is the 360's map, spread over the whole picture so shadows reach its sides, which makes them a little softer than on the 360. Higher settings use more GPU time and memory. Auto: 2x when Internal Resolution renders at 2x or more, otherwise 1x; always 1x on Steam Deck and Steam Frame.",
+              .description = "Sharper sun shadows: draw the game's 1600x1600 shadow map at 1.5x or 2x. 1x is the 360's map, spread over the whole picture so shadows reach its sides, which makes them a little softer than on the 360. Higher settings use more GPU time and memory. Auto: 2x when Internal Resolution renders at 2x or more (on a Mac, a wider 3600x1600 map instead: as sharp across the picture for less GPU time), otherwise 1x; always 1x on Steam Deck and Steam Frame.",
               .env = "NFSMW_SHADOW_RESOLUTION", .defaultValue = kShadowResolutionDefault, .entries = kShadowResolutionEntries },
             // Shadow Edges (gpu/shadow_auto.h ShadowEdgesSmooth): the receivers' PCF or the 360's tests, switched live.
             { .id = Id::ShadowEdges, .category = Category::Graphics, .type = Type::Enum, .apply = Apply::Live,

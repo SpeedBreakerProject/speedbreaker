@@ -8,7 +8,15 @@ namespace video
 {
     void AutoFrameRatePolicy::Reset()
     {
+        const bool gentle = m_gentle;
         *this = AutoFrameRatePolicy();
+        m_gentle = gentle;
+    }
+
+    bool AutoFrameRatePolicy::DropsOnState(platform::thermal::State thermal, bool gentle)
+    {
+        using platform::thermal::State;
+        return thermal == State::Critical || (!gentle && thermal == State::Serious);
     }
 
     FrameRateDecision AutoFrameRatePolicy::Update(double now, platform::thermal::State thermal, const FrameSample& sample)
@@ -18,6 +26,10 @@ namespace video
         const bool hot = thermal == State::Serious || thermal == State::Critical;
         if (hot)
             m_lastHot = now;
+        // What drops at 60 on the state alone, and the median under which
+        // 60 isn't held (gentle at serious: a shade under 60).
+        const bool dropsOnState = DropsOnState(thermal, m_gentle);
+        const double dropFps = m_gentle && thermal == State::Serious ? kWarmDropFps : kDropFps;
 
         // At 30, gameplay only: a menu or a load after a race would read as
         // room for 60 the next race doesn't have.
@@ -46,7 +58,7 @@ namespace video
                 frames += s.frames;
                 cp += double(s.cpMs) * s.frames;
                 gpu += double(s.gpuMs) * s.frames;
-                if (fps < kDropFps)
+                if (fps < dropFps)
                 {
                     slowFrames += s.frames;
                     slowCp += double(s.cpMs) * s.frames;
@@ -82,8 +94,8 @@ namespace video
 
         if (m_rate == 60)
         {
-            const bool cantHold = full && d.medianFps < kDropFps && std::max(d.slowCpMs, d.slowGpuMs) >= kDropCostMs;
-            if (dwelt && (hot || cantHold))
+            const bool cantHold = full && d.medianFps < dropFps && std::max(d.slowCpMs, d.slowGpuMs) >= kDropCostMs;
+            if (dwelt && (dropsOnState || cantHold))
             {
                 // Dropped again before the return settled: wait longer next
                 // time (a phone that heats up again 2-4 minutes after a
@@ -91,7 +103,7 @@ namespace video
                 if (now - m_lastRise < kSettleSec)
                     m_backoff = std::min(m_backoff + 1, kBackoffMax);
                 d.changed = true;
-                d.reason = hot ? FrameRateReason::Hot : FrameRateReason::CantHold60;
+                d.reason = dropsOnState ? FrameRateReason::Hot : FrameRateReason::CantHold60;
             }
             else if (now - m_lastSwitch >= kSettleSec)
                 m_backoff = 0;
@@ -102,10 +114,12 @@ namespace video
             const bool cool = !hot && d.coolSeconds >= kCoolSec * scale;
             const bool headroom = full && d.cpMs <= kRiseCpMs && d.gpuMs <= kRiseGpuMs;
             const bool tryIt = full && now - m_lastSwitch >= kTrySec * scale && d.cpMs <= kRiseCpMs;
-            if (dwelt && cool && (headroom || tryIt))
+            // Gentle: a try may come while still serious (not critical).
+            const bool warmTry = m_gentle && !cool && thermal == State::Serious && tryIt;
+            if (dwelt && ((cool && (headroom || tryIt)) || warmTry))
             {
                 d.changed = true;
-                d.reason = headroom ? FrameRateReason::Headroom : FrameRateReason::Try;
+                d.reason = cool && headroom ? FrameRateReason::Headroom : FrameRateReason::Try;
                 m_lastRise = now;
             }
         }

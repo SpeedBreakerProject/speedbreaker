@@ -690,6 +690,8 @@ static void TestParse()
     CHECK(gpu::ShadowScale(6) == RenderScale::Whole(2, 2), "shadow setting caps at 2x");
     CHECK(gpu::ShadowPoolMegabytes(RenderScale{ kHalf, kHalf }) == 256, "1.5x shadow pool");
     CHECK(gpu::ShadowPoolMegabytes(RenderScale::Whole(2, 2)) == 384, "2x shadow pool");
+    CHECK(gpu::ShadowPoolMegabytes(RenderScale{ { 9, 4 }, { 1, 1 } }) == 288, "9/4 x 1 shadow pool (Shadow Resolution's Auto)");
+    CHECK(gpu::ShadowPoolMegabytes(RenderScale::Whole(2, 1)) == 0 && gpu::ShadowPoolMegabytes(RenderScale::Whole(1, 1)) == 0, "no row: the general pool's size");
     RenderScale half{ kHalf, kHalf };
     CHECK(half.x.Size(1280) == 1920 && half.y.Size(720) == 1080 && half.SlotWords() == 2304 && half.PixelsNum() == 9 && half.PixelsDen() == 4,
         "1.5x: %ux%u, %u words a page", half.x.Size(1280), half.y.Size(720), half.SlotWords());

@@ -30,6 +30,25 @@
 //     to 8x); kSettleSec at 60 resets them. So a scene that can't hold 60
 //     costs a few short tries, then fewer.
 //
+// Gentle (SetGentle(true): Frame Rate Auto's rules from v0.2.6, item #71;
+// the rules above stay for NFSMW_AUTO_FPS=classic and the tests that pin
+// them). Rendering 60 for as long as the device can, iOS's own throttling
+// left to do its job:
+//   - Serious alone doesn't drop. At serious, 60 -> 30 only when 60 isn't
+//     held: over the last kWindowSec most frames ran under kWarmDropFps (a
+//     shade under 60: iOS is throttling, so slow frames there are its clocks,
+//     not a passing scene) at kDropCostMs or more. Critical drops at once, as
+//     before (the last step before iOS shuts things down).
+//   - Nominal or fair: the can't-hold rule above, unchanged (kDropFps).
+//   - At 30, 60 comes back as before (kCoolSec at fair or better, then
+//     headroom or a try), and also by a try while still serious (kTrySec at
+//     30, the CP within kRiseCpMs): a throttled device that holds 60 again
+//     gets it back without waiting for the state to fall, which can take
+//     half an hour on a phone. A try that fails drops again after kDwellSec
+//     and backs off (the dwell and the back-off are the hysteresis: at most
+//     one failed try per kTrySec x 2^backoff).
+//   - A device that is serious at the start starts at 60 (critical: 30).
+//
 // Numbers from the iPhone and iPad [perf] lines (2026-10-02 to 10-04),
 // replayed (tests/frame_rate_policy_test.cpp): the iPhone 15 Pro Max player's
 // free roam at 60 drops at 88 s (a median of 53.6 fps, its slow frames at
@@ -96,8 +115,15 @@ namespace video
     {
     public:
         // 60, no switch yet: a device that is already hot drops at the first
-        // update.
+        // update. Keeps the rules chosen with SetGentle.
         void Reset();
+        // The gentle rules (see above) instead of the classic ones (the
+        // default here, so the tests of the classic rules stand).
+        void SetGentle(bool gentle) { m_gentle = gentle; }
+        bool Gentle() const { return m_gentle; }
+        // The rules' answer to "is this thermal state hot enough to drop on
+        // its own": serious or critical (classic), critical only (gentle).
+        static bool DropsOnState(platform::thermal::State thermal, bool gentle);
         // `now`: seconds on a steady clock (the log's). Every half second or
         // so (every 30 swaps).
         FrameRateDecision Update(double now, platform::thermal::State thermal, const FrameSample& sample);
@@ -105,6 +131,7 @@ namespace video
 
         static constexpr double kWindowSec = 10;     // of game time
         static constexpr double kDropFps = 54;
+        static constexpr double kWarmDropFps = 57;   // gentle, at serious: the median a 60 that isn't held
         static constexpr double kDropCostMs = 15;    // the heavier of CP and GPU, a frame: 90% of a 60 fps frame
         static constexpr double kRiseCpMs = 12;
         static constexpr double kRiseGpuMs = 13;
@@ -126,5 +153,6 @@ namespace video
         double m_lastRise = kLongAgo;
         double m_lastHot = kLongAgo;  // the last update that saw thermal serious or critical
         int m_backoff = 0;
+        bool m_gentle = false;
     };
 }

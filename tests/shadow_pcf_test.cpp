@@ -113,12 +113,16 @@ namespace
         return b;
     }
 
-    void TestModel()
+    // The block maths on a w x h map. The shadow map isn't square when its
+    // scale differs per axis (NFSMW_SHADOW_SCALE=2x1: 3200 x 1600 host
+    // texels, gpu/shadow_ab.h): the GLSL takes the texel size per axis from
+    // textureSize(), and so does this model (Map::w, Map::h).
+    void TestBlock(int w, int h)
     {
-        Map m{ 16, 16, {} };
+        Map m{ w, h, {} };
         uint32_t seed = 12345;
         auto rnd = [&] { seed = seed * 1664525u + 1013904223u; return float(seed >> 8) / float(1u << 24); };
-        for (int i = 0; i < 256; i++)
+        for (int i = 0; i < w * h; i++)
             m.d.push_back(rnd());
         int checked = 0, uniform = 0;
         for (int k = 0; k < 4000; k++)
@@ -152,7 +156,17 @@ namespace
                 }
         }
         CHECK(checked == 36000, "%d", checked);
-        CHECK(uniform > 3600 && uniform < 32400, "%d of the taps' blocks uniform", uniform);
+        CHECK(uniform > 3600 && uniform < 32400, "%d of the taps' blocks uniform (%d x %d)", uniform, w, h);
+    }
+
+    void TestModel()
+    {
+        TestBlock(16, 16);
+        // Per-axis scales: 2x1, 9/4x1 and 3x1 of a 16 x 16 map, and 1x2.
+        TestBlock(32, 16);
+        TestBlock(36, 16);
+        TestBlock(48, 16);
+        TestBlock(16, 32);
 
         // An edge: depth 0 (caster) left of x = 8, 1 right; receiver at 0.5. The game's 9 tests on filtered depth
         // give a step of 3 levels across one texel at most; PCF ramps over ~2 texels.
@@ -273,7 +287,7 @@ namespace
             fprintf(stderr, "no shader folder %s: the game's shaders part skipped\n", dir.string().c_str());
             return 77;
         }
-        // The receivers (issues/90/shadow-quality/STEP1.md): 9 taps each, 9a81af49 two groups of 9.
+        // The receivers (#90): 9 taps each, 9a81af49 two groups of 9.
         const std::map<std::string, uint32_t> receivers = {
             { "42220e24e11f5220", 1 }, { "44c366e23ae5d695", 1 }, { "48553c3b04eb9b2f", 1 }, { "672e3ab309ec00b0", 1 },
             { "6c105e8dfb4c5220", 1 }, { "781d5cda69b100b2", 1 }, { "793a572b6da508d4", 1 }, { "90a9b04dbce54afb", 1 },

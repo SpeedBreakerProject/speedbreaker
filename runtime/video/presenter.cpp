@@ -34,6 +34,7 @@
 #include "hdr_output.h"
 #include "fsr1.h"
 #include "upscale.h"
+#include "ui_mask_use.h"
 #include <ui/ui.h>
 #if defined(__APPLE__) && TARGET_OS_IOS
 #include <platform/ios_ui.h>
@@ -44,6 +45,7 @@
 #include <user/settings.h>
 #include <report/report.h>
 #include <platform/thermal.h>
+#include <report/cpu_use.h>
 #include <platform/quit_signals.h>
 #ifdef _WIN32
 #include "repeats.h"
@@ -3096,6 +3098,10 @@ void main()
         // NFSMW_UI_MASK_SHOW=1 paints the mask red instead.
         VkImageView s_pendingUiMask = VK_NULL_HANDLE, s_frameUiMask = VK_NULL_HANDLE;
         uint64_t s_pendingUiMaskSeq = 0;
+        // NFSMW_UI_MASK_LAZY (video/ui_mask_use.h): whether the UI pass applied
+        // to the last picture drawn, and its size (ui_mask::Pack), for the
+        // renderer's UiMaskUseful.
+        std::atomic<uint64_t> s_uiMaskUse{ 0 };
         struct UiPassState
         {
             bool tried = false, ready = false;
@@ -3164,9 +3170,8 @@ void main()
         bool UiPassApplies(VkImageView mask, upscale::Pass pass, bool /*bandOn: followed (the pass keeps its spans)*/, uint32_t w, uint32_t h,
             int32_t dw, int32_t dh)
         {
-            if (!mask || !UiMaskOn() || pass != upscale::Pass::Bicubic || s_swapHdr || !upscale::Enlarged(w, h, dw, dh))
-                return false;
-            return uint32_t(dw) % w != 0 || uint32_t(dh) % h != 0;  // an integer enlargement keeps texels whole: as before
+            // (An integer enlargement keeps texels whole: as before. The rule: video/ui_mask_use.h.)
+            return mask && ui_mask::PassApplies(UiMaskOn(), pass == upscale::Pass::Bicubic, s_swapHdr, w, h, dw, dh);
         }
 
         // Inside the picture's rendering pass, after DrawPicture.
@@ -3725,6 +3730,17 @@ void main()
             }
         }
 
+        // NFSMW_GPU_MARKERS=0|1|2 (gpu/gpu_markers.h, renderer.cpp): where the
+        // GPU was when it stopped. Unset: off.
+        uint32_t GpuMarkersLevel(const VkPhysicalDeviceProperties& props)
+        {
+            (void)props;
+            const char* v = std::getenv("NFSMW_GPU_MARKERS");
+            if (v && *v)
+                return uint32_t(std::clamp(std::atoi(v), 0, 2));
+            return 0;
+        }
+
 #ifdef _WIN32
         // Windows on an Intel integrated GPU starts with the defaults measured
         // on one: a ThinkPad T14 Gen 1's UHD 620 (Gen9.5, driver 101.2135) on
@@ -4068,8 +4084,11 @@ void main()
         bool presentId = false, presentWait = false, hostImport = false, shadingRate = false, displayTiming = false;
         bool pciBusInfo = false;  // (a property query only: not enabled)
         bool hdrMetadata = false;
+        bool checkpoints = false, deviceFault = false;  // GPU markers' helpers (gpu/gpu_markers.h)
         for (auto& e : avail)
         {
+            checkpoints |= strcmp(e.extensionName, VK_NV_DEVICE_DIAGNOSTIC_CHECKPOINTS_EXTENSION_NAME) == 0;
+            deviceFault |= strcmp(e.extensionName, VK_EXT_DEVICE_FAULT_EXTENSION_NAME) == 0;
             pciBusInfo |= strcmp(e.extensionName, VK_EXT_PCI_BUS_INFO_EXTENSION_NAME) == 0;
             displayTiming |= strcmp(e.extensionName, VK_GOOGLE_DISPLAY_TIMING_EXTENSION_NAME) == 0;
             if (strcmp(e.extensionName, "VK_KHR_portability_subset") == 0)
@@ -4100,6 +4119,29 @@ void main()
         }
         if (hostImport)
             devExts.push_back(VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME);
+        // GPU markers (NFSMW_GPU_MARKERS; gpu/gpu_markers.h): where the GPU
+        // was when it stopped (GitHub #57, #99, #101). With them, the
+        // driver's own reports where the device has them: checkpoints
+        // (VK_NV_device_diagnostic_checkpoints: Intel's Windows driver for
+        // Gen9-Gen11 lists it, as NVIDIA's does) and a fault description
+        // (VK_EXT_device_fault). Off, the device is created as without them.
+        const uint32_t gpuMarkers = GpuMarkersLevel(props);
+        VkPhysicalDeviceFaultFeaturesEXT faultFeatures{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FAULT_FEATURES_EXT };
+        if (gpuMarkers && checkpoints)
+            devExts.push_back(VK_NV_DEVICE_DIAGNOSTIC_CHECKPOINTS_EXTENSION_NAME);
+        if (gpuMarkers && deviceFault)
+        {
+            VkPhysicalDeviceFeatures2 features2{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2 };
+            features2.pNext = &faultFeatures;
+            vkGetPhysicalDeviceFeatures2(s_physical, &features2);
+            faultFeatures.pNext = nullptr;
+            faultFeatures.deviceFaultVendorBinary = VK_FALSE;
+            deviceFault = faultFeatures.deviceFault == VK_TRUE;
+            if (deviceFault)
+                devExts.push_back(VK_EXT_DEVICE_FAULT_EXTENSION_NAME);
+        }
+        else
+            deviceFault = false;
         // NFSMW_SHADING_RATE=<w>x<h>: an experiment (presenter.h).
         uint32_t rateW = 0, rateH = 0;
         VkPhysicalDeviceFragmentShadingRateFeaturesKHR rateFeatures{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_SHADING_RATE_FEATURES_KHR };
@@ -4220,6 +4262,11 @@ void main()
             hostQueryReset.pNext = const_cast<void*>(dci.pNext);
             dci.pNext = &hostQueryReset;
         }
+        if (deviceFault)
+        {
+            faultFeatures.pNext = const_cast<void*>(dci.pNext);
+            dci.pNext = &faultFeatures;
+        }
         dci.pEnabledFeatures = &features;
         dci.queueCreateInfoCount = 1;
         dci.pQueueCreateInfos = &qci;
@@ -4317,6 +4364,16 @@ void main()
 #ifdef _WIN32
         s_context.integratedGpuDefaults = integratedGpuDefaults;
 #endif
+        s_context.gpuMarkers = gpuMarkers;
+        if (gpuMarkers && checkpoints)
+        {
+            s_context.cmdSetCheckpoint = (PFN_vkCmdSetCheckpointNV)vkGetDeviceProcAddr(s_device, "vkCmdSetCheckpointNV");
+            s_context.getQueueCheckpointData = (PFN_vkGetQueueCheckpointDataNV)vkGetDeviceProcAddr(s_device, "vkGetQueueCheckpointDataNV");
+            if (!s_context.cmdSetCheckpoint || !s_context.getQueueCheckpointData)
+                s_context.cmdSetCheckpoint = nullptr, s_context.getQueueCheckpointData = nullptr;
+        }
+        if (deviceFault)
+            s_context.getDeviceFaultInfo = (PFN_vkGetDeviceFaultInfoEXT)vkGetDeviceProcAddr(s_device, "vkGetDeviceFaultInfoEXT");
         s_contextReady = true;
         s_settingsGeneration = settings::Generation();
         fprintf(stderr, "[video] %s, swapchain %ux%u%s\n", props.deviceName, s_swapExtent.width, s_swapExtent.height, GeometryNote().c_str());
@@ -5032,6 +5089,7 @@ void main()
         DeliverTestAppEvents();
         ui::Tick();
         platform::thermal::Poll();  // about once a second
+        cpuuse::Poll();             // NFSMW_CPU_LOG: where the CPU and the power go
         memstatus::Poll();          // iOS: the memory footprint, once a minute
 #if defined(__APPLE__) && TARGET_OS_IOS
         platform::ios::PollBattery();  // every 5 seconds
@@ -5209,6 +5267,7 @@ void main()
             if (!ui::WantsFrames())
             {
                 frontLock.unlock();
+                cpuuse::Count(cpuuse::kMainDelay);
                 SDL_Delay(2);
                 return true;
             }
@@ -5220,6 +5279,7 @@ void main()
             if (now - s_lastGameFrame < std::chrono::milliseconds(50) || now - s_lastPresent < std::chrono::milliseconds(15))
             {
                 frontLock.unlock();
+                cpuuse::Count(cpuuse::kMainDelay);
                 SDL_Delay(1);
                 return true;
             }
@@ -5249,7 +5309,8 @@ void main()
         RegionCapture gameCapture;
 
         Frame& f = s_frames[s_frameIndex];
-        vkWaitForFences(s_device, 1, &f.inFlight, VK_TRUE, UINT64_MAX);
+        if (vkWaitForFences(s_device, 1, &f.inFlight, VK_TRUE, UINT64_MAX) == VK_ERROR_DEVICE_LOST)
+            gpu::renderer::ReportDeviceLost("vkWaitForFences (the presenter)");
         ReadHdrAverage();
         if (s_swapHdr)
         {
@@ -5323,6 +5384,8 @@ void main()
         }
         uint32_t imageIndex;
         VkResult acquire = vkAcquireNextImageKHR(s_device, s_swapchain, UINT64_MAX, f.imageAvailable, VK_NULL_HANDLE, &imageIndex);
+        if (acquire == VK_ERROR_DEVICE_LOST)
+            gpu::renderer::ReportDeviceLost("vkAcquireNextImageKHR (the presenter)");
         // Either is for the next frame's CheckSwapchain, which runs before
         // its acquire (one decision a frame: the policy counts in frames).
         if (acquire == VK_SUBOPTIMAL_KHR)
@@ -5350,6 +5413,10 @@ void main()
         VkCommandBufferBeginInfo bi{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
         bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
         vkBeginCommandBuffer(cmd, &bi);
+        if (s_context.gpuMarkers)
+            gpu::renderer::MarkPresent(cmd, true, std::format("the presenter's frame: {} into the window's {}x{} image{}, the UI over it",
+                gpuImage ? "the renderer's front image" : "a picture from the CPU", s_swapExtent.width, s_swapExtent.height,
+                AaEnabled() ? ", anti-aliased" : "").c_str());
 
         VkImage source = gpuImage;
         VkImageLayout sourceLayout = VK_IMAGE_LAYOUT_GENERAL;
@@ -5528,6 +5595,17 @@ void main()
                 passSharpen = Sharpen();
             }
             f.pass = pass;
+            // NFSMW_UI_MASK_LAZY: tell the renderer whether this picture's
+            // size takes the UI pass (with a diagnostic that draws other
+            // passes or a compare grid, always: their frames may). Whatever
+            // Sharper UI's setting (the renderer reads that itself): turned
+            // on live, its first pictures have their mask.
+            if (scaleInput)
+            {
+                static const bool always = s_upscaleAb || std::getenv("NFSMW_UPSCALE_COMPARE") != nullptr;
+                const bool applies = always || ui_mask::PassApplies(true, pass == upscale::Pass::Bicubic, s_swapHdr, w, h, dw, dh);
+                s_uiMaskUse.store(ui_mask::Pack(w, h, applies), std::memory_order_relaxed);
+            }
             if (scaleInput && pass == upscale::Pass::Fsr1)
                 RecordEasu(cmd, scaleInput, w, h, dw, dh, band, bandOn);
             Barrier(cmd, dst, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, 0,
@@ -5807,6 +5885,8 @@ void main()
                 Barrier(cmd, dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
                     VK_ACCESS_TRANSFER_WRITE_BIT, 0, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
         }
+        if (s_context.gpuMarkers)
+            gpu::renderer::MarkPresent(cmd, false, nullptr);
         vkEndCommandBuffer(cmd);
 
         VkSubmitInfo si{ VK_STRUCTURE_TYPE_SUBMIT_INFO };
@@ -5818,7 +5898,11 @@ void main()
         si.signalSemaphoreCount = 1;
         si.pSignalSemaphores = &s_renderDone[imageIndex];
         std::unique_lock queueLock(s_queueMutex);
-        vkQueueSubmit(s_queue, 1, &si, f.inFlight);
+        if (VkResult r = vkQueueSubmit(s_queue, 1, &si, f.inFlight); r == VK_ERROR_DEVICE_LOST)
+        {
+            queueLock.unlock();
+            gpu::renderer::ReportDeviceLost("vkQueueSubmit (the presenter)");
+        }
         frontLock.unlock();
 
         VkPresentInfoKHR pi{ VK_STRUCTURE_TYPE_PRESENT_INFO_KHR };
@@ -5995,6 +6079,8 @@ void main()
         }
         VkResult present = vkQueuePresentKHR(s_queue, &pi);
         queueLock.unlock();
+        if (present == VK_ERROR_DEVICE_LOST)
+            gpu::renderer::ReportDeviceLost("vkQueuePresentKHR (the presenter)");
         if (s_presentTiming && (present == VK_SUCCESS || present == VK_SUBOPTIMAL_KHR))
         {
             std::lock_guard lock(s_timingMutex);
@@ -6123,6 +6209,17 @@ void main()
                     }
                     fprintf(stderr, "[sharp-ui-ab] %s: image %llu, Sharper UI %s\n", path.c_str(), (unsigned long long)seq, (seq >> 2) & 1 ? "on" : "off");
                 }
+                static const bool lazyAb = [] { const char* v = std::getenv("NFSMW_UI_MASK_LAZY_AB"); return v && v[0] == '1'; }();
+                if (lazyAb)
+                {
+                    uint64_t seq;
+                    {
+                        std::lock_guard lock(s_pendingMutex);
+                        seq = s_lastSeq;
+                    }
+                    fprintf(stderr, "[ui-mask-lazy-ab] %s: image %llu, NFSMW_UI_MASK_LAZY %s, UI mask %s\n", path.c_str(), (unsigned long long)seq,
+                        (seq >> 2) & 1 ? "on" : "off", s_frameUiMask ? "handed over" : "none");
+                }
             }
             else
                 fprintf(stderr, "[video] can't save a presented frame to %s: %s\n", path.c_str(), strerror(errno));
@@ -6153,6 +6250,11 @@ void main()
     {
         std::lock_guard lock(s_pendingMutex);
         return s_submitSeq;
+    }
+
+    bool UiMaskUseful(uint32_t width, uint32_t height)
+    {
+        return ui_mask::Useful(s_uiMaskUse.load(std::memory_order_relaxed), width, height);
     }
 
     void SubmitFrontImage(VkImage image, uint32_t width, uint32_t height, uint32_t aspectWidth, uint32_t aspectHeight, float between,
@@ -6286,9 +6388,9 @@ void main()
         // Not on a Steam Deck (LCD "Jupiter", OLED "Galileo"; DMI product
         // name, vendor Valve): measured on the OLED at 90 Hz (2026-10-25) its
         // command processor took 17-23 ms a frame in busy scenes, lite in-between
-        // pictures were needed most of the time, and late pictures ghosted; the
-        // operator chose a steady 60 there (v020/smooth-steamos/INDEX.txt says how
-        // to try it again, e.g. on a later Deck). NFSMW_HFR_DECK=1 offers it anyway.
+        // pictures were needed most of the time, and late pictures ghosted, so a
+        // steady 60 stays there (NFSMW_HFR_DECK=1 offers it anyway, e.g. to try
+        // it again on a later Deck).
         static const bool deck = [] {
             const std::string vendor = ReadDmiLine("/sys/class/dmi/id/sys_vendor"), product = ReadDmiLine("/sys/class/dmi/id/product_name");
             const bool isDeck = IsSteamDeckDmi(vendor, product);  // video/steam_device.h

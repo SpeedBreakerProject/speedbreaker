@@ -61,7 +61,9 @@
 //     overrides: NFSMW_SHADOW_FIT=aspect divides the game's own f30 by scaleX
 //     and f2 by scaleY (the projection hook's factors: the game's fit widened
 //     with the screen, a no-op at 16:9, so 16:9 keeps the 360's gaps), and
-//     NFSMW_SHADOW_FIT=game leaves the fit alone.
+//     NFSMW_SHADOW_FIT=game leaves the fit alone. NFSMW_SHADOW_FIT=viewh
+//     (GitHub #90, A/B): the view's f30 (its horizontal reach: #81's sides)
+//     with the game's vertical f2 divided by scaleY (aspect's).
 //
 // A ppc/ generated before Vert+ calls the hooks with the x registers only
 // (the overloads below): Hor+ keeps working and TallHooksActive() stays
@@ -72,6 +74,7 @@
 #include "ultrawide.h"
 #include "front_end_matrix.h"
 #include "glare.h"
+#include <gpu/shadow_ab.h>
 
 #include <kernel/function.h>
 
@@ -264,9 +267,11 @@ namespace
 {
     // NFSMW_SHADOW_FIT: "view" (default) fits the view's stored projection,
     // the frustum actually drawn (wider than the 360's fit at 16:9 too);
-    // "aspect" widens the game's fit with the screen only (16:9 as on the
-    // 360); "game" leaves the game's fit. A/B overrides, not settings.
-    enum class ShadowFit { Game, Aspect, View };
+    // "viewh" (GitHub #90, A/B) the view's horizontal reach (#81's edges)
+    // with the game's vertical one, widened with the screen only; "aspect"
+    // widens the game's fit with the screen only (16:9 as on the 360);
+    // "game" leaves the game's fit (v0.2.1's). A/B overrides, not settings.
+    enum class ShadowFit { Game, Aspect, View, ViewH };
     const ShadowFit s_shadowFit = [] {
         const char* v = std::getenv("NFSMW_SHADOW_FIT");
         ShadowFit mode = ShadowFit::View;
@@ -274,18 +279,29 @@ namespace
             mode = ShadowFit::Game;
         else if (v && !strcmp(v, "aspect"))
             mode = ShadowFit::Aspect;
+        else if (v && !strcmp(v, "viewh"))
+            mode = ShadowFit::ViewH;
         if (v)
             fprintf(stderr, "[uw] NFSMW_SHADOW_FIT=%s: shadow map fit %s\n", v,
-                mode == ShadowFit::Game ? "as the game's" : mode == ShadowFit::Aspect ? "widened with the screen" : "to the view's projection");
+                mode == ShadowFit::Game     ? "as the game's"
+                : mode == ShadowFit::Aspect ? "widened with the screen"
+                : mode == ShadowFit::ViewH  ? "to the view's horizontal reach, the game's vertical (widened with the screen)"
+                                            : "to the view's projection");
         return mode;
     }();
 }
 
 void UltrawideShadowFit(PPCRegister& r29, PPCRegister& f30, PPCRegister& f2, PPCRegister& f1)
 {
-    if (s_shadowFit == ShadowFit::Game || !WidenedView(r29.u32))
+    // NFSMW_SHADOW_AB (gpu/shadow_ab.h, a diagnostic): the phase's variant's fit.
+    ShadowFit fit = s_shadowFit;
+    static_assert(int(ShadowFit::Game) == gpu::shadow_ab::FitGame && int(ShadowFit::Aspect) == gpu::shadow_ab::FitAspect &&
+        int(ShadowFit::View) == gpu::shadow_ab::FitView && int(ShadowFit::ViewH) == gpu::shadow_ab::FitViewH);
+    if (const int ab = gpu::shadow_ab::g_fit.load(std::memory_order_relaxed); ab >= 0)
+        fit = ShadowFit(ab);
+    if (fit == ShadowFit::Game || !WidenedView(r29.u32))
         return;
-    if (s_shadowFit == ShadowFit::View)
+    if (fit == ShadowFit::View || fit == ShadowFit::ViewH)
     {
         // The view's matrices (its first word): the projection at +64, P00
         // at +64 and P11 (negated, the game's y is flipped) at +84.
@@ -300,7 +316,10 @@ void UltrawideShadowFit(PPCRegister& r29, PPCRegister& f30, PPCRegister& f2, PPC
         if (p00 > 0.0f && p11 > 0.0f && std::isfinite(p00) && std::isfinite(p11))
         {
             f30.f64 = double(1.0f / p00);
-            f2.f64 = double(float(f1.f64) / p11);
+            if (fit == ShadowFit::View)
+                f2.f64 = double(float(f1.f64) / p11);
+            else if (const float sy = s_scales.load(std::memory_order_relaxed).y; sy != 1.0f)
+                f2.f64 = double(float(f2.f64) / sy);
             return;
         }
         // An unusable stored projection: widen with the screen instead.
