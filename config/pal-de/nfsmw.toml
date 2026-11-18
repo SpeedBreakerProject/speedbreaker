@@ -274,3 +274,174 @@ registers = ["f10"]
 name = "WorldSteps"
 address = 0x823A23FC
 registers = ["r30"]
+
+# Fix Timebug (runtime/game/fixes.cpp): the sim step (sub_82468148) right
+# after it stores the clock plus the step (f1), before the step tasks run.
+[[midasm_hook]]
+name = "SimClockStepped"
+address = 0x82468438
+registers = ["f1"]
+
+# Fix Busted Scenes (runtime/game/fixes.cpp): the starts of the heat 3 and heat
+# 4+ picks in the arrest-scene chooser (sub_82135F98); true jumps to its end.
+[[midasm_hook]]
+name = "BustedSceneBeforeHeat3Pick"
+address = 0x821363F4
+registers = ["r31", "r30"]
+jump_address_on_true = 0x82136770
+
+[[midasm_hook]]
+name = "BustedSceneBeforeHeat4Pick"
+address = 0x82136578
+registers = ["r31", "r30"]
+jump_address_on_true = 0x82136770
+
+[[midasm_hook]]
+name = "BustedSceneBeforeHeat4Pick"
+address = 0x82136580
+registers = ["r31", "r30"]
+jump_address_on_true = 0x82136770
+
+# Fix Leaderboard Refresh (runtime/game/fixes.cpp): the leaderboard widget
+# update (sub_822A0398), before it decrements its names/gaps countdown.
+[[midasm_hook]]
+name = "LeaderboardCountdown"
+address = 0x822A043C
+registers = ["r26"]
+
+# Fix Pursuit Crashes (runtime/game/fixes.cpp): the roadblock cop car loop
+# (sub_820EDCC8) after it loads a car (r30); true skips to the next car.
+[[midasm_hook]]
+name = "RoadblockCarLoaded"
+address = 0x820EDFA0
+registers = ["r30"]
+jump_address_on_true = 0x820EDFF8
+
+# Longer Alias Names (runtime/game/fixes.cpp): the alias keyboard
+# setup (sub_8228EB30) right after it loads the max length (r5).
+[[midasm_hook]]
+name = "AliasNameLengthSet"
+address = 0x8228EC08
+registers = ["r5"]
+
+# ...and the load list builder (sub_822926F0) where
+# it skips names of 8+ characters (r11 = length).
+[[midasm_hook]]
+name = "AliasListNameFits"
+address = 0x8229297C
+registers = ["r11"]
+jump_address_on_true = 0x82292988
+
+# Modern Gamepad Layouts (runtime/game/fixes.cpp): where the controls
+# screen (sub_8223F708, sub_8223FC68) and the loading screen (sub_822BAC70)
+# pick texture hash of the controller image.
+[[midasm_hook]]
+name = "ControllerPictureChosen"
+address = 0x8223F764
+registers = ["r9"]
+
+[[midasm_hook]]
+name = "ControllerPictureChosen"
+address = 0x8223FD70
+registers = ["r31"]
+
+[[midasm_hook]]
+name = "ControllerPictureChosen"
+address = 0x822BACE8
+registers = ["r30"]
+
+# Skip EA Trax In-Game (runtime/game/fixes.cpp): HUD Engage Event action
+# (sub_822A9798) after the engage interface availability check (r8 = 0).
+[[midasm_hook]]
+name = "EngageAvailabilityChecked"
+address = 0x822A9C00
+registers = ["r8"]
+
+# ...its switch on the action (r11, HUD in r28); for standings Up and Down flip...
+[[midasm_hook]]
+name = "HudActionDispatched"
+address = 0x822A995C
+registers = ["r11", "r28"]
+
+# ...and the next-song function's (sub_822862A0) "in the menus" result (r11).
+[[midasm_hook]]
+name = "NextSongInMenus"
+address = 0x82286344
+registers = ["r11"]
+
+# Max Performance in Career (runtime/game/fixes.cpp): the menu input
+# handler (sub_825755F8) and button setup (sub_82575C80),
+# each at its career check, jumping to the Performance screen check.
+[[midasm_hook]]
+name = "MaxPerformanceCareerCheck"
+address = 0x82575DD4
+jump_address_on_true = 0x82575E10
+
+[[midasm_hook]]
+name = "MaxPerformanceCareerCheck"
+address = 0x82576008
+jump_address_on_true = 0x82576044
+
+# World Map During Events (runtime/game/fixes.cpp): the in-game
+# handler (sub_822A9798) at the map "event active" key's branch.
+[[midasm_hook]]
+name = "WorldMapEventCheck"
+address = 0x822A9C4C
+jump_address_on_true = 0x822A9C50
+
+# Carbon-Style Race Progress (runtime/game/fixes.cpp): the
+# race progress text (sub_8229FDD8) at the LAP x/y branch.
+[[midasm_hook]]
+name = "RaceProgressLapText"
+address = 0x8229FFBC
+registers = ["r3", "r31"]
+jump_address_on_true = 0x8229FFEC
+
+# Hide Xbox Live Entry (runtime/game/fixes.cpp): the main menu builder
+# (sub_82237900) skips building and adding the Xbox Live row.
+[[midasm_hook]]
+name = "HideXboxLiveEntry"
+address = 0x82237D54
+jump_address_on_true = 0x82237DE0
+
+# Show HUD on Look Back (runtime/game/fixes.cpp): the HUD visibility
+# builder (sub_822A9DC0) right after it reads the lookback flag (r3).
+[[midasm_hook]]
+name = "HudLookbackRead"
+address = 0x822A9E60
+registers = ["r3"]
+
+# Mirror in Chase Cams (runtime/game/fixes.cpp): the radar update
+# (sub_82297840) right after it loads the mirror option (r10).
+[[midasm_hook]]
+name = "RadarMirrorOptionRead"
+address = 0x82297884
+registers = ["r10"]
+
+# Subtitles (runtime/game/fixes.cpp): the checks in sub_822874C8. Force On
+# jumps from the language check to the "load the subtitles" path; Force Off
+# skips the language branch, leaving only the tutorial check.
+[[midasm_hook]]
+name = "SubtitlesForceOn"
+address = 0x82287500
+jump_address_on_true = 0x82287520
+
+[[midasm_hook]]
+name = "SubtitlesForceOff"
+address = 0x8228750C
+jump_address_on_true = 0x82287510
+
+# FE helpers (runtime/game/fe.cpp): the FE pad processor (sub_822FD3A8) where the
+# focused object has no response for a button; tells OnUnhandledButton's listeners.
+[[midasm_hook]]
+name = "FeUnhandledButton"
+address = 0x822FDA30
+registers = ["r31", "r1"]
+
+# Polish save-system text: memcard/LOCALE_POLISH.LOC is a stub of
+# "LANGUAGE NOT SUPPORTED" lines; game/language.cpp swaps in the
+# Polish messages right after the file is read (sub_82289E60).
+[[midasm_hook]]
+name = "MemcardLocalePolish"
+address = 0x82289F78
+registers = ["r29"]

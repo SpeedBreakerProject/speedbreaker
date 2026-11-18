@@ -43,6 +43,7 @@
 #include <cstring>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace game::language
@@ -165,6 +166,81 @@ namespace game::language
                 return true;
         }
         return false;
+    }
+
+    // The code points of UTF-8 text.
+    inline std::vector<uint32_t> CodePoints(std::string_view utf8)
+    {
+        std::vector<uint32_t> out;
+        for (size_t i = 0; i < utf8.size();)
+        {
+            const uint8_t c = uint8_t(utf8[i]);
+            const size_t n = c < 0x80 ? 1 : c >= 0xF0 ? 4 : c >= 0xE0 ? 3 : 2;
+            uint32_t cp = n == 1 ? c : c & (0x7F >> n);
+            for (size_t k = 1; k < n && i + k < utf8.size(); k++)
+                cp = cp << 6 | (uint8_t(utf8[i + k]) & 0x3F);
+            out.push_back(cp);
+            i += n;
+        }
+        return out;
+    }
+
+    // Polish font: ASCII, then these at 0x81-0xF3 (anything else is '?').
+    inline constexpr std::pair<uint32_t, uint8_t> kPolishFont[] = {
+        { 0x0119, 0x81 }, { 0x0107, 0x82 }, { 0x0142, 0x83 }, { 0x015B, 0x84 },
+        { 0x0105, 0x85 }, { 0x017C, 0x86 }, { 0x0144, 0x87 }, { 0x017A, 0x88 },
+        { 0x0141, 0x8A }, { 0x0106, 0x8C }, { 0x201E, 0x8D }, { 0x201D, 0x8E },
+        { 0x2122, 0x8F }, { 0x2013, 0x91 }, { 0x0179, 0x94 }, { 0x00F3, 0xF3 },
+    };
+
+    inline std::string ToPolishFont(std::string_view utf8)
+    {
+        std::string out;
+        for (const uint32_t cp : CodePoints(utf8))
+        {
+            char c = cp < 0x80 ? char(cp) : '?';
+            for (const auto& [from, to] : kPolishFont)
+                if (from == cp)
+                    c = char(to);
+            out += c;
+        }
+        return out;
+    }
+
+    // memcard/LOCALE_<NAME>.LOC, the save system text by index: LOCH, LOCI
+    // (index table) and LOCL ({0, count}, offsets from its tag, UTF-16LE
+    // strings ending in two nulls), each chunk size counting its tag.
+    template <size_t N>
+    std::vector<uint8_t> BuildLoc(const std::string_view (&strings)[N])
+    {
+        std::vector<uint8_t> out;
+        auto u16 = [&](uint32_t v) {
+            out.push_back(uint8_t(v));
+            out.push_back(uint8_t(v >> 8));
+        };
+        auto u32 = [&](uint32_t v) { u16(v & 0xFFFF); u16(v >> 16); };
+        auto put32 = [&](size_t at, uint32_t v) {
+            for (int k = 0; k < 4; k++)
+                out[at + k] = uint8_t(v >> 8 * k);
+        };
+        const uint32_t count = uint32_t(N), loci = 16 + 4 * count;
+        auto tag = [&](const char* t) { out.insert(out.end(), t, t + 4); };
+        tag("LOCH"); u32(20); u32(1); u32(1); u32(loci + 20);
+        tag("LOCI"); u32(loci); u32(count); u32(0); u32(1);
+        for (uint32_t i = 2; i <= count; i++) { u16(i); u16(i - 1); }
+        const size_t locl = out.size();
+        tag("LOCL"); u32(0); u32(0); u32(count);
+        out.resize(out.size() + 4 * count);
+        for (uint32_t i = 0; i < count; i++)
+        {
+            put32(locl + 16 + 4 * i, uint32_t(out.size() - locl));
+            for (const uint32_t cp : CodePoints(strings[i]))
+                u16(cp);
+            u32(0);
+        }
+        out.resize((out.size() + 3) & ~size_t(3));
+        put32(locl + 4, uint32_t(out.size() - locl));
+        return out;
     }
 
     inline bool EndsWithNoCase(std::string_view s, std::string_view end)

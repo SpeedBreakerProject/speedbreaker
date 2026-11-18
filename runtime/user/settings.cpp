@@ -3,6 +3,7 @@
 #include <user/paths.h>
 #include <user/version_check.h>  // MigrateShadowResolution: last_version against 0.2.4
 #include <game/language.h>  // Settings > Game > Language: the languages
+#include <ui/quit_game.h>  // Main Menu Quit: kOffered
 
 #include <algorithm>
 #include <array>
@@ -160,6 +161,38 @@ namespace settings
             { 200, "200", "200 nits" },
             { 300, "300", "300 nits" },
             { 400, "400", "400 nits" },
+        };
+
+        constexpr EnumEntry kIntroVideosEntries[] = {
+            { int32_t(IntroVideos::Original), "original", "Original videos" },
+            { int32_t(IntroVideos::EaLogoOnly), "ea_logo_only", "Play EA logo only" },
+            { int32_t(IntroVideos::SkipEaHd), "skip_ea_hd", "Skip EA HD bumper" },
+            { int32_t(IntroVideos::SkipAll), "skip_all", "Skip every intro video" },
+        };
+
+        constexpr EnumEntry kGamepadPromptsEntries[] = {
+            { int32_t(GamepadPrompts::Original), "original", "Xbox 360 (Original)" },
+            { int32_t(GamepadPrompts::Xbox360), "xbox_360", "Xbox 360 (HD)" },
+            { int32_t(GamepadPrompts::XboxOne), "xbox_one", "Xbox One™" },
+            { int32_t(GamepadPrompts::Ps3), "ps3", "PlayStation®3" },
+            { int32_t(GamepadPrompts::Ps4), "ps4", "PlayStation®4" },
+            { int32_t(GamepadPrompts::Switch), "switch", "Nintendo Switch™" },
+        };
+
+        constexpr EnumEntry kSubtitlesEntries[] = {
+            { int32_t(Subtitles::Auto), "auto", "Auto" },
+            { int32_t(Subtitles::ForceOn), "force_on", "Force On" },
+            { int32_t(Subtitles::ForceOff), "force_off", "Force Off" },
+        };
+
+        constexpr EnumEntry kMirrorInChaseCamsEntries[] = {
+            { int32_t(MirrorInChaseCams::Shown), "shown", "Shown" },
+            { int32_t(MirrorInChaseCams::Hidden), "hidden", "Hidden" },
+        };
+
+        constexpr EnumEntry kTipsOnLoadscreensEntries[] = {
+            { int32_t(TipsOnLoadscreens::Shown), "shown", "Shown" },
+            { int32_t(TipsOnLoadscreens::Hidden), "hidden", "Hidden" },
         };
 
         constexpr EnumEntry kAspectEntries[] = {
@@ -543,6 +576,116 @@ namespace settings
             KeyOption2(Id::KeyLeftStickClick2, "left_stick_click_2", "Left Stick Click", "none"),
             KeyOption(Id::KeyRightStickClick, "right_stick_click", "Right Stick Click", "Pressing the right stick in.", "c"),
             KeyOption2(Id::KeyRightStickClick2, "right_stick_click_2", "Right Stick Click", "none"),
+            // Fixes
+            { .id = Id::BlackEditionContent, .category = Category::Fixes, .type = Type::Bool, .apply = Apply::Restart,
+              .table = "fixes", .key = "black_edition_content", .label = "Black Edition Content",
+              .description = "Black Edition content was left in the game files but never commercially released on Xbox 360. Enabling it doesn't affect your existing save since Black Edition adds nothing to Career mode.",
+              .env = "NFSMW_FIX_BLACK_EDITION", .defaultValue = 0 },
+            { .id = Id::FixTimebug, .category = Category::Fixes, .type = Type::Bool, .apply = Apply::Restart,
+              .table = "fixes", .key = "fix_timebug", .label = "Fix Timebug",
+              .description = "The original gameplay timer drifts as its clock loses floating-point precision over time. After 5 hours of gameplay, it runs about 5% faster; after 9 hours, it runs about 6% slower.",
+              .env = "NFSMW_FIX_TIMEBUG", .defaultValue = 0 },
+            { .id = Id::FixStuckWeather, .category = Category::Fixes, .type = Type::Bool, .apply = Apply::Live,
+              .table = "fixes", .key = "fix_stuck_weather", .label = "Fix Stuck Weather",
+              .description = "The original game lets cutscenes (NIS) override the weather and rarely clears it, so it becomes stuck until you restart the whole game. The bugfix clears it on safehouse visits.",
+              .env = "NFSMW_FIX_STUCK_WEATHER", .defaultValue = 0 },
+            { .id = Id::FixBustedScenes, .category = Category::Fixes, .type = Type::Bool, .apply = Apply::Live,
+              .table = "fixes", .key = "fix_busted_scenes", .label = "Fix Busted Scenes",
+              .description = "The original game plays the busted scenes (NIS) of heat levels 4+ instead of the ones intended for heat levels 2 and 3 due to a missing break in a switch case.",
+              .env = "NFSMW_FIX_BUSTED_SCENES", .defaultValue = 0 },
+            { .id = Id::FixLeaderboardRefresh, .category = Category::Fixes, .type = Type::Bool, .apply = Apply::Live,
+              .table = "fixes", .key = "fix_leaderboard_refresh", .label = "Fix Leaderboard Refresh",
+              .description = "The race leaderboard switches between names and gaps twice as fast on 60 FPS compared to 30 FPS. The bugfix makes it switch every 3.1 seconds, like on 30 FPS, regardless of framerate.",
+              .env = "NFSMW_FIX_LEADERBOARD", .defaultValue = 0 },
+            { .id = Id::FixCopSpoilerDamage, .category = Category::Fixes, .type = Type::Bool, .apply = Apply::Restart,
+              .table = "fixes", .key = "fix_cop_spoiler_damage", .label = "Fix Cop Spoiler Damage",
+              .description = "The original game never shows damage on the spoilers of the Sgt. Cross Corvette and the unmarked cop Corvettes due to the spoiler missing from the car damage zone map.",
+              .env = "NFSMW_FIX_COP_SPOILER", .defaultValue = 0 },
+            { .id = Id::FixPursuitCrashes, .category = Category::Fixes, .type = Type::Bool, .apply = Apply::Live,
+              .table = "fixes", .key = "fix_pursuit_crashes", .label = "Fix Pursuit Crashes",
+              .description = "The original game can crash in pursuit due to roadblock calling a cop car destroyed after its request, and a listener loop running past the end of its list when a pursuit HUD part leaves it mid-loop.",
+              .env = "NFSMW_FIX_PURSUIT_CRASHES", .defaultValue = 0 },
+            { .id = Id::IntroVideos, .category = Category::Fixes, .type = Type::Enum, .apply = Apply::Restart,
+              .table = "fixes", .key = "intro_videos", .label = "Intro Videos",
+              .description = "Choose which intro videos to play on start.",
+              .env = "NFSMW_FIX_INTRO_VIDEOS", .defaultValue = double(int32_t(IntroVideos::Original)), .entries = kIntroVideosEntries },
+            { .id = Id::LongerAliasNames, .category = Category::Fixes, .type = Type::Bool, .apply = Apply::Live,
+              .table = "fixes", .key = "longer_alias_names", .label = "Longer Alias Names",
+              .description = "The original game allows creating aliases with names containing up to 7 characters. You may choose to raise this limit to 15 characters. The original game can still load long aliases, but loses them from the alias selector if more than one alias is saved.",
+              .env = "NFSMW_FIX_LONG_NAMES", .defaultValue = 0 },
+            { .id = Id::ModernGamepadLayouts, .category = Category::Fixes, .type = Type::Bool, .apply = Apply::Restart,
+              .table = "fixes", .key = "modern_gamepad_layouts", .label = "Modern Gamepad Layouts",
+              .description = "Alternative gamepad layouts resembling other arcade racers. Intended to be used with the \"Skip EA Trax™ In-Game\" fix: control types 1, 2, 6 and 7 skip music tracks on RB instead of D-pad Up.",
+              .env = "NFSMW_FIX_MODERN_LAYOUTS", .defaultValue = 0 },
+            { .id = Id::InGameTraxSkip, .category = Category::Fixes, .type = Type::Bool, .apply = Apply::Live,
+              .table = "fixes", .key = "in_game_trax_skip", .label = "Skip EA Trax™ In-Game",
+              .description = "The original game lets you skip music tracks only in the menus. The fix maps D-pad Up to do that in free roam and races, moving the standings / pursuit bind to D-pad Down. Control types 1, 2, 6 and 7 from the \"Modern Gamepad Layouts\" fix will assign RB instead, releasing the D-pad Up bind back.",
+              .env = "NFSMW_FIX_TRAX_SKIP", .defaultValue = 0 },
+            { .id = Id::MaxPerformanceOnShop, .category = Category::Fixes, .type = Type::Bool, .apply = Apply::Live,
+              .table = "fixes", .key = "max_performance_on_shop", .label = "Max Perf Button in Career",
+              .description = "The original game shows the Max Performance button in the Performance Shop only outside Career. The fix makes the button appear in Career's Performance Shop as well.",
+              .env = "NFSMW_FIX_MAX_PERF_SHOP", .defaultValue = 0 },
+            { .id = Id::WorldMapAnywhere, .category = Category::Fixes, .type = Type::Bool, .apply = Apply::Live,
+              .table = "fixes", .key = "world_map_anywhere", .label = "World Map During Events",
+              .description = "The original game lets you open the World Map only in free roam. The fix lets you open it during events as well.",
+              .env = "NFSMW_FIX_WORLD_MAP", .defaultValue = 0 },
+            { .id = Id::CarbonStyleLapProgress, .category = Category::Fixes, .type = Type::Bool, .apply = Apply::Live,
+              .table = "fixes", .key = "carbon_style_lap_progress", .label = "Carbon-Style Lap Progress",
+              .description = "The original game shows the lap counter for the whole of a 1-lap circuit race. The fix shows the percentage counter instead, as in NFS: Carbon. Multi-lap circuit races are unaffected.",
+              .env = "NFSMW_FIX_RACE_PROGRESS", .defaultValue = 0 },
+            { .id = Id::MainMenuQuit, .category = Category::Fixes, .type = Type::Bool, .apply = Apply::Restart, .hidden = !ui::quit::kOffered,
+              .table = "fixes", .key = "main_menu_quit", .label = "Main Menu Quit",
+              .description = "The original in-game UI doesn't let you quit. The fix lets you quit by pressing the B button on the top-level main menu, like the Q key does in the PC version. Hidden and disabled on iPhone / iPad.",
+              .env = "NFSMW_FIX_MAIN_MENU_QUIT", .defaultValue = 0 },
+            { .id = Id::HideXboxLiveEntry, .category = Category::Fixes, .type = Type::Bool, .apply = Apply::Live,
+              .table = "fixes", .key = "hide_xbox_live_entry", .label = "Hide Xbox Live Entry",
+              .description = "Online multiplayer is no longer usable, so you may choose to hide the corresponding menu entry.",
+              .env = "NFSMW_FIX_XBOX_LIVE", .defaultValue = 0 },
+            { .id = Id::HideEsrbDisclaimer, .category = Category::Fixes, .type = Type::Bool, .apply = Apply::Live,
+              .table = "fixes", .key = "hide_esrb_disclaimer", .label = "Hide ESRB Disclaimer",
+              .description = "Online play notice on the splash screen. USA release only; already hidden on other releases.",
+              .env = "NFSMW_FIX_ESRB", .defaultValue = 0 },
+            { .id = Id::ShowHudOnLookback, .category = Category::Fixes, .type = Type::Bool, .apply = Apply::Live,
+              .table = "fixes", .key = "show_hud_on_lookback", .label = "Show HUD on Look Back",
+              .description = "The original game hides the HUD while you look back. You may choose to keep it on screen all the time, like in NFS:U2.",
+              .env = "NFSMW_FIX_HUD_LOOKBACK", .defaultValue = 0 },
+            { .id = Id::MirrorInChaseCams, .category = Category::Fixes, .type = Type::Enum, .apply = Apply::Live,
+              .table = "fixes", .key = "mirror_in_chase_cams", .label = "Mirror in Chase Cams",
+              .description = "The Xbox 360 version shows the rearview mirror in every camera. You may choose to hide it for chase cameras, like on other platforms (PC, PS2, Xbox, GameCube).",
+              .env = "NFSMW_FIX_MIRROR_CHASE_CAMS", .defaultValue = double(int32_t(MirrorInChaseCams::Shown)), .entries = kMirrorInChaseCamsEntries },
+            { .id = Id::TipsOnLoadscreens, .category = Category::Fixes, .type = Type::Enum, .apply = Apply::Live,
+              .table = "fixes", .key = "tips_on_loadscreens", .label = "Tips on Loading Screens",
+              .description = "Loading screens may show a game tip or the gamepad layout. Useful on a real console but can be a nuisance here, since they usually pass by too fast to read. You may choose to hide them.",
+              .env = "NFSMW_FIX_LOADING_TIPS", .defaultValue = double(int32_t(TipsOnLoadscreens::Shown)), .entries = kTipsOnLoadscreensEntries },
+            { .id = Id::HideSubtitleBackground, .category = Category::Fixes, .type = Type::Bool, .apply = Apply::Live,
+              .table = "fixes", .key = "hide_subtitle_background", .label = "Hide Subtitle Background",
+              .description = "The original game shows a semi-transparent background behind the movie subtitles. Probably mastered for SDTV; the text reads fine without it at HD resolutions. Your mileage may vary.",
+              .env = "NFSMW_FIX_SUBTITLE_BG", .defaultValue = 0 },
+            { .id = Id::Subtitles, .category = Category::Fixes, .type = Type::Enum, .apply = Apply::Live,
+              .table = "fixes", .key = "subtitles", .label = "Subtitles",
+              .description = "The game automatically shows story movie subtitles only when the game locale differs from the voiceover language. You can choose to force them on or off regardless. No story movie subtitles exist for French, Italian, German and Spanish locales, so no option will show them.",
+              .env = "NFSMW_FIX_SUBTITLES", .defaultValue = double(int32_t(Subtitles::Auto)), .entries = kSubtitlesEntries },
+            { .id = Id::Nfsu2LoyaltyBonus, .category = Category::Fixes, .type = Type::Bool, .apply = Apply::Live,
+              .table = "fixes", .key = "nfsu2_loyalty_bonus", .label = "NFS:U2 Loyalty Bonus",
+              .description = "The new Career starts with $10,000 extra cash and a thank-you message if an NFS:U2 save is found. That can't technically happen on Xbox 360, but you can treat yourself to that built-in bonus anyway.",
+              .env = "NFSMW_FIX_LOYALTY_BONUS", .defaultValue = 0 },
+            { .id = Id::UnlockAllThings, .category = Category::Fixes, .type = Type::Bool, .apply = Apply::Live,
+              .table = "fixes", .key = "unlock_all_things", .label = "Unlock All Content",
+              .description = "The game's native debug switch: every car, part and race is available, in Career, Quick Race and split-screen. Not saved to your profile; turning it off leaves your saved progress as it was.",
+              .env = "NFSMW_FIX_UNLOCK_ALL", .defaultValue = 0 },
+            // Mods
+            { .id = Id::GamepadPrompts, .category = Category::Mods, .type = Type::Enum,
+              .apply = Apply::Restart, .table = "mods", .key = "gamepad_prompts",
+              .label = "Gamepad Prompts",
+              .description = "Optional HD gamepad prompts by Aero_ for various systems, including a redrawn Xbox 360 set.",
+              .env = "NFSMW_MOD_GAMEPAD_PROMPTS",
+              .defaultValue = double(int32_t(GamepadPrompts::Original)),
+              .entries = kGamepadPromptsEntries },
+            { .id = Id::HdHudMod, .category = Category::Mods, .type = Type::Bool,
+              .apply = Apply::Restart, .table = "mods", .key = "hd_hud_mod",
+              .label = "HD HUD Mod",
+              .description = "Upscaled HUD mod by LunicAura106: redrawn 4K textures adapted for SpeedBreaker. Uses up to 50 MB of RAM/VRAM. The original textures were mastered for sub-720p resolutions (Deck-friendly).",
+              .env = "NFSMW_MOD_HD_HUD", .defaultValue = 0 },
             // Advanced
             { .id = Id::AsyncShaders, .category = Category::Advanced, .type = Type::Bool, .apply = Apply::Live,
               .table = "advanced", .key = "async_shaders", .label = "Asynchronous Shaders",
@@ -605,6 +748,7 @@ namespace settings
         std::atomic<double> s_stored[kCount]{};    // what settings.toml holds / the menu set
         std::atomic<double> s_envValue[kCount]{};  // this run's environment override
         std::atomic<bool> s_envSet[kCount]{};
+        std::atomic<bool> s_modWaiting[kCount]{};  // set by SetModWaiting
         double s_baseline[kCount]{};               // stored values as last loaded or saved (Dirty)
         std::atomic<double> s_deviceDefault[kCount]{};  // SetDeviceDefault's, where s_hasDeviceDefault
         std::atomic<bool> s_hasDeviceDefault[kCount]{};
@@ -1368,6 +1512,8 @@ namespace settings
         case Category::Controls: return "Controls";
         case Category::Wheel: return "Wheel";
         case Category::Game: return "Game";
+        case Category::Fixes: return "Fixes";
+        case Category::Mods: return "Mods";
         case Category::Advanced: return "Advanced";
         default: return "";
         }
@@ -1443,8 +1589,21 @@ namespace settings
     {
         size_t i = size_t(id);
         EnsureInit("a restart was checked");
-        return kOptions[i].apply == Apply::Restart && !s_envSet[i].load(std::memory_order_relaxed) &&
-            s_stored[i].load(std::memory_order_relaxed) != detail::g_effective[i].load(std::memory_order_relaxed);
+        const bool env = s_envSet[i].load(std::memory_order_relaxed);
+        const double stored = s_stored[i].load(std::memory_order_relaxed);
+        if (kOptions[i].apply != Apply::Restart)
+            return false;
+        if (!env && stored != detail::g_effective[i].load(std::memory_order_relaxed))
+            return true;
+        // On (the value for this run under an override) with mod files waiting.
+        const double on =
+            env ? detail::g_effective[i].load(std::memory_order_relaxed) : stored;
+        return s_modWaiting[i].load(std::memory_order_relaxed) && on != 0;
+    }
+
+    void SetModWaiting(Id id, bool waiting)
+    {
+        s_modWaiting[size_t(id)].store(waiting, std::memory_order_relaxed);
     }
 
     bool AnyRestartPending()

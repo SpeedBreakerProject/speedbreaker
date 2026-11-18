@@ -143,6 +143,34 @@ namespace settings
         KeyRightStickRight, KeyRightStickRight2,
         KeyLeftStickClick, KeyLeftStickClick2,
         KeyRightStickClick, KeyRightStickClick2,
+        // Fixes (the [fixes] table): game/fixes.cpp
+        BlackEditionContent,
+        FixTimebug,
+        FixStuckWeather,
+        FixBustedScenes,
+        FixLeaderboardRefresh,
+        FixCopSpoilerDamage,
+        FixPursuitCrashes,
+        IntroVideos,
+        LongerAliasNames,
+        ModernGamepadLayouts,
+        InGameTraxSkip,
+        MaxPerformanceOnShop,
+        WorldMapAnywhere,
+        CarbonStyleLapProgress,
+        MainMenuQuit,
+        HideXboxLiveEntry,
+        HideEsrbDisclaimer,
+        ShowHudOnLookback,
+        MirrorInChaseCams,
+        TipsOnLoadscreens,
+        HideSubtitleBackground,
+        Subtitles,
+        Nfsu2LoyaltyBonus,
+        UnlockAllThings,
+        // Mods (the [mods] table): game/mods.cpp
+        GamepadPrompts,
+        HdHudMod,
         // Advanced
         AsyncShaders,
         PerformanceOverlay,
@@ -156,7 +184,11 @@ namespace settings
     // Key: a key code of user/key_names.h (0: no key), saved by its name
     // there ("w", "left_shift", "none"); the menu takes it from a key press.
     enum class Type : uint8_t { Bool, Int, Float, Enum, Key };
-    enum class Category : uint8_t { Display, Graphics, Audio, Input, Wheel, Controls, Game, Advanced, Count };
+    enum class Category : uint8_t
+    {
+        Display, Graphics, Audio, Input, Wheel, Controls,
+        Game, Fixes, Mods, Advanced, Count
+    };
     enum class Apply : uint8_t { Live, Restart };
 
     // Values of the enum options (GetInt returns them).
@@ -193,6 +225,27 @@ namespace settings
     // pass, as before; Sharper is FSR 1's EASU with a light RCAS where FSR 1
     // is offered, a clamped Lanczos where it isn't (iPhone, iPad).
     enum class MovieUpscalingMode : int32_t { Original = 0, Sharper = 1 };
+    // Intro Videos (game/fixes.cpp): which videos play before the title screen.
+    enum class IntroVideos : int32_t
+    {
+        Original = 0, EaLogoOnly = 1, SkipEaHd = 2, SkipAll = 3
+    };
+    // Gamepad Prompts (game/mods.cpp): the original icons, or an HD set
+    // (<user data>/mods/button_packs/<set>).
+    enum class GamepadPrompts : int32_t
+    {
+        Original = 0,
+        Xbox360 = 1,
+        XboxOne = 2,
+        Ps3 = 3,
+        Ps4 = 4,
+        Switch = 5,
+    };
+    // Subtitles (game/fixes.cpp): Auto = stock behavior,
+    // Force On = every movie, Force Off = tutorials only.
+    enum class Subtitles : int32_t { Auto = 0, ForceOn = 1, ForceOff = 2 };
+    enum class MirrorInChaseCams : int32_t { Shown = 0, Hidden = 1 };
+    enum class TipsOnLoadscreens : int32_t { Shown = 0, Hidden = 1 };
     // Anisotropy: 1 (off), 2, 4, 8, 16, or one of these.
     constexpr int32_t kAnisotropyAuto = 0;   // 16x on a discrete GPU or an M-series iPad, 4x on other integrated ones
     constexpr int32_t kAnisotropyGame = -1;  // each texture's own setting, as on the 360
@@ -290,8 +343,12 @@ namespace settings
     // The environment variable's name while it overrides this option for
     // this run; nullptr otherwise.
     const char* EnvOverride(Id id);
-    // A Restart option whose stored value differs from the running one.
+    // A Restart option whose stored value differs from the running one, or
+    // one that is on (non-zero) while SetModWaiting holds for it.
     bool RestartPending(Id id);
+    // Mod files for this option changed on disk since start (downloaded, or
+    // an update is waiting): used after a restart (mods/mods.h).
+    void SetModWaiting(Id id, bool waiting);
     // RestartPending for any option the menu shows. Hidden ones don't count:
     // the presenter stores the window's size on every resize, which isn't a
     // reason to ask the player to restart.

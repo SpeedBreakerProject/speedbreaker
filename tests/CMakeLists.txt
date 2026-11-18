@@ -493,21 +493,38 @@ sb_test(key_map_test)
 # pedals, the steering curve, the pedals' travel, the buttons and paddles,
 # NFSMW_WHEEL_BUTTONS, and the force-feedback levels.
 sb_test(wheel_map_test)
+# The strict JSON reader under the update check, and its tree
+# (update/json.h).
+sb_test(json_test SOURCES ${RT}/update/json.cpp)
 # Check for Updates' logic: versions, release tags and the Windows beta
 # order, GitHub's JSON (a release and a list of them), this device's file and
 # complete releases, curl's output, the release notes, and every row of
 # update-now's "Which version is newer" table (update/check.cpp, self-contained).
-sb_test(update_check_test SOURCES ${RT}/update/check.cpp)
+sb_test(update_check_test SOURCES ${RT}/update/check.cpp ${RT}/update/json.cpp)
+# Unpacking downloads: sha256sum lines, stored zips (checks, then a file
+# opened and extracted in a scratch folder) (download/unpack.h).
+sb_test(download_unpack_test SOURCES ${RT}/download/unpack.cpp ${RT}/update/json.cpp
+    ARGS ${CMAKE_CURRENT_BINARY_DIR}/download_unpack_scratch)
+# Texture mods: manifest, tags, VERSION; sets on disk, the swap and clean-up
+# on start, mod state and the restart a Settings row asks for (mods/mods.h).
+sb_test(mods_test SOURCES ${RT}/mods/mods.cpp ${RT}/download/unpack.cpp
+    ${RT}/update/json.cpp ${SB_SETTINGS_SOURCES}
+    ARGS ${CMAKE_CURRENT_BINARY_DIR}/mods_scratch)
+target_include_directories(mods_test SYSTEM PRIVATE
+    ${ROOT}/tools/XenonRecomp/thirdparty/tomlplusplus/include)
+target_link_libraries(mods_test PRIVATE ${SB_SETTINGS_LIBS})
 # The startup check's toast, frame by frame: once per version, not over a
 # panel, and taken down for good once Settings opens (update/startup_toast.h).
 sb_test(startup_toast_test)
 # The transport by hand (not a test: it goes online; point it at a local
 # stand-in): Windows' WinHTTP, Linux's curl. update_fetch_probe.cpp says how.
 if(WIN32)
-    add_executable(update_fetch_probe ${CMAKE_CURRENT_SOURCE_DIR}/update_fetch_probe.cpp ${RT}/update/check.cpp ${RT}/update/fetch_windows.cpp)
+    add_executable(update_fetch_probe ${CMAKE_CURRENT_SOURCE_DIR}/update_fetch_probe.cpp
+        ${RT}/update/check.cpp ${RT}/update/json.cpp ${RT}/update/fetch_windows.cpp)
     target_link_libraries(update_fetch_probe PRIVATE winhttp)
 elseif(NOT APPLE)
-    add_executable(update_fetch_probe ${CMAKE_CURRENT_SOURCE_DIR}/update_fetch_probe.cpp ${RT}/update/check.cpp ${RT}/update/fetch_curl.cpp)
+    add_executable(update_fetch_probe ${CMAKE_CURRENT_SOURCE_DIR}/update_fetch_probe.cpp
+        ${RT}/update/check.cpp ${RT}/update/json.cpp ${RT}/update/fetch_curl.cpp)
     target_link_libraries(update_fetch_probe PRIVATE Threads::Threads)
 endif()
 if(TARGET update_fetch_probe)

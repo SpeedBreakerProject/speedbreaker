@@ -5,6 +5,7 @@
 #include "startup_toast.h"
 
 #include <cpu/guest_thread.h>
+#include <mods/mods.h>
 #include <report/report.h>
 #include <ui/ui.h>
 #include <user/paths.h>
@@ -27,6 +28,7 @@ namespace update
             std::shared_ptr<const Result> result;
             Kind kind = Kind::Pressed;      // the running or last check's
             bool pressedWhileRunning = false;  // a startup check the player then asked for too
+            std::shared_ptr<const std::vector<ModNotice>> mods;
         };
         Shared& State()
         {
@@ -58,10 +60,18 @@ namespace update
         std::chrono::steady_clock::time_point s_windowUpAt;
         bool s_startupSettled = false;  // started, or skipped for this launch
         bool s_loggedOff = false;       // "off" logged while waiting for the setting
-        bool s_toastSettled = false;    // the startup result's toast handled for this launch
-        std::string s_toastText;        // the startup toast shown ("": none yet)
+        bool s_toastSettled = false;    // startup result toasts handled for this launch
+        // Startup toasts: the release first, then mods (not announced before).
+        struct StartupToast
+        {
+            std::string text;
+            std::string tag;   // tag of the release or the mod
+            std::string mod;   // mod key ("": the release)
+        };
+        std::vector<StartupToast> s_toasts;
+        bool s_toastsBuilt = false;
+        bool s_toastsShown = false;
         std::chrono::steady_clock::time_point s_toastAt;  // ...when
-        bool s_announcedRead = false, s_announcedBefore = false;  // NotifiedTag() read once
 
         std::string UserAgent()
         {
@@ -232,6 +242,11 @@ namespace update
                 fetched = Fetch({ .url = std::string(kApiBase) + (list ? kListPath : kLatestPath), .userAgent = UserAgent(), .headers = headers });
 
             Result result = Evaluate(fetched, running, int64_t(std::time(nullptr)));
+            // The mod manifest lives on GitHub itself, so
+            // a run with a test feed never asks for it.
+            std::shared_ptr<const std::vector<ModNotice>> modNotices;
+            if (mods::kAvailable && !(override && *override) && !(feed && *feed))
+                modNotices = mods::CheckManifest(UserAgent());
             const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
             const bool tested = running.version != report::Version();
 
@@ -254,6 +269,7 @@ namespace update
                 Shared& state = State();
                 std::lock_guard lock(state.mutex);
                 state.result = std::make_shared<const Result>(std::move(result));
+                state.mods = std::move(modNotices);
                 state.phase = Phase::Done;
             }
             if (!toast.empty())
@@ -351,7 +367,7 @@ namespace update
     {
         Shared& state = State();
         std::lock_guard lock(state.mutex);
-        return { state.phase, state.checks, state.result, state.kind };
+        return { state.phase, state.checks, state.result, state.kind, state.mods };
     }
 
     void SetDialogShowing(bool showing)
@@ -362,6 +378,11 @@ namespace update
     void NoteSeen(const std::string& tag)
     {
         RecordNotified(tag);
+    }
+
+    void NoteModSeen(const ModNotice& notice)
+    {
+        mods::RecordNotified(notice.key, notice.tag);
     }
 
     void NoteAfterUpdate()
@@ -421,9 +442,9 @@ namespace update
                 s_startupSettled = true;
             }
         }
-        // The startup check found a newer version: one toast, once per
-        // version, once no panel (the installer, What's new) is up; taken
-        // down for good once Settings opens (update/startup_toast.h).
+        // The startup check found a newer version, or mods: one toast each,
+        // once per version, when no panel (the installer, What's new) is up;
+        // taken down for good once Settings opens (update/startup_toast.h).
         if (s_startupSettled && !s_toastSettled)
         {
             const Status status = GetStatus();
@@ -436,47 +457,85 @@ namespace update
             }
             ToastInputs in;
             in.resultReady = status.phase == Phase::Done;
-            in.available = in.resultReady && status.kind == Kind::Startup && status.result && status.result->outcome == Outcome::Available;
+            if (in.resultReady && status.kind == Kind::Startup && !s_toastsBuilt)
+            {
+                s_toastsBuilt = true;
+                if (status.result && status.result->outcome == Outcome::Available)
+                {
+                    if (NotifiedTag() == status.result->latestTag)
+                        fprintf(stderr,
+                            "[update] startup check: %s was announced before: no toast "
+                            "(the Settings footer still offers it)\n",
+                            status.result->latestTag.c_str());
+                    else
+                        s_toasts.push_back({ StartupToastText(*status.result),
+                            status.result->latestTag, {} });
+                }
+                if (status.mods)
+                {
+                    const std::vector<std::string> announced = mods::NotifiedTags();
+                    for (const ModNotice& notice : *status.mods)
+                    {
+                        if (std::find(announced.begin(), announced.end(), notice.tag)
+                            != announced.end())
+                            fprintf(stderr,
+                                "[update] startup check: %s was announced before: "
+                                "no toast\n",
+                                notice.tag.c_str());
+                        else
+                            s_toasts.push_back({ notice.text, notice.tag, notice.key });
+                    }
+                }
+            }
+            in.available = !s_toasts.empty();
             in.modal = ui::HasModal();
             in.settingsOpen = ui::SettingsOpen();
-            in.shown = !s_toastText.empty();
-            if (in.available && !in.shown)
-            {
-                if (!s_announcedRead)
-                {
-                    s_announcedBefore = NotifiedTag() == status.result->latestTag;
-                    s_announcedRead = true;
-                }
-                in.announcedBefore = s_announcedBefore;
-            }
+            in.shown = s_toastsShown;
+            const auto record = [](const StartupToast& toast) {
+                if (toast.mod.empty())
+                    RecordNotified(toast.tag);
+                else
+                    mods::RecordNotified(toast.mod, toast.tag);
+            };
             switch (NextToastStep(in))
             {
             case ToastStep::Wait:
-                // Its time on screen is over (12 s; a little more for a queue): nothing left to take down.
-                if (in.shown && std::chrono::steady_clock::now() - s_toastAt > std::chrono::seconds(30))
+                // Their time on screen is over (12 s; a bit more
+                // for a queue), so nothing is left to take down.
+                if (in.shown
+                    && std::chrono::steady_clock::now() - s_toastAt
+                        > std::chrono::seconds(30 + 12 * (s_toasts.size() - 1)))
                     s_toastSettled = true;
                 break;
             case ToastStep::Done:
-                if (in.available && in.announcedBefore)
-                    fprintf(stderr, "[update] startup check: %s was announced before: no toast (the Settings footer still offers it)\n",
-                        status.result->latestTag.c_str());
                 s_toastSettled = true;
                 break;
             case ToastStep::Skip:
-                fprintf(stderr, "[update] startup check: Settings is open: no toast (its footer offers %s)\n", status.result->latestTag.c_str());
-                RecordNotified(status.result->latestTag);
+                for (const StartupToast& toast : s_toasts)
+                {
+                    fprintf(stderr,
+                        "[update] startup check: Settings is open: no toast for %s\n",
+                        toast.tag.c_str());
+                    record(toast);
+                }
                 s_toastSettled = true;
                 break;
             case ToastStep::Show:
-                s_toastText = StartupToastText(*status.result);
-                fprintf(stderr, "[update] toast: %s\n", s_toastText.c_str());
-                ui::Toast(s_toastText, 12.0);
+                for (const StartupToast& toast : s_toasts)
+                {
+                    fprintf(stderr, "[update] toast: %s\n", toast.text.c_str());
+                    ui::Toast(toast.text, 12.0);
+                    record(toast);
+                }
+                s_toastsShown = true;
                 s_toastAt = std::chrono::steady_clock::now();
-                RecordNotified(status.result->latestTag);
                 break;
             case ToastStep::Withdraw:
-                ui::WithdrawToast(s_toastText);
-                fprintf(stderr, "[update] Settings opened: the update toast is taken down\n");
+                for (const StartupToast& toast : s_toasts)
+                    ui::WithdrawToast(toast.text);
+                fprintf(stderr,
+                    "[update] Settings opened: the update toast%s taken down\n",
+                    s_toasts.size() == 1 ? " is" : "s are");
                 s_toastSettled = true;
                 break;
             }
