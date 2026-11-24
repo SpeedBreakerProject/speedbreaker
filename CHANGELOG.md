@@ -4,6 +4,48 @@ What changed in each SpeedBreaker release, newest first. Each release's notes on
 its entry here, and the game shows the entry once, the first time a new version starts (offline:
 it's built into the game).
 
+## v0.2.7
+
+### What's new
+
+- **Black Edition content** (GitHub issue #100): Settings > Game > Black Edition (off by default)
+  turns on the Black Edition content the original disc already holds, with no mod: ten more bonus
+  cars, a circuit, two sprints and the Black Edition Challenge. It takes effect the next time the
+  game starts. A save made with it on still loads with it off; that content is hidden again.
+  Thanks to tuhana, whose research and Xenia patch found the switch.
+- **Steam Frame: faster drawing.** The launcher asks the Frame's graphics driver to draw straight
+  to memory instead of through the chip's tile memory: on our Frame about 1 ms less GPU time a
+  frame at the default size and 3 ms at 2x, with the same picture. To leave the driver its own
+  choice, start the game with `NFSMW_TURNIP_SYSMEM=0`.
+
+### Fixed
+
+- **The bloom's dark fringe beside thin poles and wires** (GitHub issue #106, reported by
+  krittinen): at Internal Resolution 2x and up it showed as blocky patches, and in motion it
+  flickered on and off as things moved. The game draws its bloom into small pictures that stay
+  at the Xbox 360's size, and the first of them sampled only a quarter of the scene. It now reads
+  the whole scene everywhere, so the fringe holds steady, and from 2x up the small pictures are
+  read through a smoother filter, so the fringe is smooth instead of blocky. The glow keeps the
+  360's size and softness. A Steam Deck gets the steady fringe without the smoother filter, which
+  would cost it 2 to 3 fps at 1080p. To see the old picture, start the game with `NFSMW_BLOOM=off`.
+- **The installer says when a file isn't the disc** (GitHub issue #108): an .iso that isn't an
+  Xbox 360 game's image was left out of the installer's list without a word. When the installer
+  finds nothing it can install, it now lists such a file in grey, as "Not an Xbox 360 disc" or
+  "Unsupported format", and says which disc SpeedBreaker needs: the USA or the European (PAL,
+  Spanish) Xbox 360 disc of Need for Speed: Most Wanted. A file picked with Browse for image gets
+  the same sentence.
+- **The update dialog's download address**: the address of a Windows beta numbered 10 or higher
+  didn't fit beside "Download page:" and was cut off at the dialog's edge. From this version on it
+  goes on a line of its own when it doesn't fit, and shows whole.
+- **What's new breaks lines only between words**: this note could break a line inside a folder's
+  path, between a number and its unit, or between a setting's name and its value in parentheses.
+  It now keeps those together.
+- **The World Map's cursor at the Xbox 360's speed** (GitHub issue #14, reported by telmotrooper):
+  the game moves the cursor a fixed step every frame, and the Xbox 360 runs it at 30 frames a
+  second, so at Frame Rate 60 it moved twice as fast. The step is now halved at 60, so the cursor
+  moves at the 360's speed and still moves every frame. To get the old speed back, start the game
+  with `NFSMW_MAP_CURSOR=0`.
+
 ## v0.2.6
 
 ### What's new
@@ -56,9 +98,9 @@ it's built into the game).
   12 % less CPU power, at the same 60 fps. On a Steam Deck only the wait for new work and the late
   wake-up fix are on, because the other two cost frames in the busiest scenes there: about 8 % less
   CPU in a race and 13 % less in the menus, also at 60 fps. On a Steam Machine all but the wait for
-  the GPU are on, because that one costs frames in the busiest scenes there: about 14 % less CPU in
-  a race and 15 % less in the menus, also at 60 fps. Thanks to Simonxdd for pointing at the busy
-  waits.
+  the GPU are on, because that one costs frames in the busiest scenes there: about 12 to 14 % less
+  CPU in a race and 9 to 15 % less in the menus, also at 60 fps. Thanks to Simonxdd for pointing at
+  the busy waits.
 - When the graphics driver stops answering and the system resets the GPU (reported with Intel
   graphics on Windows: GitHub issues #57, #99 and #101, from Astrax2005, AhmadAbd9843 and
   swifty-tekno), the game now closes within a few seconds and writes a crash report. Before, it
@@ -81,7 +123,7 @@ it's built into the game).
   Mac the CPU energy.
 - NFSMW_GPU_MARKERS=1 (or 2, for every draw) marks the GPU's progress through each frame, so the
   crash report after a reset says which part of the picture it had finished and which it was
-  drawing. It's off by default: on Intel graphics it costs about 1 to 1.5 ms of GPU time a frame.
+  drawing. It's off by default: on Intel graphics it costs about 0.5 to 1.5 ms of GPU time a frame.
   On Windows, the log also lists the GPU resets Windows recorded in the last 14 days.
 - NFSMW_UI_MASK_LAZY=0 prepares Sharper UI's last pass every frame, as v0.2.5 did.
 

@@ -212,13 +212,23 @@ namespace
         return b;
     }
 
-    // Every file and folder under `dir`, with each file's bytes.
+    // A path below a picture's folder as the checks spell it: "imported/ALEX",
+    // with '/' on every system. (fs::relative builds it with the system's own
+    // separator: "imported\ALEX" on Windows, where the checks' "/" names then
+    // missed it.)
+    std::string Name(const fs::path& path)
+    {
+        const std::u8string text = path.generic_u8string();
+        return std::string(text.begin(), text.end());
+    }
+
+    // Every file and folder under `dir`, with each file's bytes, by Name().
     std::map<std::string, Bytes> Picture(const fs::path& dir)
     {
         std::map<std::string, Bytes> p;
         for (const auto& entry : fs::recursive_directory_iterator(dir))
         {
-            const std::string name = Utf8(fs::relative(entry.path(), dir));
+            const std::string name = Name(fs::relative(entry.path(), dir));
             p[name] = entry.is_directory() ? Bytes{ 'd', 'i', 'r' } : ReadFile(entry.path());
             if (p[name].size() > (1u << 20))  // a stand-in disc image: its size and sum, not its bytes
             {

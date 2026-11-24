@@ -129,6 +129,8 @@ namespace ui
                         s_dialogPick = std::move(picked->path);
                         s_pickAccess = picked->access;
                     }
+                    else
+                        fprintf(stderr, "[installer] the Files picker closed without a file\n");  // cancelled (ios_files.mm logs any answer)
                 });
             if (!shown)
             {
@@ -374,6 +376,8 @@ namespace ui
             case Error::WrongGame: return "Another game";
             case Error::TruncatedImage: return "Incomplete image";
             case Error::ReadError: return "Can't be read";
+            case Error::NotADiscImage: return "Not an Xbox 360 disc";
+            case Error::UnsupportedFormat: return "Unsupported format";
             default: return "Can't be installed";
             }
         }
@@ -1050,10 +1054,18 @@ namespace ui
             }
             ImGui::Spacing();
             // Under the list, to the window's bottom edge: two lines for why
-            // the focused image won't install, a gap, the path to type, a
-            // gap, the buttons.
+            // the focused image won't install (up to four when a reason needs
+            // them: one that isn't the disc also says what is), a gap, the
+            // path to type, a gap, the buttons.
             const float line = ImGui::GetTextLineHeightWithSpacing();
-            const float detailHeight = line * 2 + kSpaceS * s;
+            int detailLines = 2;
+            for (const auto& c : st.images)
+                if (!c.status.Ok())
+                {
+                    const float wrapped = ImGui::CalcTextSize(c.status.message.c_str(), nullptr, false, ImGui::GetContentRegionAvail().x).y;
+                    detailLines = std::clamp(int(std::ceil(wrapped / ImGui::GetFontSize() - 0.01f)), detailLines, 4);
+                }
+            const float detailHeight = line * float(detailLines) + kSpaceS * s;
 #if defined(__APPLE__) && TARGET_OS_IOS
             const float pathRow = 0;  // no path to type on iOS (no keyboard, nor paths to know)
 #else

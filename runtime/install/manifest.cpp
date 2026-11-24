@@ -148,6 +148,19 @@ namespace install
         return s_usa;
     }
 
+    std::string NeededDisc()
+    {
+        std::string names;
+        for (size_t i = 0; i < std::size(s_manifests); i++)
+        {
+            std::string name(s_manifests[i]->regionName);
+            if (name.starts_with("Europe "))
+                name = "European " + name.substr(7);
+            names += (i == 0 ? "the " : i + 1 == std::size(s_manifests) ? " or the " : ", the ") + name;
+        }
+        return "SpeedBreaker needs a copy of the Xbox 360 disc of Need for Speed: Most Wanted, " + names + " one.";
+    }
+
     std::span<const Manifest* const> GameManifests()
     {
         return s_manifests;

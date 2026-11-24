@@ -13,6 +13,7 @@
 #include <user/version_check.h>
 
 #include <imgui.h>
+#include <imgui_internal.h>  // CalcWrapWidthForPos: the width ImGui's own wrapping used
 
 #include <cfloat>
 
@@ -30,8 +31,31 @@ namespace ui
         {
             std::string title;
             std::vector<version::NoteLine> lines;
+            // Each line as drawn (version::WrapNote), for the width it was laid out at.
+            struct Shown
+            {
+                float width = -1.0f;
+                std::string text;
+            };
+            std::vector<Shown> shown;
             bool firstFrame = true;
         };
+
+        // Line `i` of the note, wrapped where it may break (version::WrapNote:
+        // a path, a number or a range and its unit, a word and its issue number
+        // or its short parenthesis stay together: version::KeepTogether).
+        void DrawLine(Note& note, size_t i)
+        {
+            const float width = ImGui::CalcWrapWidthForPos(ImGui::GetCursorScreenPos(), 0.0f);
+            Note::Shown& shown = note.shown[i];
+            if (shown.width != width)
+            {
+                shown.width = width;
+                shown.text = version::WrapNote(note.lines[i].text, width,
+                    [](std::string_view text) { return ImGui::CalcTextSize(text.data(), text.data() + text.size()).x; });
+            }
+            ImGui::TextUnformatted(shown.text.c_str(), shown.text.c_str() + shown.text.size());
+        }
 
         void Close(const char* how)
         {
@@ -68,27 +92,26 @@ namespace ui
             ImGui::SetNextWindowSizeConstraints(ImVec2(0, lineHeight), ImVec2(FLT_MAX, std::max(room, lineHeight * 3)));
             if (ImGui::BeginChild("entry", ImVec2(0, 0), ImGuiChildFlags_AutoResizeY))
             {
-                ImGui::PushTextWrapPos(0.0f);
-                for (const version::NoteLine& line : note.lines)
-                    switch (line.kind)
+                // Wrapped by DrawLine, not by ImGui (no wrap position pushed).
+                for (size_t i = 0; i < note.lines.size(); i++)
+                    switch (note.lines[i].kind)
                     {
                     case version::NoteLine::Kind::Gap:
                         ImGui::Spacing();
                         break;
                     case version::NoteLine::Kind::Heading:
                         PushAccentText();
-                        ImGui::TextWrapped("%s", line.text.c_str());
+                        DrawLine(note, i);
                         PopAccentText();
                         break;
                     case version::NoteLine::Kind::Bullet:
                         ImGui::Bullet();
-                        ImGui::TextWrapped("%s", line.text.c_str());
+                        DrawLine(note, i);
                         break;
                     case version::NoteLine::Kind::Text:
-                        ImGui::TextWrapped("%s", line.text.c_str());
+                        DrawLine(note, i);
                         break;
                     }
-                ImGui::PopTextWrapPos();
                 float step = lineHeight * 0.5f;
                 if (ImGui::IsKeyDown(ImGuiKey_GamepadDpadDown) || ImGui::IsKeyDown(ImGuiKey_GamepadLStickDown) || ImGui::IsKeyDown(ImGuiKey_DownArrow))
                     ImGui::SetScrollY(ImGui::GetScrollY() + step);
@@ -137,6 +160,7 @@ namespace ui
         note->lines = version::ParseNote(WhatsNewEntry());
         if (note->lines.empty())
             return;
+        note->shown.resize(note->lines.size());
         fprintf(stderr, "[ui] What's new: v%.*s (%zu lines)\n", int(version.size()), version.data(), note->lines.size());
         SetModal([note] { Draw(*note); });
     }

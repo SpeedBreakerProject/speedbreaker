@@ -645,10 +645,10 @@ namespace install
         {
             // Original Xbox discs boot default.xbe.
             if (source.Find("default.xbe"))
-                return Fail(Error::WrongGame, std::format("{} holds an original Xbox game, not {} for Xbox 360.",
-                    What(source), kGameName), "default.xbe");
-            return Fail(Error::NotADiscImage, std::format("{} has no default.xex: it is not an Xbox 360 game.",
-                What(source)), "default.xex");
+                return Fail(Error::WrongGame, std::format("{} holds an original Xbox game, not {} for Xbox 360. {}",
+                    What(source), kGameName, NeededDisc()), "default.xbe");
+            return Fail(Error::NotADiscImage, std::format("{} has no default.xex: it is not an Xbox 360 game. {}",
+                What(source), NeededDisc()), "default.xex");
         }
         if (!r.Ok())
             return r;
@@ -662,9 +662,10 @@ namespace install
         if (id.titleId != manifest.titleId)
         {
             r = Fail(Error::WrongGame, id.titleId
-                ? std::format("{} is not {}: it holds another game (title ID {:08X}; {} is {:08X}).", What(source),
-                    kGameName, id.titleId, kGameName, manifest.titleId)
-                : std::format("{} is not {}: its default.xex is not an Xbox 360 game executable.", What(source), kGameName),
+                ? std::format("{} is not {}: it holds another game (title ID {:08X}; {} is {:08X}). {}", What(source),
+                    kGameName, id.titleId, kGameName, manifest.titleId, NeededDisc())
+                : std::format("{} is not {}: its default.xex is not an Xbox 360 game executable. {}", What(source), kGameName,
+                    NeededDisc()),
                 id.file->path);
             r.foundHash = found;
             return r;

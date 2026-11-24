@@ -11,6 +11,7 @@
 #include <unordered_set>
 #include "block_ranges.h"
 #include "covers.h"
+#include "bloom.h"
 #include "cube_aa.h"
 #include "edge_bars.h"
 #include "gpu_markers.h"
@@ -812,6 +813,14 @@ namespace gpu::renderer
         // NFSMW_PASS_PROFILE=<frame>: time every render pass of one frame and
         // print them (targets, area, draws, GPU us). 256 passes max.
         const int s_profileFrame = [] { const char* v = std::getenv("NFSMW_PASS_PROFILE"); return v ? std::atoi(v) : -1; }();
+        // NFSMW_PASS_PROFILE=<frame>/<every> (GitHub #106): again every <every>
+        // frames after it (2 or more), each frame printed as one is.
+        const uint32_t s_profileEvery = [] {
+            const char* v = std::getenv("NFSMW_PASS_PROFILE");
+            const char* slash = v ? strchr(v, '/') : nullptr;
+            return slash ? uint32_t(std::max(0, std::atoi(slash + 1))) : 0u;
+        }();
+        uint64_t s_profiledFrame = 0;
         VkQueryPool s_passQueries = VK_NULL_HANDLE;
         uint64_t s_frame = 0;
         // Per profiled pass, also what was recorded in the gap before it:
@@ -1205,7 +1214,37 @@ namespace gpu::renderer
         const uint32_t s_logTextureUse = [] { const char* v = std::getenv("NFSMW_LOG_TEXTURE_USE"); return v ? uint32_t(strtoul(v, nullptr, 16)) : 0u; }();
         bool s_drawUsesLoggedTexture = false;
         bool s_drawScaled = false;  // the current draw renders into scaled targets (internal resolution)
+        // NFSMW_BLOOM (gpu/bloom.h, GitHub #106; unset: auto; off: as before
+        // v0.2.7): the bloom chain's surfaces at the scene's scale, the
+        // combine's B-spline reads of them, the first pass's whole-area reads.
+        uint32_t s_bloom = gpu::bloom::kOff;
+        // NFSMW_BLOOM=auto: s_bloom is gpu::bloom::AutoMode of the scene's
+        // scale, taken again whenever that changes (BloomAuto).
+        bool s_bloomAuto = gpu::bloom::kAutoByDefault;
+        // NFSMW_BLOOM=alt (a test aid, as NFSMW_CUBE_AA=alt): the modes of
+        // gpu::bloom::kAltOrder in turn, a [perf] window each (BloomAlt;
+        // NFSMW_BLOOM_ALT_FRAMES=<n>: n frames each).
+        bool s_bloomAlt = false;
+        uint32_t s_bloomAltWindow = gpu::bloom::kAltWindow;
+        // NFSMW_BLOOM_LOG=1 (a diagnostic): each pixel shader that reads one
+        // of the chain's resolved textures, once per shader, slot and target.
+        const bool s_bloomLog = [] { const char* v = std::getenv("NFSMW_BLOOM_LOG"); return v && v[0] && v[0] != '0'; }();
+        std::unordered_set<uint32_t> s_bloomLogDests;
+        std::unordered_set<uint64_t> s_bloomLogSeen;
+        // The combines the filter applies to (NFSMW_BLOOM_PS; unset: a race
+        // frame's and the camera shots', gpu::bloom::kCombines).
+        uint64_t s_bloomPs[8] = { gpu::bloom::kCombines[0], gpu::bloom::kCombines[1] };
+        uint32_t s_bloomPsCount = gpu::bloom::kCombineCount;
+        bool s_drawIntoBloomChain = false;  // the current draw renders into the chain's scaled surfaces (NFSMW_BLOOM=scale)
         bool s_logDrawsNow = false;
+        // NFSMW_LOG_DRAWS_DETAIL=1 (with NFSMW_LOG_DRAWS, GitHub #106): each
+        // logged draw of at most 6 vertices (the post-processing passes, the
+        // HUD's quads) also gets its targets' scales, its textures' fetch
+        // constants (size, format, filters, clamps) and what was bound for
+        // them, its pixel and vertex shaders' float constants and its first
+        // vertices; and the frame's resolves are logged as NFSMW_LOG_RESOLVES
+        // does.
+        const bool s_logDrawDetail = [] { const char* v = std::getenv("NFSMW_LOG_DRAWS_DETAIL"); return v && v[0] && v[0] != '0'; }();
         std::string s_loggedTextureFetch;
         uint32_t s_drawsSinceCheck = 0;
         bool s_submitAfterDraw = false;  // mid-batch submit to a starving GPU (eager writes)
@@ -2004,6 +2043,9 @@ namespace gpu::renderer
             bool sharpTranslated = false;
             std::string classicGlsl;  // Shadow Edges: Classic (the receivers' plain translation)
             bool classicTranslated = false;
+            // NFSMW_BLOOM=filter (gpu/bloom.h): the plain translation with the
+            // reads of these slots (a mask) through the B-spline.
+            std::unordered_map<uint32_t, std::string> bloomGlsl;
         };
         std::unordered_map<uint64_t, std::unique_ptr<Shader>> s_shaders;
         Shader* s_vs = nullptr;
@@ -2339,10 +2381,11 @@ namespace gpu::renderer
         }
 
         VkShaderModule PixelVariant(Shader& ps, uint32_t outputs, uint32_t inputs, bool alphaTest,
-            gpu::sharp_ui::Mode sharp = gpu::sharp_ui::Mode::Off, uint32_t uiMask = 0, bool classicEdges = false)
+            gpu::sharp_ui::Mode sharp = gpu::sharp_ui::Mode::Off, uint32_t uiMask = 0, uint32_t bloomMask = 0, bool classicEdges = false)
         {
             uint32_t key = (outputs & 0xF) | ((inputs & 0xFFFF) << 4) | (alphaTest ? 1u << 20 : 0) | gpu::sharp_ui::VariantBits(sharp) |
                 ((uiMask & 3u) << 24) | (classicEdges ? 1u << 26 : 0);
+            key |= (bloomMask & ((1u << gpu::bloom::kSlotBits) - 1)) << 27;  // NFSMW_BLOOM=filter's slots
             std::lock_guard lock(ps.compileMutex);
             auto it = ps.variants.find(key);
             if (it != ps.variants.end())
@@ -2388,6 +2431,29 @@ namespace gpu::renderer
                 }
                 if (!ps.classicGlsl.empty())
                     glsl = &ps.classicGlsl;
+            }
+            else if (bloomMask)
+            {
+                // NFSMW_BLOOM=filter / fill (gpu/bloom.h): the plain translation
+                // with those slots' reads through the B-spline (a combine) or
+                // the 4x4 box (the chain's first pass), its function before
+                // main (once per shader and mask). No read of them: the plain module.
+                auto [it, made] = ps.bloomGlsl.try_emplace(bloomMask);
+                if (made)
+                {
+                    const bool box = ps.hash == gpu::bloom::kDownsamplePs;
+                    std::string text = ps.info.glsl;
+                    const size_t mainAt = text.find("void main()");
+                    if (mainAt != std::string::npos && gpu::bloom::RewriteFetches(text, bloomMask, box ? "sbBloomBox" : "sbBloomTex"))
+                    {
+                        text.insert(mainAt, box ? gpu::bloom::FillGlsl() : gpu::bloom::FilterGlsl());
+                        it->second = std::move(text);
+                    }
+                    fprintf(stderr, "[bloom] ps_%016llx: slots 0x%x read through the %s%s\n", (unsigned long long)ps.hash, bloomMask,
+                        box ? "4x4 box" : "B-spline", it->second.empty() ? ": no such read, the plain shader" : "");
+                }
+                if (!it->second.empty())
+                    glsl = &it->second;
             }
             std::string preamble;
             // NFSMW_SHARP_UI_EXP=1/2 (a diagnostic, the cost's breakdown): sharpTex2D stops after the hardware's
@@ -2919,6 +2985,29 @@ namespace gpu::renderer
                                hfr::Enabled() && video::HfrOffered() ? ", half the budget for Smooth Motion's two pictures a step" : "");
         }
 
+        // NFSMW_BLOOM=auto (gpu/bloom.h; the default): the mode for the
+        // scale the scene's surfaces have now. Called where that scale is
+        // first read and after every change of it (ApplyRenderScale: the
+        // setting, Auto following the picture, split screen). Fill and the
+        // filter are picked draw by draw, so nothing is made again. For the
+        // log: "auto: fillfilter at 2x2 (the filter from 2x on both axes)",
+        // or on a Steam Deck "auto: fill at 2x2 (Steam Deck: no filter)".
+        void BloomAuto()
+        {
+            if (!s_bloomAuto)
+                return;
+            const uint32_t was = s_bloom;
+            const video::SteamDevice device = video::ThisSteamDevice();
+            s_bloom = gpu::bloom::AutoMode(s_renderScale, device);
+            static bool first = true;
+            const std::string rule = device == video::SteamDevice::Deck
+                ? std::format("{}: no filter", video::SteamDeviceName(device))
+                : std::format("the filter from {}x on both axes", gpu::bloom::kAutoFilterFrom);
+            fprintf(stderr, "[bloom] auto: %s at %s (%s)%s\n", gpu::bloom::ModeName(s_bloom), gpu::ScaleName(s_renderScale).c_str(), rule.c_str(),
+                first ? "" : was == s_bloom ? ", as before" : std::format(", was {}", gpu::bloom::ModeName(was)).c_str());
+            first = false;
+        }
+
         void ReadRenderScale(const VkPhysicalDeviceProperties& props)
         {
             // Settings > Video > Internal Resolution; NFSMW_RENDER_SCALE
@@ -3029,6 +3118,48 @@ namespace gpu::renderer
                             : "renders 2x2 host pixels a guest pixel, averaged by its resolve",
                         (unsigned long long)gpu::cube_aa::ShadedPixels(s_cubeAA), (unsigned long long)gpu::cube_aa::StoredSamples(s_cubeAA));
             }
+            // NFSMW_BLOOM (gpu/bloom.h, GitHub #106; unset: auto).
+            if (const char* v = std::getenv("NFSMW_BLOOM"))
+                if (!gpu::bloom::ParseMode(v, s_bloom, s_bloomAlt, s_bloomAuto))
+                    fprintf(stderr, "[renderer] NFSMW_BLOOM=%s ignored (off, scale, scalefull, filter, both, bothfull, fill, fillfilter, "
+                        "fillscale, all, auto or alt): %s\n", v, s_bloomAuto ? "auto" : "off");
+            BloomAuto();
+            if (const char* v = std::getenv("NFSMW_BLOOM_ALT_FRAMES"))
+            {
+                const int n = std::atoi(v);
+                if (n >= 1 && n <= 100000)
+                    s_bloomAltWindow = uint32_t(n);
+                else
+                    fprintf(stderr, "[renderer] NFSMW_BLOOM_ALT_FRAMES=%s ignored (1 to 100000 frames): %u\n", v, s_bloomAltWindow);
+            }
+            if (const char* v = std::getenv("NFSMW_BLOOM_PS"))
+            {
+                uint64_t list[8];
+                uint32_t n = 0;
+                if (gpu::bloom::ParseShaderList(v, list, n) && n)
+                {
+                    std::copy(list, list + n, s_bloomPs);
+                    s_bloomPsCount = n;
+                }
+                else
+                    fprintf(stderr, "[renderer] NFSMW_BLOOM_PS=%s ignored (hashes of 16 hex digits, comma separated): the default %u\n", v,
+                        s_bloomPsCount);
+            }
+            std::string combines;
+            for (uint32_t n = 0; n < s_bloomPsCount; n++)
+                combines += std::format("{}ps_{:016x}", n ? ", " : "", s_bloomPs[n]);
+            if (s_bloom != gpu::bloom::kOff || s_bloomAlt)
+                fprintf(stderr, "[renderer] bloom %s (%s): chain surfaces of pitch %u and %u %s; combine reads %s (%u shader%s, %s); "
+                    "first pass (ps_%016llx) %s\n",
+                    s_bloomAlt ? std::format("alt (off, scale, filter, both, fill, fillfilter, fillscale, all in turn, {} frames each)",
+                        s_bloomAltWindow).c_str() : gpu::bloom::ModeName(s_bloom),
+                    s_bloomAuto ? "auto" : "a test switch",
+                    gpu::bloom::kPitches[0], gpu::bloom::kPitches[1],
+                    s_bloomAlt ? "in turn" : (s_bloom & gpu::bloom::kScale) ? std::format("at the scene's scale ({}; their first pass reads the scene at {})",
+                        gpu::ScaleName(s_renderScale), (s_bloom & gpu::bloom::kSceneHost) ? "host resolution" : "1x").c_str() : "at 1x",
+                    s_bloomAlt ? "in turn" : (s_bloom & gpu::bloom::kFilter) ? "through a cubic B-spline" : "bilinear", s_bloomPsCount,
+                    s_bloomPsCount == 1 ? "" : "s", combines.c_str(), (unsigned long long)gpu::bloom::kDownsamplePs,
+                    s_bloomAlt ? "in turn" : (s_bloom & gpu::bloom::kFill) ? "reads the whole of its area (each tap 4x4 texels)" : "as the game's (each tap 2x2 texels of 4x4)");
         }
 
         bool ScaledPitch(uint32_t pitch)
@@ -3038,7 +3169,17 @@ namespace gpu::renderer
 
         bool ScaledTarget(const RenderTarget& target)
         {
-            return ScaledPitch(target.pitch) || (target.depth && target.pitch == 1600);
+            return ScaledPitch(target.pitch) || (target.depth && target.pitch == 1600) ||
+                gpu::bloom::ScaledPitch(s_bloom, target.pitch, target.depth);
+        }
+
+        // Whether this draw reads a texture `width` guest texels wide on the
+        // scaled path (its scaled copy where valid): every draw into scaled
+        // targets, but for NFSMW_BLOOM=scale's first pass of the chain, which
+        // reads the scene's 1x copy as on the 360 (gpu/bloom.h).
+        bool DrawScaledRead(uint32_t width)
+        {
+            return s_drawScaled && !gpu::bloom::SceneReadAt1x(s_bloom, s_drawIntoBloomChain, width);
         }
 
         // Untiled rendering draws tile 0 over the whole frame (TileShift).
@@ -3093,7 +3234,7 @@ namespace gpu::renderer
             rt->wide = wide;
             rt->guestWidth = wide ? kUntiledWidth : pitch;
             rt->guestHeight = rows;
-            if (ScaledPitch(pitch))
+            if (ScaledPitch(pitch) || gpu::bloom::ScaledPitch(s_bloom, pitch, depth))
                 rt->scale = s_renderScale;
             if (depth && pitch == 1600)
                 rt->scale = s_shadowScale;
@@ -3684,7 +3825,8 @@ namespace gpu::renderer
             uint32_t raster;         // cull | front CW << 2 | depth clamp << 3 | depth bias << 4
             uint32_t pad;            // bits 0-1: Sharper UI's gpu::sharp_ui::Mode (0: the plain pixel shader); 2-3: its UI mask kind;
                                      // 4: Shadow Edges' Classic (a sun shadow receiver's translation without PCF);
-                                     // 5: four samples a pixel (NFSMW_CUBE_AA=msaa: the cube's 4-sample images)
+                                     // 5: four samples a pixel (NFSMW_CUBE_AA=msaa: the cube's 4-sample images);
+                                     // 8-12: NFSMW_BLOOM=filter's slots (gpu/bloom.h), read through the B-spline
 
             bool operator==(const PipelineKey& o) const { return memcmp(this, &o, sizeof(*this)) == 0; }
         };
@@ -3757,7 +3899,7 @@ namespace gpu::renderer
             uint32_t psRegs = std::min(16u, ps.info.registerCount);
             uint32_t inputs = vs.info.interpolatorMask & ((1u << psRegs) - 1);
             VkShaderModule psModule = PixelVariant(ps, outputs, inputs, (key.raster >> 5) & 1, gpu::sharp_ui::Mode(key.pad & 3), (key.pad >> 2) & 3,
-                (key.pad >> 4) & 1);
+                (key.pad >> 8) & ((1u << gpu::bloom::kSlotBits) - 1), (key.pad >> 4) & 1);
             if (!psModule)
                 return VK_NULL_HANDLE;
             stages[1] = { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_FRAGMENT_BIT,
@@ -5593,7 +5735,7 @@ void main()
             // Which scaled texture this is (its cache key's surface fields):
             // pages only a scaled texture holds are current for it alone.
             const uint64_t sig = ScaledSignature(format, width, height, pitchAligned, uint32_t(f.endianness));
-            bool scaled = s_drawScaled && s_scaled.enabled && scaledCandidate && ScaledTextureValid(base, size, sig);
+            bool scaled = DrawScaledRead(width) && s_scaled.enabled && scaledCandidate && ScaledTextureValid(base, size, sig);
             sampler = GetSampler(f, maxLevel);
             if (out)
                 *out = { nullptr, base, size, mipBase, mipSize, scaledCandidate, sig };
@@ -6027,7 +6169,8 @@ void main()
                 return LookupTexture(slot, dim, sampler, nullptr);
             const uint32_t* fetch = &s_regs[XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0 + slot * 6];
             TextureCacheEntry& e = c.slots[uint32_t(dim)][slot & 31];
-            const bool drawScaled = s_drawScaled && s_scaled.enabled;
+            // (The 2D width's bits: NFSMW_BLOOM=scale's rule reads only 2D textures.)
+            const bool drawScaled = DrawScaledRead((fetch[2] & 0x1FFF) + 1) && s_scaled.enabled;
             const uint64_t epoch = writewatch::WriteEpoch();
             uint64_t checked = 0;
             TextureEntryState state = CheckTextureEntry(e, dim, fetch, drawScaled, epoch, checked);
@@ -7389,9 +7532,15 @@ void main()
             static const bool logResolves = std::getenv("NFSMW_LOG_RESOLVES") != nullptr;
             static const int logPitch = [] { const char* v = std::getenv("NFSMW_LOG_RESOLVES_PITCH"); return v ? std::atoi(v) : -1; }();
             static uint32_t logged = 0;
-            if ((logResolves || (logPitch >= 0 && pitch == uint32_t(logPitch))) && logged < 200)
+            // (NFSMW_BLOOM_LOG: where the chain's surfaces are resolved to.)
+            if (s_bloomLog && !depthSource && gpu::bloom::ScaledPitch(gpu::bloom::kScale, pitch, false))
+                s_bloomLogDests.insert(s_regs[XE_GPU_REG_RB_COPY_DEST_BASE] & 0x1FFFFFFF);
+            // (NFSMW_LOG_DRAWS_DETAIL: every resolve of the logged frame too, beside its draws.)
+            const bool inLoggedFrame = s_logDrawsNow && s_logDrawDetail;
+            if (((logResolves || (logPitch >= 0 && pitch == uint32_t(logPitch))) && logged < 200) || inLoggedFrame)
             {
-                logged++;
+                if (!inLoggedFrame)
+                    logged++;
                 auto wo = Reg<reg::PA_SC_WINDOW_OFFSET>();
                 fprintf(stderr, "[resolve] rect (%d,%d)-(%d,%d) wo (%d,%d) woEn %u src %u pitch %u msaa %u | dest %08X pitch %u h %u info %08X "
                     "(fmt %u endian %u swap %u bias %d) | ctl %08X color %08X depth %08X clear c%08X d%08X\n",
@@ -9617,6 +9766,7 @@ void main()
             const gpu::RenderScale old = s_renderScale;
             Flush();
             s_renderScale = scale;
+            BloomAuto();
             s_shadowTargetsByResolve.clear();
             PrewarmResolvePipelines(scale);
             if (scale != s_shadowScale)
@@ -9774,6 +9924,63 @@ void main()
             fprintf(stderr, "[cube-aa] alt: frames %llu-%llu run with %s (%zu targets replaced in %.1f ms)\n", (unsigned long long)(frame + 1),
                 (unsigned long long)(frame + 120), gpu::cube_aa::ModeName(s_cubeAA), targets,
                 std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count());
+        }
+
+        // NFSMW_BLOOM=alt (gpu/bloom.h, a test aid): the mode for the frames
+        // after `frame`; when its scale changes, the chain's surfaces are made
+        // again at the new one (their clears still waiting moved over, cut at
+        // the new target's edge), as CubeAAAlt does for the cube. The filter
+        // and the scene's read need nothing made: each draw picks them.
+        void BloomAlt(uint64_t frame)
+        {
+            const uint32_t mode = gpu::bloom::AltMode(frame, s_bloomAltWindow);
+            const auto start = std::chrono::steady_clock::now();
+            size_t targets = 0;
+            if ((mode & gpu::bloom::kScale) != (s_bloom & gpu::bloom::kScale))
+            {
+                Flush();
+                s_bloom = mode;
+                const gpu::RenderScale want = (mode & gpu::bloom::kScale) ? s_renderScale : gpu::RenderScale{};
+                for (auto& [key, slot] : s_targets)
+                {
+                    RenderTarget& old = *slot;
+                    if (!gpu::bloom::ScaledPitch(gpu::bloom::kScale, old.pitch, old.depth) || old.cube || ScaledPitch(old.pitch) ||
+                        old.scale == want)
+                        continue;
+                    std::vector<PendingClear> moved;
+                    std::erase_if(s_pendingClears, [&](const PendingClear& pc) {
+                        if (pc.rt != &old)
+                            return false;
+                        const uint32_t x0 = old.scale.x.GuestEdge(uint32_t(pc.rect.offset.x));
+                        const uint32_t y0 = old.scale.y.GuestEdge(uint32_t(pc.rect.offset.y));
+                        const uint32_t x1 = old.scale.x.GuestEdge(uint32_t(pc.rect.offset.x) + pc.rect.extent.width);
+                        const uint32_t y1 = old.scale.y.GuestEdge(uint32_t(pc.rect.offset.y) + pc.rect.extent.height);
+                        moved.push_back({ nullptr, { { int32_t(x0), int32_t(y0) }, { x1 - x0, y1 - y0 } }, pc.value });
+                        return true;
+                    });
+                    const uint32_t base = old.base, format = old.format, pitch = old.pitch;
+                    const bool depth = old.depth, wide = old.wide;
+                    DestroyTarget(old);
+                    slot = CreateTarget(base, format, depth, pitch, wide);
+                    for (PendingClear& pc : moved)
+                    {
+                        const int32_t x1 = std::min(pc.rect.offset.x + int32_t(pc.rect.extent.width), int32_t(slot->guestWidth));
+                        const int32_t y1 = std::min(pc.rect.offset.y + int32_t(pc.rect.extent.height), int32_t(slot->guestHeight));
+                        if (x1 <= pc.rect.offset.x || y1 <= pc.rect.offset.y)
+                            continue;
+                        pc.rt = slot.get();
+                        pc.rect = HostRect(slot->scale, pc.rect.offset.x, pc.rect.offset.y, x1, y1);
+                        s_pendingClears.push_back(pc);
+                    }
+                    targets++;
+                }
+                for (RecentTarget& recent : s_recentTargets)
+                    recent = {};
+            }
+            s_bloom = mode;
+            fprintf(stderr, "[bloom] alt: frames %llu-%llu run with %s (%zu targets replaced in %.1f ms; scene %s)\n",
+                (unsigned long long)(frame + 1), (unsigned long long)(frame + s_bloomAltWindow), gpu::bloom::ModeName(s_bloom), targets,
+                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count(), gpu::ScaleName(s_renderScale).c_str());
         }
 
         // The setting changed, or Auto's scale did with the scene's.
@@ -10214,6 +10421,89 @@ void main()
             }
         } s_hfrDm;  // command processor thread only
 
+        // NFSMW_LOG_DRAWS_DETAIL (GitHub #106): what one logged draw reads and
+        // where it draws (see s_logDrawDetail). Float constants print in the
+        // game's numbering (c0-c255 of the stage); a texture's "bound" size
+        // is the host image the draw got ("scaled": a scaled resolve's copy).
+        void LogDrawDetail(RenderTarget* const* attached, const VkDescriptorImageInfo* textureInfos)
+        {
+            std::string t;
+            for (int i = 0; i < 5; i++)
+                if (const RenderTarget* rt = attached[i])
+                    t += std::format(" {}:b{} p{} f{} {}x{} host {}x{}", i == 4 ? std::string("D") : "C" + std::to_string(i), rt->base, rt->pitch,
+                        rt->format, rt->guestWidth, rt->guestHeight, rt->width, rt->height);
+            fprintf(stderr, "[draws]   targets%s | drawScaled %d chain %d bloom %s\n", t.c_str(), int(s_drawScaled), int(s_drawIntoBloomChain),
+                gpu::bloom::ModeName(s_bloom));
+            for (uint32_t n = 0; n < 32; n++)
+            {
+                if (!((s_ps->info.texture2DMask >> n) & 1))
+                    continue;
+                xenos::xe_gpu_texture_fetch_t f;
+                memcpy(&f, &s_regs[XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0 + n * 6], sizeof(f));
+                // (The host image whose view the draw got: a scaled resolve's
+                // copy is never a cache entry, so every texture of this
+                // address is asked.)
+                std::string bound = "bound ?";
+                const uint32_t address = (f.base_address << 12) & 0x1FFFFFFF;
+                for (const auto& [key, texture] : s_textures)
+                    if (texture && texture->guestStart == address)
+                        for (const auto& [swizzle, view] : texture->views)
+                            if (view == textureInfos[n].imageView)
+                                bound = std::format("bound {}x{}{}", texture->width, texture->height, texture->scaled ? " scaled" : "");
+                fprintf(stderr, "[draws]   tex %u: %08X %ux%u fmt %u tiled %u pitch %u mag %u min %u mip %u aniso %u clamp %u,%u swz %03X exp %d | %s\n", n,
+                    (f.base_address << 12) & 0x1FFFFFFF, f.size_2d.width + 1, f.size_2d.height + 1, uint32_t(f.format), uint32_t(f.tiled),
+                    uint32_t(f.pitch) << 5, uint32_t(f.mag_filter), uint32_t(f.min_filter), uint32_t(f.mip_filter), uint32_t(f.aniso_filter),
+                    uint32_t(f.clamp_x), uint32_t(f.clamp_y), uint32_t(f.swizzle), int(f.exp_adjust), bound.c_str());
+            }
+            auto constants = [](const Shader* sh, uint32_t reg0, const char* name) {
+                if (sh->info.constRelative)
+                {
+                    fprintf(stderr, "[draws]   %s constants: relative reads\n", name);
+                    return;
+                }
+                std::string out;
+                int k = 0;
+                for (uint32_t i = 0; i < 256; i++)
+                    if ((sh->info.constUsed[i >> 6] >> (i & 63)) & 1)
+                    {
+                        float v[4];
+                        memcpy(v, &s_regs[reg0 + i * 4], sizeof(v));
+                        out += std::format(" c{}=({:.6g},{:.6g},{:.6g},{:.6g})", i, v[0], v[1], v[2], v[3]);
+                        if (++k % 4 == 0)
+                        {
+                            fprintf(stderr, "[draws]   %s%s\n", name, out.c_str());
+                            out.clear();
+                        }
+                    }
+                if (!out.empty())
+                    fprintf(stderr, "[draws]   %s%s\n", name, out.c_str());
+            };
+            constants(s_ps, 0x4400, "ps");
+            constants(s_vs, 0x4000, "vs");
+            // The first four vertices of each vertex fetch constant the VS reads.
+            for (uint32_t word = 0; word < 3; word++)
+                for (uint32_t bits = s_vs->info.vertexFetchConstants[word]; bits; bits &= bits - 1)
+                {
+                    const uint32_t fc = word * 32 + uint32_t(__builtin_ctz(bits));
+                    const uint32_t d0 = s_regs[XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0 + fc * 2];
+                    const uint32_t d1 = s_regs[XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0 + fc * 2 + 1];
+                    const uint32_t stride = std::min<uint32_t>(s_vs->info.vertexStride[fc], 32);
+                    const uint32_t first = s_regs[XE_GPU_REG_VGT_INDX_OFFSET];
+                    for (uint32_t v = 0; v < 4 && stride; v++)
+                    {
+                        std::string out;
+                        for (uint32_t k = 0; k < stride; k++)
+                        {
+                            const uint32_t bits32 = GpuSwap(LoadPhysical((d0 & 0x1FFFFFFC) + ((first + v) * stride + k) * 4), d1 & 3);
+                            float x;
+                            memcpy(&x, &bits32, 4);
+                            out += std::format(" {:.6g}", x);
+                        }
+                        fprintf(stderr, "[draws]   vertex fc%u %08X stride %u v%u:%s\n", fc, d0 & 0x1FFFFFFC, stride, v, out.c_str());
+                    }
+                }
+        }
+
         bool HfrDrawMatchActive()
         {
             return s_hfrDm.active;
@@ -10570,6 +10860,8 @@ void main()
         for (RenderTarget* rt : { color[0], color[1], color[2], color[3], depth })
             if (rt && !rt->cube && !rt->scale.IsOne())
                 s_drawScaled = true;
+        // NFSMW_BLOOM=scale (gpu/bloom.h): a draw into the chain's scaled surfaces.
+        s_drawIntoBloomChain = s_drawScaled && color[0] && gpu::bloom::ScaledPitch(s_bloom, color[0]->pitch, false);
 
         // NFSMW_LOG_TILES=1: register state of the first draws under MSAA (predicated tiling).
         static const bool logTiles = std::getenv("NFSMW_LOG_TILES") != nullptr;
@@ -10843,6 +11135,56 @@ void main()
         // draws never sample the sun's map.)
         if (!s_shadowEdgesSmooth && s_ps->info.shadowPcfGroups && !(key.pad & 3))
             key.pad |= 1u << 4;
+
+        // NFSMW_BLOOM=filter (gpu/bloom.h, GitHub #106; auto's from 2x): the
+        // combine reads the bloom chain's small textures (linear, 320 or 160
+        // texels wide) through a cubic B-spline: its variant with those
+        // slots' reads rewritten (key.pad bits 8-12).
+        if ((s_bloom & gpu::bloom::kFilter) && !(key.pad & 0x1F) && color[0] &&
+            std::find(s_bloomPs, s_bloomPs + s_bloomPsCount, s_ps->hash) != s_bloomPs + s_bloomPsCount)
+        {
+            uint32_t bloomMask = 0;
+            for (uint32_t n = 0; n < gpu::bloom::kSlotBits; n++)
+                if ((s_ps->info.texture2DMask >> n) & 1)
+                {
+                    xenos::xe_gpu_texture_fetch_t tf;
+                    memcpy(&tf, &s_regs[XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0 + n * 6], sizeof(tf));
+                    const uint32_t d2 = s_regs[XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0 + n * 6 + 2];
+                    if (gpu::bloom::FilterSlot(n, (d2 & 0x1FFF) + 1, tf.mag_filter == xenos::TextureFilter::kLinear, color[0]->guestWidth))
+                        bloomMask |= 1u << n;
+                }
+            key.pad |= bloomMask << 8;
+        }
+        // NFSMW_BLOOM=fill: the chain's first pass reads the scene through
+        // the 4x4 box (the same bits: a shader is a combine or the first pass).
+        if ((s_bloom & gpu::bloom::kFill) && !(key.pad & 0x1F) && color[0] && s_ps->hash == gpu::bloom::kDownsamplePs)
+        {
+            uint32_t fillMask = 0;
+            for (uint32_t n = 0; n < gpu::bloom::kSlotBits; n++)
+                if ((s_ps->info.texture2DMask >> n) & 1)
+                {
+                    xenos::xe_gpu_texture_fetch_t tf;
+                    memcpy(&tf, &s_regs[XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0 + n * 6], sizeof(tf));
+                    const uint32_t d2 = s_regs[XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0 + n * 6 + 2];
+                    if (gpu::bloom::FillSlot(n, (d2 & 0x1FFF) + 1, tf.mag_filter == xenos::TextureFilter::kLinear, color[0]->pitch))
+                        fillMask |= 1u << n;
+                }
+            key.pad |= fillMask << 8;
+        }
+        if (s_bloomLog && color[0])
+            for (uint32_t n = 0; n < 16; n++)
+                if ((s_ps->info.texture2DMask >> n) & 1)
+                {
+                    xenos::xe_gpu_texture_fetch_t tf;
+                    memcpy(&tf, &s_regs[XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0 + n * 6], sizeof(tf));
+                    const uint32_t d2 = s_regs[XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0 + n * 6 + 2];
+                    const uint32_t address = (tf.base_address << 12) & 0x1FFFFFFF;
+                    if (s_bloomLogDests.contains(address) &&
+                        s_bloomLogSeen.insert(s_ps->hash * 31 + (uint64_t(n) << 56) + (uint64_t(color[0]->pitch) << 40) + address).second)
+                        fprintf(stderr, "[bloom] log: ps_%016llx slot %u reads %08X (%ux%u, mag %u) into a target of pitch %u (%ux%u), frame %llu\n",
+                            (unsigned long long)s_ps->hash, n, address, (d2 & 0x1FFF) + 1, ((d2 >> 13) & 0x1FFF) + 1, uint32_t(tf.mag_filter),
+                            color[0]->pitch, color[0]->guestWidth, color[0]->guestHeight, (unsigned long long)s_frame);
+                }
 
         // NFSMW_CUBE_AA=msaa (gpu/cube_aa.h): a draw into the cube's
         // 4-sample images takes a 4-sample pipeline (BeginPass attaches
@@ -12173,7 +12515,9 @@ void main()
                 line += " +layer stretched";
             static std::string last;
             static uint32_t repeats = 0;
-            if (line == last)
+            // (In detail a pass into a small target is never folded: the
+            // bloom's two wide blurs differ only in their constants.)
+            if (line == last && !(s_logDrawDetail && count <= 6 && targetW <= 320))
                 repeats++;
             else
             {
@@ -12182,6 +12526,8 @@ void main()
                 fprintf(stderr, "[draws] %s\n", line.c_str());
                 last = line;
                 repeats = 0;
+                if (s_logDrawDetail && count <= 6)
+                    LogDrawDetail(attached, textureInfos);
             }
         }
         // DIAG (v0.1.5 HFR scoping): NFSMW_HFR_DRAWMATCH=<from s>,<frames>: draw-list stability between consecutive
@@ -13061,6 +13407,8 @@ void main()
             ApplyLiveSettings();
         if (s_vk && s_cubeAAAlt && frame % 120 == 0)
             CubeAAAlt(frame);
+        if (s_vk && s_bloomAlt && frame % s_bloomAltWindow == 0)
+            BloomAlt(frame);
         if (s_uploadLog)
         {
             UploadLog& log = *s_uploadLog;
@@ -13225,8 +13573,10 @@ void main()
         }
         if (!s_vk || s_profileFrame < 0)
             return;
-        if (frame == uint64_t(s_profileFrame))
+        if (frame == uint64_t(s_profileFrame) ||
+            (s_profileEvery >= 2 && frame > uint64_t(s_profileFrame) && (frame - uint64_t(s_profileFrame)) % s_profileEvery == 0))
         {
+            s_profiledFrame = frame;
             s_profiling = true;
             s_passInfos.clear();
             s_gapLast = { s_stats.resolves, s_stats.uploads, s_stats.submits, writewatch::GetGuardStats().uploadBytes };
@@ -13242,7 +13592,7 @@ void main()
         // where a submission waited).
         double total = 0, between = 0;
         uint64_t lastEnd = 0;
-        fprintf(stderr, "[profile] frame %d: %zu passes\n", s_profileFrame, s_passInfos.size());
+        fprintf(stderr, "[profile] frame %llu: %zu passes\n", (unsigned long long)s_profiledFrame, s_passInfos.size());
         for (const PassInfo& pi : s_passInfos)
         {
             uint64_t ts[2] = {};

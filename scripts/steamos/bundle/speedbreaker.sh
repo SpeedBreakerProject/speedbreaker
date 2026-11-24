@@ -236,6 +236,31 @@ prime_offload() {
 }
 prime_offload
 
+# The Steam Frame's Adreno GPU and Mesa's Turnip driver: every render pass is
+# drawn straight to memory (TU_DEBUG=sysmem) instead of through the GPU's tile
+# memory. For this game the tiled path costs more than it saves: before the
+# main scene and the sun's shadow map are drawn tile by tile, Turnip runs
+# every draw once more to sort them into tiles, and its choice between the
+# two paths doesn't count that pass. On a Steam Frame (2026-11-22, the same
+# picture both ways): about 1 ms less GPU time a frame at 1x, 3 ms at 2x
+# (31 -> 35 fps in the city). Only on arm64: TU_DEBUG is read by Turnip
+# alone, and the x86-64 machines have AMD, Intel or NVIDIA GPUs. Never over
+# a value already set (TU_DEBUG= in Steam's launch options leaves Turnip its
+# own choice); NFSMW_TURNIP_SYSMEM=0 turns it off.
+# tests/launcher_turnip_test.sh runs this function alone.
+turnip_sysmem() {
+    [ "$(uname -m)" = aarch64 ] || return 0
+    if [ "${NFSMW_TURNIP_SYSMEM:-1}" = 0 ]; then
+        say "graphics: NFSMW_TURNIP_SYSMEM=0: Turnip chooses between its tile memory and memory itself"
+    elif [ -n "${TU_DEBUG+set}" ]; then
+        say "graphics: TU_DEBUG=$TU_DEBUG was already set: left as it is"
+    else
+        export TU_DEBUG=sysmem
+        say "graphics: TU_DEBUG=sysmem (Turnip draws straight to memory, not through its tile memory; NFSMW_TURNIP_SYSMEM=0 turns this off)"
+    fi
+}
+turnip_sysmem
+
 # Game Mode (gamescope, from Steam's environment): the game runs fullscreen
 # at the resolution Steam sets for it (Properties > General > Game
 # Resolution). SDL uses X11 (gamescope's Xwayland), which is how gamescope

@@ -97,7 +97,8 @@ namespace install
         uint64_t size = 0;
         bool xexMatches = false;    // default.xex is the supported one (Install still checks every file)
         uint32_t titleId = 0;       // default.xex's title ID (0 if unreadable)
-        Result status;              // Ok, or why it won't install: UnsupportedVersion, WrongGame, TruncatedImage, ReadError
+        Result status;              // Ok, or why it won't install: UnsupportedVersion, WrongGame, TruncatedImage, ReadError,
+                                    // NotADiscImage, UnsupportedFormat (the message ends with NeededDisc() where it isn't the disc)
     };
 
     // Where FindDiscImages looks by default: the home folder, Downloads,
@@ -107,9 +108,14 @@ namespace install
     std::vector<std::filesystem::path> DiscImageSearchFolders();
 
     // .iso files of at least `minSize` bytes directly in each folder or one
-    // folder below it, that hold an XDVDFS game partition with a default.xex.
-    // Each costs a directory read and hashing default.xex (a few MB). Sorted:
-    // installable images first, then by path. Blocks; run it off the UI thread.
+    // folder below it. One that holds an XDVDFS game partition with a
+    // default.xex costs a directory read and hashing default.xex (a few MB);
+    // any other costs a few small reads, and is listed (not installable, with
+    // why: another console's or game's image, a video disc, not a disc image)
+    // only when nothing found can be installed. Beside an image that can, it
+    // is left out.
+    // Sorted: installable images first, then by path. Blocks; run it off the
+    // UI thread.
     // On macOS, reading Desktop, Documents, Downloads or a removable volume
     // makes the system ask the user for permission the first time.
     std::vector<DiscImageCandidate> FindDiscImages(const std::vector<std::filesystem::path>& folders = DiscImageSearchFolders(),

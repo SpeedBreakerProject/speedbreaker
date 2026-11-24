@@ -35,6 +35,7 @@
 #include <user/settings.h>
 #include <user/version_check.h>
 #include <game/language.h>
+#include <game/black_edition.h>
 
 #include <SDL3/SDL.h>
 #if defined(__APPLE__) && TARGET_OS_IOS
@@ -655,6 +656,8 @@ int main(int argc, char** argv)
         }
     }
     report::LogSystemSummary();
+    // Black Edition (#100): the game's own flag, once, before any guest code runs.
+    game::black_edition::ApplyAtLaunch();
 
     g_userHeap.Init();
     module::Initialize(file, uint32_t(image.base), image.size, uint32_t(image.entry_point));

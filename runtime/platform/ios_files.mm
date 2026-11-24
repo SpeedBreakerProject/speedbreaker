@@ -234,6 +234,8 @@ namespace
         if (!picked->notHere.empty())
             platform::ios::ReleaseFileAccess(std::exchange(picked->access, 0));
     }
+    else
+        fprintf(stderr, "[files] the picker answered without a file (%s)\n", url ? url.absoluteString.UTF8String : "no address");
     Answer(self, std::move(picked));
 }
 

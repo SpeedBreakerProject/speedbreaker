@@ -217,8 +217,19 @@ namespace ui
             }
 
             // The notes on the left, the code on the right, the address under both.
+            // The address shows whole: after its label when both fit the
+            // line, else on a line of its own under it (a Windows beta's is
+            // longer, and "...-windows-beta.10" lost its last character at
+            // 1280x720), wrapped there only if even that line is too narrow.
             const ImGuiStyle& style = ImGui::GetStyle();
-            const float footer = ImGui::GetFrameHeight() + ImGui::GetTextLineHeightWithSpacing() * 2 + style.ItemSpacing.y * 2;
+            constexpr const char* kPageLabel = "Download page:";
+            const std::string pageLine = std::string(kPageLabel) + " " + r.url;
+            const float lineWidth = ImGui::GetContentRegionAvail().x;
+            const bool pageOnOneLine = ImGui::CalcTextSize(pageLine.c_str()).x <= lineWidth;
+            int pageLines = 1;
+            if (!pageOnOneLine)
+                pageLines += std::max(1, int(std::ceil(ImGui::CalcTextSize(r.url.c_str(), nullptr, false, lineWidth).y / ImGui::GetFontSize() - 0.01f)));
+            const float footer = ImGui::GetFrameHeight() + ImGui::GetTextLineHeightWithSpacing() * float(std::max(2, pageLines)) + style.ItemSpacing.y * 2;
             const float body = std::max(ImGui::GetContentRegionAvail().y - footer, ImGui::GetTextLineHeightWithSpacing() * 4);
             const Qr& qr = QrFor(r.url);
             const float caption = ImGui::GetTextLineHeightWithSpacing() * 2;
@@ -236,7 +247,15 @@ namespace ui
                 ImGui::PopTextWrapPos();
                 ImGui::EndGroup();
             }
-            ImGui::TextDisabled("Download page: %s", r.url.c_str());
+            if (pageOnOneLine)
+                ImGui::TextDisabled("%s", pageLine.c_str());
+            else
+            {
+                ImGui::TextDisabled("%s", kPageLabel);
+                ImGui::PushTextWrapPos(0.0f);
+                ImGui::TextDisabled("%s", r.url.c_str());
+                ImGui::PopTextWrapPos();
+            }
 
             ButtonRowAtBottom();
             // Up and down are the notes' (DrawNotes scrolls with them;

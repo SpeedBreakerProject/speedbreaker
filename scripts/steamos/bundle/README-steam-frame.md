@@ -90,6 +90,11 @@ library, it says to use this command instead.)
 - **Frame rate**: in the headset, the VR compositor shares the graphics
   chip, so set **Display > Frame Rate** to **30** for smooth play. The game
   keeps its full speed at 30.
+- **Graphics driver**: `speedbreaker.sh` asks the Frame's graphics driver
+  to draw straight to memory instead of through the chip's tile memory,
+  which is faster for this game (`last-run.log` says so). To leave the
+  driver its own choice, set the shortcut's launch options to
+  `NFSMW_TURNIP_SYSMEM=0 %command%`.
 
 ## Reporting problems
 

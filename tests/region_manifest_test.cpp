@@ -2,18 +2,22 @@
 // European (PAL, Spanish) manifests, told apart by default.xex's hash and
 // size and by the version an install's marker records, and FindGameInstall
 // finding either region's install (with which it is) in a scratch folder with
-// a sandbox HOME. Built with SB_PAL_DE=1 (region_manifest_test_pal_de), the
-// German disc's manifest is a third region; without it, that disc is refused
-// up front (ReleaseWithoutCode). From the repo root:
+// a sandbox HOME; and a file that isn't any of those discs, listed by the
+// scan with why and what the installer needs when it finds nothing to install
+// (#108), and left out beside an image that installs. Built with SB_PAL_DE=1
+// (region_manifest_test_pal_de), the German disc's manifest is a third
+// region; without it, that disc is refused up front (ReleaseWithoutCode).
+// From the repo root:
 //   clang++ -std=c++20 -O2 -Iruntime tests/region_manifest_test.cpp runtime/install/{placement,installer,locate,manifest,result,disc_source,sha256}.cpp runtime/user/portable.cpp -o build/region_manifest_test
 //   (on macOS add -framework CoreFoundation)
 //   build/region_manifest_test [folder]
 //   (add -DSB_PAL_DE=1 for the German region)
 // No game files: the stand-in installs are a default.xex of the right size
-// (all zeros) and a marker.
+// (all zeros) and a marker; the stand-in disc images are sparse files.
 #include <install/installer.h>
 #include <install/locate.h>
 #include <install/placement.h>
+#include <install/sha256.h>
 #include <user/paths.h>
 
 #include <cstdio>
@@ -278,6 +282,122 @@ static void KeepRegions(const fs::path& root)
     CHECK(info.replacing, "the PAL folder asked for by a USA disc would be replaced");
 }
 
+// A sparse stand-in of an Xbox 360 game's image: an XDVDFS volume from the
+// file's first byte (its descriptor in sector 32, the root directory in
+// sector 33) whose one file, in sector 34, is a default.xex holding `xex`.
+static void ImageStandIn(const fs::path& file, const std::string& xex, uint64_t size)
+{
+    auto le32 = [](uint32_t v) { return std::string{ char(v), char(v >> 8), char(v >> 16), char(v >> 24) }; };
+    const std::string name = "default.xex";
+    const std::string descriptor = "MICROSOFT*XBOX*MEDIA" + le32(33) + le32(2048);
+    // No entry to its left or right, the data's sector and size, a plain
+    // file, the name; 0xFF to the sector's end.
+    std::string directory = std::string(4, '\0') + le32(34) + le32(uint32_t(xex.size())) + char(0x80) + char(name.size()) + name;
+    directory.resize(2048, '\xFF');
+    fs::create_directories(file.parent_path());
+    {
+        std::ofstream f(file, std::ios::binary);
+        f.seekp(32 * 2048);
+        f << descriptor;
+        f.seekp(33 * 2048);
+        f << directory;
+        f.seekp(34 * 2048);
+        f << xex;
+    }
+    fs::resize_file(file, size);
+}
+
+// A file that isn't the disc (GitHub issue #108: a 3.11 GB image of another
+// version of the game, which Rescan left out without a word): a scan that
+// finds nothing to install lists it, not installable, and its reason, like a
+// picked file's, ends with what the installer needs instead. Beside an image
+// that installs it is left out. Sparse stand-ins: zeros, and a DVD-video
+// image's ISO 9660 mark.
+static void NotTheDisc(const fs::path& root)
+{
+    const std::string needed = NeededDisc();
+    CHECK(needed == (SB_PAL_DE ? "SpeedBreaker needs a copy of the Xbox 360 disc of Need for Speed: Most Wanted, the USA, the European "
+                                 "(PAL, Spanish) or the European (PAL, German) one."
+                               : "SpeedBreaker needs a copy of the Xbox 360 disc of Need for Speed: Most Wanted, the USA or the European "
+                                 "(PAL, Spanish) one."),
+        "what it needs: %s", needed.c_str());
+
+    const fs::path dir = root / "not-the-disc";
+    const fs::path zeros = dir / "Need for Speed - Most Wanted (fake).iso";
+    Write(zeros, "");
+    fs::resize_file(zeros, 3110ull << 20);
+    const fs::path dvd = dir / "video.iso";
+    Write(dvd, std::string(0x8001, '\0') + "CD001");
+    fs::resize_file(dvd, 300ull << 20);
+    Write(dir / "small.iso", std::string(1000, '\0'));  // under minSize: left out, as before
+    Write(dir / "notes.txt", std::string(2 << 20, 'x'));  // not an .iso: left out, as before
+
+    const std::vector<DiscImageCandidate> found = FindDiscImages({ dir }, 1 << 20);
+    CHECK(found.size() == 2, "listed: %zu", found.size());
+    if (found.size() == 2)
+    {
+        const DiscImageCandidate& a = found[0];
+        CHECK(a.path == zeros && a.size == (3110ull << 20) && a.status.error == Error::NotADiscImage && !a.xexMatches,
+            "zeros: %s, %s", a.path.c_str(), ErrorName(a.status.error));
+        CHECK(a.status.message == "Need for Speed - Most Wanted (fake).iso is not an Xbox 360 disc image. " + needed, "zeros: %s",
+            a.status.message.c_str());
+        const DiscImageCandidate& b = found[1];
+        CHECK(b.path == dvd && b.status.error == Error::UnsupportedFormat, "video: %s, %s", b.path.c_str(), ErrorName(b.status.error));
+        CHECK(b.status.message.starts_with("video.iso is a DVD image without an Xbox 360 game partition") &&
+                b.status.message.ends_with(". Dump the whole disc. " + needed),
+            "video: %s", b.status.message.c_str());
+    }
+
+    // The image of an Xbox 360 game that isn't this one (a default.xex, not
+    // the manifest's) was listed before those were, and is: nothing here
+    // installs, so all three show.
+    const std::string xex = "stand-in default", otherXex = "another default.";
+    const std::string hash = ToHex(Sha256Of(xex.data(), xex.size()));
+    const ManifestFile files[] = { { "default.xex", xex.size(), hash } };
+    const Manifest test{ "test-1", 0x454107D9, files, xex.size() };
+    const fs::path other = dir / "another game.iso";
+    ImageStandIn(other, otherXex, 2 << 20);
+    const std::vector<DiscImageCandidate> none = FindDiscImages({ dir }, 1 << 20, nullptr, test);
+    CHECK(none.size() == 3, "nothing to install: %zu listed", none.size());
+    if (none.size() == 3)
+    {
+        CHECK(none[0].path == zeros && none[0].status.error == Error::NotADiscImage, "zeros: %s", ErrorName(none[0].status.error));
+        CHECK(none[1].path == other && none[1].status.error == Error::WrongGame && !none[1].xexMatches && none[1].status.message.ends_with(needed),
+            "another game: %s, %s", ErrorName(none[1].status.error), none[1].status.message.c_str());
+        CHECK(none[2].path == dvd && none[2].status.error == Error::UnsupportedFormat, "video: %s", ErrorName(none[2].status.error));
+    }
+
+    // Beside an image that installs (the stand-in whose default.xex is the
+    // test manifest's), the files that aren't an Xbox 360 game's image are
+    // left out, as they were before the scan listed them; the other game's
+    // image stays, under it.
+    const fs::path disc = dir / "the disc.iso";
+    ImageStandIn(disc, xex, 2 << 20);
+    const std::vector<DiscImageCandidate> ready = FindDiscImages({ dir }, 1 << 20, nullptr, test);
+    CHECK(ready.size() == 2, "one to install: %zu listed", ready.size());
+    if (ready.size() == 2)
+    {
+        CHECK(ready[0].path == disc && ready[0].status.Ok() && ready[0].xexMatches && ready[0].size == (2 << 20), "the disc first: %s, %s",
+            ready[0].path.c_str(), ErrorName(ready[0].status.error));
+        CHECK(ready[1].path == other && ready[1].status.error == Error::WrongGame, "another game under it: %s, %s", ready[1].path.c_str(),
+            ErrorName(ready[1].status.error));
+    }
+    for (const DiscImageCandidate& c : ready)
+        CHECK(c.path != zeros && c.path != dvd, "left out beside the disc: %s", c.path.c_str());
+    // With the game's own manifests the stand-in is one more game that isn't
+    // this one: nothing installs, and all four show.
+    const std::vector<DiscImageCandidate> all = FindDiscImages({ dir }, 1 << 20);
+    CHECK(all.size() == 4 && all[0].path == zeros && all[1].path == other && all[2].path == disc && all[3].path == dvd,
+        "the game's manifests: %zu listed", all.size());
+    for (const DiscImageCandidate& c : all)
+        CHECK(!c.status.Ok() && c.status.message.ends_with(needed), "%s: %s", c.path.c_str(), c.status.message.c_str());
+
+    // Picked (Browse for image..., or a typed path): the same reason.
+    std::unique_ptr<DiscSource> source;
+    const Result picked = OpenDiscSource(zeros, source);
+    CHECK(!source && picked.error == Error::NotADiscImage && picked.message.ends_with(needed), "picked: %s", picked.message.c_str());
+}
+
 int main(int argc, char** argv)
 {
     Manifests();
@@ -293,6 +413,7 @@ int main(int argc, char** argv)
     Installs(root, argv[0]);
     KeepRegions(root);
     GermanInstalls(root);
+    NotTheDisc(root);
     chdir(base.c_str());
     std::error_code ec;
     fs::remove_all(root, ec);
