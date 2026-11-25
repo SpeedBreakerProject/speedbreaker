@@ -145,7 +145,7 @@ SB_PAL_ES_ADDRESS(0x82A2CB18, 0x82A2CB18)  // .data (same layout), same bytes; g
 SB_PAL_ES_ADDRESS(0x82A2CB6C, 0x82A2CB6C)  // .data (same layout), same bytes; game/hfr.cpp, game/hfr_diag.cpp, hid/input.cpp
 SB_PAL_ES_ADDRESS(0x82A2CC08, 0x82A2CC08)  // .data (same layout), same bytes; game/hfr.cpp
 SB_PAL_ES_ADDRESS(0x82A2CE00, 0x82A2CE00)  // .data (same layout), same bytes; game/fixes.cpp
-SB_PAL_ES_ADDRESS(0x82A2CE06, 0x82A2CE06)  // .data (same layout), same bytes; game/black_edition.h, game/fixes.cpp
+SB_PAL_ES_ADDRESS(0x82A2CE06, 0x82A2CE06)  // .data (same layout), same bytes; game/black_edition.h
 SB_PAL_ES_ADDRESS(0x82A2CF40, 0x82A2CF40)  // .data (same layout), same bytes; game/hfr.cpp
 SB_PAL_ES_ADDRESS(0x82A2D190, 0x82A2D190)  // .data (same layout), same bytes; game/front_end_matrix.h
 SB_PAL_ES_ADDRESS(0x82A2D5E0, 0x82A2D5E0)  // .data (same layout), same bytes; game/hfr.cpp

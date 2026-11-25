@@ -36,13 +36,6 @@ namespace
 
 namespace
 {
-    // Black Edition Content: the game's Black Edition flag, a byte the code
-    // only reads (0 in the base game). Ported from the Xenia patch by tuhana.
-    constexpr uint32_t kBlackEditionFlag = 0x82A2CE06;
-}
-
-namespace
-{
     // Fix Timebug: the sim clock (Sim::GetTime), a float each step is added to.
     constexpr uint32_t kSimClock = 0x82A153B8;
     bool s_fixTimebug = false;
@@ -1185,11 +1178,6 @@ namespace fixes
                 }
         });
         (void)announceListener;
-        if (settings::GetBool(settings::Id::BlackEditionContent))
-        {
-            *static_cast<uint8_t*>(g_memory.Translate(region::Addr(kBlackEditionFlag))) = 1;
-            fprintf(stderr, "[fixes] Black Edition content: on\n");
-        }
         if (settings::GetBool(settings::Id::FixTimebug))
         {
             s_fixTimebug = true;

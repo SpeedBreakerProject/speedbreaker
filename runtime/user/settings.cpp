@@ -577,10 +577,6 @@ namespace settings
             KeyOption(Id::KeyRightStickClick, "right_stick_click", "Right Stick Click", "Pressing the right stick in.", "c"),
             KeyOption2(Id::KeyRightStickClick2, "right_stick_click_2", "Right Stick Click", "none"),
             // Fixes
-            { .id = Id::BlackEditionContent, .category = Category::Fixes, .type = Type::Bool, .apply = Apply::Restart,
-              .table = "fixes", .key = "black_edition_content", .label = "Black Edition Content",
-              .description = "Black Edition content was left in the game files but never commercially released on Xbox 360. Enabling it doesn't affect your existing save since Black Edition adds nothing to Career mode.",
-              .env = "NFSMW_FIX_BLACK_EDITION", .defaultValue = 0 },
             { .id = Id::FixTimebug, .category = Category::Fixes, .type = Type::Bool, .apply = Apply::Restart,
               .table = "fixes", .key = "fix_timebug", .label = "Fix Timebug",
               .description = "The original gameplay timer drifts as its clock loses floating-point precision over time. After 5 hours of gameplay, it runs about 5% faster; after 9 hours, it runs about 6% slower.",

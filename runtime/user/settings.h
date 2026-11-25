@@ -144,7 +144,6 @@ namespace settings
         KeyLeftStickClick, KeyLeftStickClick2,
         KeyRightStickClick, KeyRightStickClick2,
         // Fixes (the [fixes] table): game/fixes.cpp
-        BlackEditionContent,
         FixTimebug,
         FixStuckWeather,
         FixBustedScenes,

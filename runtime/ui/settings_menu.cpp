@@ -947,11 +947,6 @@ namespace ui
                     ImGui::TextDisabled("Changes take effect the next time the game starts.");
                 return;
             }
-            if (o.id == Id::BlackEditionContent)
-            {
-                RestartRow(o, [](double choice) { return choice != 0.0 ? "Black Edition enforced" : "Original game"; });
-                return;
-            }
             if (o.id == Id::ModernGamepadLayouts)
             {
                 RestartRow(o, [](double choice) { return choice != 0.0 ? "Modern layouts" : "Original layouts"; });
