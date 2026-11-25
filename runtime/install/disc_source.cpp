@@ -393,8 +393,8 @@ namespace install
                     "starts. Copy it again, or make a new backup from your disc.", name, FormatSize(image.size)));
             if (dvd)
                 return Fail(Error::UnsupportedFormat, name + " is a DVD image without an Xbox 360 game partition "
-                    "(perhaps only the video partition was copied). Dump the whole disc.");
-            return Fail(Error::NotADiscImage, name + " is not an Xbox 360 disc image.");
+                    "(perhaps only the video partition was copied). Dump the whole disc. " + NeededDisc());
+            return Fail(Error::NotADiscImage, name + " is not an Xbox 360 disc image. " + NeededDisc());
         }
 
         Result OpenImage(const fs::path& path, std::unique_ptr<DiscSource>& source, const OpenOptions& options)

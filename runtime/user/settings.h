@@ -177,6 +177,7 @@ namespace settings
         UpdateCheck,  // Check for Updates at Startup (update/updater.h); the menu shows it after Check for Updates
         // Game (the [game] table)
         GameLanguage,  // game/language.cpp: the game's language, game::language's ids (English = 0)
+        BlackEdition,  // game/black_edition.h: the disc's Black Edition content (GitHub #100); at launch
         Count
     };
     constexpr size_t kCount = size_t(Id::Count);

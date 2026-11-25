@@ -19,6 +19,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <span>
+#include <string>
 #include <string_view>
 
 namespace install
@@ -84,4 +85,12 @@ namespace install
 
     // ASCII case-insensitive equality: the disc's names are ASCII.
     bool PathEqualsIgnoreCase(std::string_view a, std::string_view b);
+
+    // What the installer needs, in the player's words, from the compiled-in
+    // manifests: "SpeedBreaker needs a copy of the Xbox 360 disc of Need for
+    // Speed: Most Wanted, the USA or the European (PAL, Spanish) one." The
+    // last sentence of the messages for a file that isn't that disc at all
+    // (another console's or another game's, not a disc image), so the
+    // installer never refuses a file without saying what it takes instead.
+    std::string NeededDisc();
 }

@@ -104,8 +104,8 @@ namespace ui
         {
             if (c == Category::Wheel)
                 return hid::wheel::Found();
-            if (c == Category::Game)  // its one row, Language, isn't shown on iPhone and iPad
-                return !settings::Info(Id::GameLanguage).hidden;
+            if (c == Category::Game)  // Language isn't shown on iPhone and iPad; Black Edition is, everywhere
+                return !settings::Info(Id::GameLanguage).hidden || !settings::Info(Id::BlackEdition).hidden;
             if (c == Category::Mods)
                 return mods::kAvailable;
 #if defined(__APPLE__) && TARGET_OS_IOS
@@ -977,6 +977,26 @@ namespace ui
             if (o.id == Id::GamepadPrompts || o.id == Id::IntroVideos)
             {
                 RestartRow(o);
+                return;
+            }
+            // Black Edition: what it adds, then when it applies (at launch, as
+            // Language: the game's flag is set before any of its code runs).
+            if (o.id == Id::BlackEdition)
+            {
+                ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+                ImGui::TextWrapped("%s", o.description);
+                ImGui::PopStyleColor();
+                if (const char* env = settings::EnvOverride(o.id))
+                    ImGui::TextDisabled("%s sets this for this run: %s. The choice here is saved for later runs.", env,
+                        ValueText(o, settings::GetValue(o.id)).c_str());
+                else if (settings::RestartPending(o.id))
+                {
+                    PushAccentText();
+                    ImGui::TextUnformatted("Takes effect the next time the game starts.");
+                    PopAccentText();
+                }
+                else
+                    ImGui::TextDisabled("Changes take effect the next time the game starts.");
                 return;
             }
             // 7.1 Speakers: what it does, then (below) what this output is.

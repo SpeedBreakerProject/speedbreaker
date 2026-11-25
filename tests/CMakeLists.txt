@@ -69,6 +69,11 @@ sb_test(split_views_test ARGS ${RT}/gpu/renderer.cpp)
 # its target's size, the occlusion weight, the pixels each mode shades;
 # renderer.cpp is read to check it applies the rules.
 sb_test(cube_aa_test ARGS ${RT}/gpu/renderer.cpp)
+# The bloom chain at the scene's scale and the combine's B-spline reads
+# (gpu/bloom.h, header only; NFSMW_BLOOM, GitHub #106; unset: auto): the
+# names, the surfaces and reads each mode changes, the filter's weights, the
+# memory; renderer.cpp is read to check it applies the rules.
+sb_test(bloom_test ARGS ${RT}/gpu/renderer.cpp)
 # GPU markers (gpu/gpu_markers.h, header only; NFSMW_GPU_MARKERS, GitHub #57,
 # #99, #101): step numbers, the GPU's words, the checkpoints and the report
 # naming where the GPU stopped; renderer.cpp is read to check it marks every
@@ -288,6 +293,9 @@ sb_test(whole_vblanks_test)
 # The nitrous light trails' ring at the 360's 30 fps length (game/light_trails.h,
 # header only; GitHub issue #10).
 sb_test(light_trails_test)
+# The World Map cursor's step at the 360's 30 fps speed (game/map_cursor.h,
+# header only; GitHub issue #14).
+sb_test(map_cursor_test)
 # SPIKE (v017-hfr-spike): the in-between picture's pose blending (game/hfr_blend.h, header only).
 sb_test(hfr_blend_test)
 sb_test(hfr_schedule_test)
@@ -445,6 +453,9 @@ if(NOT WIN32)
     if(SB_BASH)
         add_test(NAME launcher_prime_test COMMAND ${SB_BASH} ${CMAKE_CURRENT_SOURCE_DIR}/launcher_prime_test.sh
             ${ROOT}/scripts/steamos/bundle/speedbreaker.sh)
+        # Its Turnip part (TU_DEBUG=sysmem on the Steam Frame), alone.
+        add_test(NAME launcher_turnip_test COMMAND ${SB_BASH} ${CMAKE_CURRENT_SOURCE_DIR}/launcher_turnip_test.sh
+            ${ROOT}/scripts/steamos/bundle/speedbreaker.sh)
     endif()
 endif()
 # The entitlements in a Mach-O's code signature (platform/code_signature.h),
@@ -480,6 +491,12 @@ set_target_properties(key_names_test PROPERTIES SKIP_BUILD_RPATH OFF)
 sb_test(settings_keys_test SOURCES ${SB_SETTINGS_SOURCES})
 target_link_libraries(settings_keys_test PRIVATE ${SB_SETTINGS_LIBS})
 target_include_directories(settings_keys_test SYSTEM PRIVATE ${ROOT}/tools/XenonRecomp/thirdparty/tomlplusplus/include)
+# Black Edition (#100): the game's flag written only when on (game/black_edition.h,
+# header part) and its setting, Settings > Game > Black Edition ([game]
+# black_edition, NFSMW_BLACK_EDITION; off by default, at the next launch).
+sb_test(black_edition_test SOURCES ${SB_SETTINGS_SOURCES})
+target_link_libraries(black_edition_test PRIVATE ${SB_SETTINGS_LIBS})
+target_include_directories(black_edition_test SYSTEM PRIVATE ${ROOT}/tools/XenonRecomp/thirdparty/tomlplusplus/include)
 # Settings > Game > Language (game/language.h, header only, and the option in
 # user/settings.cpp): English untouched for every caller, the game's ten
 # languages, the movie suffix by the files present, what the files give.

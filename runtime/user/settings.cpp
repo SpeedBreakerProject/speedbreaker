@@ -704,6 +704,13 @@ namespace settings
               .table = "game", .key = "language", .label = "Language",
               .description = "The language of the game's menus and race text: English (the USA disc's), or French, German, Italian, Spanish, Dutch, Swedish, Danish, Polish or Finnish, from the same disc's files. The movies and the speech stay in English, as the disc has them. The European (PAL) Spanish disc has Spanish movies and speech, and starts in Spanish; another language there keeps them in Spanish.",
               .env = "NFSMW_LANGUAGE", .defaultValue = double(game::language::kEnglish), .entries = kLanguageEntries },
+            // Black Edition (GitHub #100): the game's own flag, set once
+            // before any of its code runs (game/black_edition.h), so a change
+            // waits for the next launch.
+            { .id = Id::BlackEdition, .category = Category::Game, .type = Type::Bool, .apply = Apply::Restart,
+              .table = "game", .key = "black_edition", .label = "Black Edition",
+              .description = "The Black Edition's extra content, which the original disc already holds: ten more bonus cars, a circuit and two sprints in Quick Race, and the Black Edition Challenge in the Challenge Series. A save made with it on still loads with it off; that content is hidden again.",
+              .env = "NFSMW_BLACK_EDITION", .defaultValue = 0 },
         };
         static_assert(std::size(kOptions) == kCount, "one row per settings::Id");
 

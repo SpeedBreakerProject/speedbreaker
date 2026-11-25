@@ -62,6 +62,8 @@ namespace
     std::atomic<uint64_t> s_frames{ 0 }, s_snapped{ 0 }, s_noStep{ 0 }, s_multiStep{ 0 };
     // Game time handed to the frames so far (game::FrameClockMs), ms in 16.16.
     std::atomic<uint64_t> s_clock{ 0 };
+    // The last frame's share of it (game::CurrentFrameMs), ms in 16.16.
+    std::atomic<uint32_t> s_frameTime{ 0 };
     // NFSMW_GAME_TIME_LOG=<file>: one line per frame, written when the next
     // one starts: its measured ms, guest vblanks, whether it was given whole
     // vblanks, the world steps it ran (-1: no world), how long after the last
@@ -103,6 +105,11 @@ namespace game
     {
         return double(s_clock.load(std::memory_order_relaxed)) / 65536.0;
     }
+
+    double CurrentFrameMs()
+    {
+        return double(s_frameTime.load(std::memory_order_relaxed)) / 65536.0;
+    }
 }
 
 // GameFrameTime, before `bl 0x823AFE20` at 0x823B0148 in the main loop: r3 is
@@ -113,7 +120,12 @@ void GameFrameTime(PPCRegister& r3)
     struct AddToClock
     {
         PPCRegister& r3;
-        ~AddToClock() { s_clock.fetch_add(uint64_t(std::max(int32_t(r3.u32), 0)), std::memory_order_relaxed); }
+        ~AddToClock()
+        {
+            const uint32_t ms = uint32_t(std::max(int32_t(r3.u32), 0));
+            s_clock.fetch_add(ms, std::memory_order_relaxed);
+            s_frameTime.store(ms, std::memory_order_relaxed);
+        }
     } addToClock{ r3 };
     static uint64_t last = 0;
     uint64_t now = video::GuestVblanks(), vblanks = now - last;

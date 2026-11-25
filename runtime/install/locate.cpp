@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <format>
+#include <iterator>
 #include <set>
 
 #ifdef _WIN32
@@ -101,8 +102,10 @@ namespace install
             return install;
         }
 
+        // `found`: the images of an Xbox 360 game (a default.xex in an XDVDFS
+        // tree). `others`: every other .iso of the size.
         void Consider(const fs::path& file, uint64_t minSize, const Manifest& manifest,
-            std::set<fs::path>& seen, std::vector<DiscImageCandidate>& found)
+            std::set<fs::path>& seen, std::vector<DiscImageCandidate>& found, std::vector<DiscImageCandidate>& others)
         {
             std::string extension = file.extension().string();
             if (!PathEqualsIgnoreCase(extension, ".iso"))
@@ -120,17 +123,24 @@ namespace install
             if (!seen.insert(ec ? file : key).second)
                 return;
 
-            // Only XDVDFS images whose tree reads count; a truncated one is kept
-            // (with its status) so the UI can say why it won't install rather
-            // than leave the user wondering where their image went.
+            // Only XDVDFS images whose tree reads can install; a truncated one is
+            // kept (with its status) so the UI can say why it won't install
+            // rather than leave the user wondering where their image went.
             std::unique_ptr<DiscSource> source;
             Result opened = OpenDiscSource(file, source, { .allowTruncated = true });
-            if (!source || !source->Find("default.xex"))
-                return;
-
             DiscImageCandidate candidate;
             candidate.path = file;
             candidate.size = size;
+            if (!source || !source->Find("default.xex"))
+            {
+                // Not an Xbox 360 game's image (another console's or game's, a
+                // video disc, a file that only has the name): kept apart, with
+                // the check's reason and what the installer needs, for a scan
+                // that finds nothing to install (FindDiscImages).
+                candidate.status = !opened.Ok() || !source ? opened : CheckGameVersion(*source, manifest);
+                others.push_back(std::move(candidate));
+                return;
+            }
             XexIdentity identity;
             Result checked = CheckGameVersion(*source, manifest, &identity);
             candidate.titleId = identity.titleId;
@@ -407,7 +417,7 @@ namespace install
     std::vector<DiscImageCandidate> FindDiscImages(const std::vector<std::filesystem::path>& folders,
         uint64_t minSize, const std::atomic<bool>* cancel, const Manifest& manifest)
     {
-        std::vector<DiscImageCandidate> found;
+        std::vector<DiscImageCandidate> found, others;
         std::set<fs::path> seenFiles, listedDirs;
         fs::path library;
 #ifndef _WIN32
@@ -441,7 +451,7 @@ namespace install
                 }
                 else if (!filesListed && it->is_regular_file(typeEc))
                 {
-                    Consider(path, minSize, manifest, seenFiles, found);
+                    Consider(path, minSize, manifest, seenFiles, found, others);
                 }
             }
         };
@@ -458,6 +468,13 @@ namespace install
                 list(sub, nullptr);
             }
         }
+
+        // A file that isn't an Xbox 360 game's image is listed only when the
+        // scan found nothing to install: left out then, a Rescan showed nothing
+        // and the player had no word on why (GitHub issue #108). Beside an
+        // image that installs, it would only be one more row to pass.
+        if (std::none_of(found.begin(), found.end(), [](const DiscImageCandidate& c) { return c.status.Ok(); }))
+            found.insert(found.end(), std::make_move_iterator(others.begin()), std::make_move_iterator(others.end()));
 
         std::sort(found.begin(), found.end(), [](const DiscImageCandidate& a, const DiscImageCandidate& b)
         {

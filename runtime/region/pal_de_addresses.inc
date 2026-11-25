@@ -39,6 +39,8 @@ SB_PAL_DE_ADDRESS(0x82234A68, 0x82234A68)  // in sub_82234A68 (exact), exact; ga
 SB_PAL_DE_ADDRESS(0x82237498, 0x82237498)  // in sub_82237498 (reloc-equal), reloc-equal; game/fixes.cpp
 SB_PAL_DE_ADDRESS(0x8223F708, 0x8223F708)  // in sub_8223F708 (reloc-equal), reloc-equal; game/fixes.cpp
 SB_PAL_DE_ADDRESS(0x8223FC18, 0x8223FC18)  // outside .pdata, neighbour delta +0x0, exact; game/fixes.cpp
+SB_PAL_DE_ADDRESS(0x8225340C, 0x8225340C)  // in sub_82253248 (reloc-equal), exact; game/map_cursor.h
+SB_PAL_DE_ADDRESS(0x822534F0, 0x822534F0)  // in sub_822534F0 (reloc-equal), exact; game/map_cursor.cpp
 SB_PAL_DE_ADDRESS(0x8227FD58, 0x8227FD70)  // in sub_8227FD58 (reloc-equal), exact; game/fixes.cpp, game/mods.cpp
 SB_PAL_DE_ADDRESS(0x8227FE08, 0x8227FE20)  // in sub_8227FE08 (exact), exact; game/fixes.cpp, game/mods.cpp
 SB_PAL_DE_ADDRESS(0x8227FF60, 0x8227FF78)  // in sub_8227FF60 (reloc-equal), exact; game/fixes.cpp
@@ -143,7 +145,7 @@ SB_PAL_DE_ADDRESS(0x82A2CB18, 0x82A2CB18)  // .data (same layout), same bytes; g
 SB_PAL_DE_ADDRESS(0x82A2CB6C, 0x82A2CB6C)  // .data (same layout), same bytes; game/hfr.cpp, game/hfr_diag.cpp, hid/input.cpp
 SB_PAL_DE_ADDRESS(0x82A2CC08, 0x82A2CC08)  // .data (same layout), same bytes; game/hfr.cpp
 SB_PAL_DE_ADDRESS(0x82A2CE00, 0x82A2CE00)  // .data (same layout), same bytes; game/fixes.cpp
-SB_PAL_DE_ADDRESS(0x82A2CE06, 0x82A2CE06)  // .data (same layout), same bytes; game/fixes.cpp
+SB_PAL_DE_ADDRESS(0x82A2CE06, 0x82A2CE06)  // .data (same layout), same bytes; game/black_edition.h, game/fixes.cpp
 SB_PAL_DE_ADDRESS(0x82A2CF40, 0x82A2CF40)  // .data (same layout), same bytes; game/hfr.cpp
 SB_PAL_DE_ADDRESS(0x82A2D190, 0x82A2D190)  // .data (same layout), same bytes; game/front_end_matrix.h
 SB_PAL_DE_ADDRESS(0x82A2D5E0, 0x82A2D5E0)  // .data (same layout), same bytes; game/hfr.cpp

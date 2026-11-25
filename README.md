@@ -137,7 +137,7 @@ belongs to its owners.</sub>
 | **Linux** (x86-64) | [Download][dl-steamos-x86_64] the x86-64 SteamOS build, `SpeedBreaker-steamos-x86_64.tar.xz`, or [build from source](#building-from-source) | Tested here on SteamOS. Players reported v0.1.1 working on Fedora 44 (GeForce GTX 1080 Ti) and Ubuntu 24.04 (Intel Arc 140T). Other setups: reports welcome. |
 | **Mac** (Apple silicon) | [Download][dl-macos]<br>`SpeedBreaker-macos.dmg` | MacBook Pro (M1 Pro) on macOS 27 and Mac Studio (M4 Max) on macOS 26; macOS 15.6 (Sequoia) in a virtual machine. There is no Intel Mac download; an Intel Mac can [build from source](#building-from-source), with MoltenVK 1.4.2 (the Khronos release, or Homebrew's `molten-vk` 1.4.2). Intel Macs are community-tested: a player's Core i7-9700K and Radeon RX 6600 XT on macOS 15.4. |
 | **iPhone** and **iPad** | [Sideload the IPA](#iphone-and-ipad) (experimental), `SpeedBreaker-<version>-ios.ipa` on the [release page][releases], or [build it yourself](#iphone-and-ipad) with Xcode | iPhone 15 Pro Max and iPhone 18 Pro Max (iOS 27). iPad Pro 12.9-inch (M2, iPadOS 27) with a Backbone Pro. Not on the App Store. Those were Xcode-signed builds: the IPA itself hasn't been installed on a device yet. |
-| **Windows** (beta) | [Download][all-releases] `SpeedBreaker-0.2.6-windows-x64-beta.zip` from the Releases page; see [Windows (beta)](#windows-beta) | Here: a laptop with Intel UHD Graphics (60 Hz). Players have reported it running on NVIDIA GeForce (GTX 1070, RTX 4090, RTX 5070 Ti) and AMD Radeon (RX 6700 XT, RX 6750 XT) graphics. Intel Arc graphics and 120/144 Hz monitors haven't been tested yet: [reports welcome](#reporting-a-bug). |
+| **Windows** (beta) | [Download][all-releases] `SpeedBreaker-0.2.7-windows-x64-beta.zip` from the Releases page; see [Windows (beta)](#windows-beta) | Here: a laptop with Intel UHD Graphics (60 Hz). Players have reported it running on NVIDIA GeForce (GTX 1070, RTX 4090, RTX 5070 Ti) and AMD Radeon (RX 6700 XT, RX 6750 XT) graphics. Intel Arc graphics and 120/144 Hz monitors haven't been tested yet: [reports welcome](#reporting-a-bug). |
 | **Android** | Coming soon | |
 
 Each link downloads the newest release. Every file and its `.sha256` checksum file are on the
@@ -295,6 +295,10 @@ SpeedBreaker plays as a big flat screen in the headset. It is not a VR mode.
 - **Settings:** press **Menu + View** together.
 - **Frame rate:** set **Display > Frame Rate** to **30 fps** for smooth play. In the headset,
   the VR compositor shares the graphics chip. The game keeps its full speed at 30.
+- **Graphics driver:** `speedbreaker.sh` asks the Frame's graphics driver to draw straight to
+  memory instead of through the chip's tile memory, which is faster for this game (`last-run.log`
+  says so). To leave the driver its own choice, set the shortcut's launch options to
+  `NFSMW_TURNIP_SYSMEM=0 %command%`.
 - **Uninstall:** as on the [Steam Deck](#steam-deck-and-steam-machine).
 
 ### Linux
@@ -321,7 +325,7 @@ its name>`, e.g. `NFSMW_GPU=intel %command%` in Steam's launch options.
 
 The Windows version is a **beta**: here it has been tested on one laptop with Intel UHD
 Graphics and a 60 Hz screen, and players have reported it on NVIDIA and AMD graphics cards.
-Download `SpeedBreaker-0.2.6-windows-x64-beta.zip` from the [Releases page][all-releases],
+Download `SpeedBreaker-0.2.7-windows-x64-beta.zip` from the [Releases page][all-releases],
 right-click it, choose **Extract All**, and double-click
 `SpeedBreaker.exe` in the extracted folder (not inside the zip). SpeedBreaker isn't signed, so
 Windows may say **"Windows protected your PC"**: click **More info**, then **Run anyway**.
@@ -503,7 +507,10 @@ Finnish switch the menus and the race text (European languages show km/h) the ne
 starts. The text comes from the disc's own files; the movies and the speech stay in the disc's
 language (English on the USA disc, Spanish on the PAL one). The PAL disc starts in Spanish.
 The line under the row says what your installed files give the language you choose. Not shown on
-iPhone and iPad.
+iPhone and iPad. Black Edition (Off; on iPhone and iPad too) turns on the Black Edition content the
+original disc already holds, with no mod: ten more bonus cars, a circuit, two sprints and the Black
+Edition Challenge. It takes effect the next time the game starts. A save made with it on still
+loads with it off; that content is hidden again.
 
 **Audio:** Master Volume (100%), Mute (Off), Mute in Background (Off), which silences the
 game while its window isn't in front, and 7.1 Speakers (Off). The game's sound is 5.1, so on a
@@ -582,7 +589,9 @@ used.
 **Does it work with the PC version of the game?**
 No. SpeedBreaker is built from the Xbox 360 version and installs only from the Xbox 360 USA or
 European (PAL) Spanish disc.
-PC copies of *Most Wanted*, including the Black Edition, aren't supported.
+PC copies of *Most Wanted*, including the Black Edition, aren't supported. Since v0.2.7, the
+Black Edition content that the Xbox 360 disc already holds can be turned on in Settings > Game >
+Black Edition.
 
 **Is this an emulator?**
 No. It's a static recompilation: the game's Xbox 360 code was translated ahead of time into a
@@ -615,6 +624,10 @@ It always says what to do. The usual causes:
   own backup, onto a drive that can hold files over 4 GB.
 - *Not a disc image,* a Games on Demand package, or a video-only DVD image.
 - *Missing or corrupt files:* make a new backup from your disc.
+
+Since v0.2.7, when the installer finds nothing it can install, it also lists an `.iso` that isn't
+an Xbox 360 game's image, in grey, as "Not an Xbox 360 disc" or "Unsupported format", and says
+which disc SpeedBreaker needs.
 
 **My Mac says SpeedBreaker can't be opened.** Use **Open Anyway** in System Settings > Privacy &
 Security (see [Mac setup](#mac)), again after each update. SpeedBreaker needs macOS 15 (Sequoia)
@@ -683,7 +696,7 @@ SpeedBreaker folder instead: `data/`, `data/game` and `cache/`.
 2. A notice says where the zip file went: your **Desktop** (on SteamOS, pick it up in Desktop
    Mode, or in the Desktop app on a Steam Frame), the **SpeedBreaker** folder in the Files app on
    iPhone and iPad, or the data folder above when there is no Desktop. Its name says which
-   version you were running, for example `speedbreaker-bug-report-v0.2.6-<date>_<time>.zip`.
+   version you were running, for example `speedbreaker-bug-report-v0.2.7-<date>_<time>.zip`.
 3. Open an [issue][issues], attach the zip, and say what you were doing, what you expected, what
    happened, and roughly how long into the session it happened.
 
