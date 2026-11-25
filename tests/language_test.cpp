@@ -192,6 +192,17 @@ namespace
         cut.resize(23);
         CHECK(!InArchive(cut, "LANGUAGES\\POLISH.BIN"), "a cut-off entry is not read");
         CHECK(!InArchive({}, "LANGUAGES\\ENGLISH.BIN"), "no index: nothing");
+
+        // Polish text: the Polish font from UTF-8; a LOC.
+        CHECK(ToPolishFont("Zażółć gęślą jaźń „x” ™ ä")
+            == "Za\x86\xF3\x83\x82 g\x81\x84l\x85 ja\x88\x87 \x8Dx\x8E \x8F ?",
+            "Polish letters");
+        constexpr std::string_view one[] = { "ń" };
+        // LOCH 20, LOCI 20, LOCL 16 + 4 + text
+        const std::vector<uint8_t> loc = BuildLoc(one);
+        CHECK(loc.size() == 68, "LOC size");
+        CHECK(!memcmp(loc.data() + 40, "LOCL", 4) && loc[56] == 20, "LOC offset");
+        CHECK(loc[60] == 0x44 && loc[61] == 0x01 && !loc[62] && !loc[65], "LOC text");
     }
 
     void TestFiles()

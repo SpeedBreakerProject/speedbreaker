@@ -9,15 +9,22 @@
 SB_PAL_ES_ADDRESS(0x82000000, 0x82000000)  // the image header (the same); game/cover_callers.cpp, game/hfr_writeset.cpp, game/split_screen.h, gpu/renderer.cpp
 SB_PAL_ES_ADDRESS(0x82000B48, 0x82000B48)  // .rdata referenced, delta +0x0, same bytes; game/movie_pacing.cpp
 SB_PAL_ES_ADDRESS(0x8200FAC0, 0x8200FAC0)  // .rdata referenced, delta +0x0, same bytes; game/ultrawide.cpp
+SB_PAL_ES_ADDRESS(0x82063E40, 0x82063E40)  // .rdata referenced, delta +0x0, same bytes; game/fe.cpp
+SB_PAL_ES_ADDRESS(0x8206E47C, 0x8206E47C)  // .rdata referenced, delta +0x0, same bytes; game/fixes.cpp
 SB_PAL_ES_ADDRESS(0x82078AA8, 0x82078AA8)  // .rdata beside 0x82078ab8, delta +0x0, same bytes; game/language.h
 SB_PAL_ES_ADDRESS(0x82078AB0, 0x82078AB0)  // .rdata beside 0x82078ab8, delta +0x0, same bytes; game/language.h
+SB_PAL_ES_ADDRESS(0x82079AAC, 0x82079AAC)  // .rdata referenced, delta +0x0, same bytes; game/fixes.cpp
 SB_PAL_ES_ADDRESS(0x82134608, 0x82134608)  // outside .pdata, neighbour delta +0x0, exact; game/light_trails.cpp
 SB_PAL_ES_ADDRESS(0x82148818, 0x82148818)  // in sub_82148818 (exact), exact; game/language.cpp
+SB_PAL_ES_ADDRESS(0x8214B758, 0x8214B758)  // in sub_8214B758 (exact), exact; game/fixes.cpp
 SB_PAL_ES_ADDRESS(0x8215CB08, 0x8215CB08)  // in sub_8215CB08 (reloc-equal), reloc-equal; game/quick_race_cops.cpp
 SB_PAL_ES_ADDRESS(0x82161000, 0x82161000)  // in sub_82161000 (reloc-equal), reloc-equal; game/hfr.cpp
 SB_PAL_ES_ADDRESS(0x82168028, 0x82168028)  // in sub_82168028 (reloc-equal), reloc-equal; game/hfr_diag.cpp
 SB_PAL_ES_ADDRESS(0x821B82E8, 0x821B82E8)  // in sub_821B82E8 (exact), exact; game/language.h
 SB_PAL_ES_ADDRESS(0x821B8628, 0x821B8628)  // in sub_821B8628 (reloc-equal), exact; game/language.h
+SB_PAL_ES_ADDRESS(0x82202968, 0x82202968)  // in sub_82202968 (reloc-equal), reloc-equal; game/fixes.cpp
+SB_PAL_ES_ADDRESS(0x82203438, 0x82203438)  // in sub_82203438 (reloc-equal), exact; game/fixes.cpp
+SB_PAL_ES_ADDRESS(0x8221F118, 0x8221F118)  // in sub_8221F118 (reloc-equal), reloc-equal; game/mods.cpp
 SB_PAL_ES_ADDRESS(0x822206C0, 0x822206C0)  // in sub_822206C0 (reloc-equal), reloc-equal; game/hfr_diag.cpp
 SB_PAL_ES_ADDRESS(0x82223220, 0x82223220)  // in sub_82223220 (reloc-equal), reloc-equal; game/hfr_diag.cpp
 SB_PAL_ES_ADDRESS(0x82223308, 0x82223308)  // outside .pdata, neighbour delta +0x0, exact; game/hfr.cpp
@@ -26,15 +33,40 @@ SB_PAL_ES_ADDRESS(0x822251C8, 0x822251C8)  // in sub_822251C8 (reloc-equal), rel
 SB_PAL_ES_ADDRESS(0x822254B0, 0x822254B0)  // in sub_82225438 (reloc-equal), exact; game/glare.h
 SB_PAL_ES_ADDRESS(0x82225730, 0x82225730)  // in sub_82225730 (reloc-equal), reloc-equal; game/glare.cpp
 SB_PAL_ES_ADDRESS(0x82225A40, 0x82225A40)  // in sub_82225730 (reloc-equal), exact; game/glare.h
+SB_PAL_ES_ADDRESS(0x822265D0, 0x822265D0)  // in sub_822265D0 (exact), exact; game/fixes.cpp
 SB_PAL_ES_ADDRESS(0x8222ADC0, 0x8222ADC0)  // in sub_8222ADC0 (reloc-equal), reloc-equal; game/hfr_diag.cpp
 SB_PAL_ES_ADDRESS(0x82234A68, 0x82234A68)  // in sub_82234A68 (exact), exact; game/quick_race_cops.cpp
+SB_PAL_ES_ADDRESS(0x82237498, 0x82237498)  // in sub_82237498 (reloc-equal), reloc-equal; game/fixes.cpp
+SB_PAL_ES_ADDRESS(0x8223F708, 0x8223F708)  // in sub_8223F708 (reloc-equal), reloc-equal; game/fixes.cpp
+SB_PAL_ES_ADDRESS(0x8223FC18, 0x8223FC18)  // outside .pdata, neighbour delta +0x0, exact; game/fixes.cpp
 SB_PAL_ES_ADDRESS(0x8225340C, 0x8225340C)  // in sub_82253248 (reloc-equal), exact; game/map_cursor.h
 SB_PAL_ES_ADDRESS(0x822534F0, 0x822534F0)  // in sub_822534F0 (reloc-equal), exact; game/map_cursor.cpp
+SB_PAL_ES_ADDRESS(0x8227FD58, 0x8227FD70)  // in sub_8227FD58 (reloc-equal), exact; game/fixes.cpp, game/mods.cpp
+SB_PAL_ES_ADDRESS(0x8227FE08, 0x8227FE20)  // in sub_8227FE08 (exact), exact; game/fixes.cpp, game/mods.cpp
+SB_PAL_ES_ADDRESS(0x8227FF60, 0x8227FF78)  // in sub_8227FF60 (reloc-equal), exact; game/fixes.cpp
 SB_PAL_ES_ADDRESS(0x822824C8, 0x822824E0)  // in sub_822824C8 (exact), exact; game/quick_race_cops.cpp
 SB_PAL_ES_ADDRESS(0x82282A58, 0x82282A70)  // in sub_82282A58 (reloc-equal), exact; game/language.cpp
 SB_PAL_ES_ADDRESS(0x82282F00, 0x82282F18)  // in sub_82282E80 (reloc-equal), exact; game/language.h
+SB_PAL_ES_ADDRESS(0x82282F18, 0x82282F30)  // in sub_82282F18 (reloc-equal), reloc-equal; game/fixes.cpp
+SB_PAL_ES_ADDRESS(0x82282FAC, 0x82282FC4)  // in sub_82282F18 (reloc-equal), exact; game/fixes.cpp
+SB_PAL_ES_ADDRESS(0x82282FD0, 0x82282FE8)  // in sub_82282F18 (reloc-equal), exact; game/fixes.cpp
+SB_PAL_ES_ADDRESS(0x822862A0, 0x822862B8)  // in sub_822862A0 (reloc-equal), exact; game/fixes.cpp
+SB_PAL_ES_ADDRESS(0x822877A0, 0x822877B8)  // in sub_822877A0 (reloc-equal), exact; game/fixes.cpp
+SB_PAL_ES_ADDRESS(0x8228A790, 0x8228A7A8)  // in sub_8228A790 (reloc-equal), reloc-equal; game/fixes.cpp
+SB_PAL_ES_ADDRESS(0x822A6BF0, 0x822A6C08)  // in sub_822A6BF0 (reloc-equal), reloc-equal; game/mods.cpp
+SB_PAL_ES_ADDRESS(0x822A9798, 0x822A97B0)  // in sub_822A9798 (reloc-equal), reloc-equal; game/fixes.cpp
+SB_PAL_ES_ADDRESS(0x822A98C4, 0x822A98DC)  // in sub_822A9798 (reloc-equal), exact; game/fixes.cpp
+SB_PAL_ES_ADDRESS(0x822AA780, 0x822AA798)  // in sub_822AA780 (exact), exact; game/fixes.cpp
+SB_PAL_ES_ADDRESS(0x822AA818, 0x822AA830)  // in sub_822AA818 (exact), exact; game/fixes.cpp
+SB_PAL_ES_ADDRESS(0x822B8458, 0x822B8480)  // in sub_822B8458 (reloc-equal), exact; game/fixes.cpp
+SB_PAL_ES_ADDRESS(0x822B8988, 0x822B8990)  // in sub_822B8988 (reloc-equal), exact; game/fixes.cpp
+SB_PAL_ES_ADDRESS(0x822B9980, 0x822B9988)  // in sub_822B9980 (exact), exact; game/fixes.cpp
+SB_PAL_ES_ADDRESS(0x822BA768, 0x822BA770)  // in sub_822BA768 (reloc-equal), reloc-equal; game/fixes.cpp
 SB_PAL_ES_ADDRESS(0x822BCBC8, 0x822BCBD0)  // in sub_822BCBC8 (reloc-equal), exact; game/language.cpp
+SB_PAL_ES_ADDRESS(0x822BCE58, 0x822BCE60)  // outside .pdata, neighbour delta +0x8, exact; game/language.cpp
+SB_PAL_ES_ADDRESS(0x822BFB60, 0x822BFB68)  // in sub_822BFB60 (reloc-equal), reloc-equal; game/fe.cpp
 SB_PAL_ES_ADDRESS(0x822C4FB8, 0x822C4FC0)  // in sub_822C4FB8 (reloc-equal), exact; game/quick_race_cops.cpp
+SB_PAL_ES_ADDRESS(0x822D7528, 0x822D7530)  // in sub_822D7528 (exact), exact; game/fixes.cpp
 SB_PAL_ES_ADDRESS(0x822E23D0, 0x822E23D8)  // in sub_822E23D0 (reloc-equal), exact; game/quick_race_cops.cpp
 SB_PAL_ES_ADDRESS(0x822E4648, 0x822E4650)  // outside .pdata, neighbour delta +0x8, exact; game/quick_race_cops.cpp
 SB_PAL_ES_ADDRESS(0x822E4680, 0x822E4688)  // outside .pdata, neighbour delta +0x8, exact; game/quick_race_cops.cpp
@@ -48,10 +80,14 @@ SB_PAL_ES_ADDRESS(0x822E4958, 0x822E4960)  // in sub_822E4958 (reloc-equal), exa
 SB_PAL_ES_ADDRESS(0x822E49A8, 0x822E49B0)  // in sub_822E49A8 (reloc-equal), exact; game/quick_race_cops.cpp
 SB_PAL_ES_ADDRESS(0x822E49F0, 0x822E49F8)  // outside .pdata, neighbour delta +0x8, exact; game/quick_race_cops.cpp
 SB_PAL_ES_ADDRESS(0x822E4A00, 0x822E4A08)  // outside .pdata, neighbour delta +0x8, exact; game/quick_race_cops.cpp
+SB_PAL_ES_ADDRESS(0x823018D8, 0x823018B0)  // in sub_823018D8 (exact), exact; game/fixes.cpp
+SB_PAL_ES_ADDRESS(0x8239D8F0, 0x8239D8C8)  // in sub_8239D8F0 (reloc-equal), reloc-equal; game/fixes.cpp
 SB_PAL_ES_ADDRESS(0x823AFC68, 0x823AFDC8)  // in sub_823AFC68 (reloc-equal), exact; game/hfr.cpp
 SB_PAL_ES_ADDRESS(0x823B48E0, 0x823B4A40)  // in sub_823B4740 (reloc-equal), exact; game/language.h
+SB_PAL_ES_ADDRESS(0x823BCA60, 0x823BCBC8)  // in sub_823BCA60 (exact), exact; game/fixes.cpp
 SB_PAL_ES_ADDRESS(0x8243B0B0, 0x8243B218)  // outside .pdata, neighbour delta +0x168, exact; game/hfr_diag.cpp
 SB_PAL_ES_ADDRESS(0x8243EAC0, 0x8243EC28)  // in sub_8243EAC0 (reloc-equal), reloc-equal; game/hfr.cpp
+SB_PAL_ES_ADDRESS(0x8243F1D8, 0x8243F340)  // in sub_8243F1D8 (reloc-equal), reloc-equal; game/mods.cpp
 SB_PAL_ES_ADDRESS(0x82441050, 0x824411B8)  // in sub_82441050 (reloc-equal), exact; game/hfr_diag.cpp
 SB_PAL_ES_ADDRESS(0x82443088, 0x824431F0)  // in sub_82443088 (reloc-equal), reloc-equal; game/hfr_diag.cpp
 SB_PAL_ES_ADDRESS(0x824439B0, 0x82443B18)  // in sub_824439B0 (reloc-equal), reloc-equal; game/hfr.cpp
@@ -60,6 +96,7 @@ SB_PAL_ES_ADDRESS(0x82444520, 0x82444688)  // in sub_82444520 (reloc-equal), rel
 SB_PAL_ES_ADDRESS(0x824457B0, 0x82445918)  // outside .pdata, neighbour delta +0x168, exact; game/cover_callers.cpp
 SB_PAL_ES_ADDRESS(0x82454DC8, 0x82454F30)  // in sub_82454DC8 (reloc-equal), exact; game/hfr.cpp
 SB_PAL_ES_ADDRESS(0x82456030, 0x82456198)  // in sub_82456030 (reloc-equal), reloc-equal; game/hfr.cpp
+SB_PAL_ES_ADDRESS(0x82479058, 0x824791C0)  // in sub_82478F50 (reloc-equal), exact; game/fixes.cpp
 SB_PAL_ES_ADDRESS(0x824E6220, 0x824E63D8)  // in sub_824E6220 (reloc-equal), reloc-equal; game/hfr_diag.cpp
 SB_PAL_ES_ADDRESS(0x824E63D4, 0x824E658C)  // in sub_824E6220 (reloc-equal), exact; game/light_trails.h
 SB_PAL_ES_ADDRESS(0x824E9C38, 0x824E9DF0)  // in sub_824E9C38 (reloc-equal), reloc-equal; game/hfr.cpp
@@ -71,6 +108,7 @@ SB_PAL_ES_ADDRESS(0x825621A8, 0x825623A0)  // in sub_825621A8 (reloc-equal), exa
 SB_PAL_ES_ADDRESS(0x82562620, 0x82562818)  // in sub_82562620 (reloc-equal), exact; game/quick_race_cops.cpp
 SB_PAL_ES_ADDRESS(0x825629B8, 0x82562BB0)  // in sub_825629B8 (reloc-equal), exact; game/quick_race_cops.cpp
 SB_PAL_ES_ADDRESS(0x82562C48, 0x82562E40)  // in sub_82562C48 (reloc-equal), exact; game/quick_race_cops.cpp
+SB_PAL_ES_ADDRESS(0x82575C80, 0x82575E78)  // in sub_82575C80 (reloc-equal), exact; game/fixes.cpp
 SB_PAL_ES_ADDRESS(0x82593A58, 0x82593C50)  // in sub_82593A58 (reloc-equal), reloc-equal; debug/timeline.cpp
 SB_PAL_ES_ADDRESS(0x82597498, 0x82597690)  // in sub_82597498 (exact), exact; debug/timeline.cpp
 SB_PAL_ES_ADDRESS(0x82597FF0, 0x825981E8)  // in sub_82597FF0 (reloc-equal), reloc-equal; game/hfr.cpp
@@ -84,9 +122,13 @@ SB_PAL_ES_ADDRESS(0x825E3C30, 0x825E3E28)  // in sub_825E3C30 (reloc-equal), rel
 SB_PAL_ES_ADDRESS(0x82601528, 0x82601720)  // in sub_82601528 (reloc-equal), exact; apu/ea_cpu_budget.h
 SB_PAL_ES_ADDRESS(0x826016B8, 0x826018B0)  // in sub_826016B8 (reloc-equal), exact; apu/ea_cpu_budget.h
 SB_PAL_ES_ADDRESS(0x82601788, 0x82601980)  // in sub_82601788 (exact), exact; apu/ea_cpu_budget.cpp, apu/ea_cpu_budget.h
+SB_PAL_ES_ADDRESS(0x826B87F8, 0x826B89E8)  // in sub_826B87F8 (exact), exact; game/fixes.cpp
 SB_PAL_ES_ADDRESS(0x826E8CF8, 0x826E8EE8)  // in sub_826E8CF8 (reloc-equal), exact; game/movie_pacing.cpp
+SB_PAL_ES_ADDRESS(0x828F9E88, 0x828F9E88)  // .data (same layout), same bytes; game/fixes.cpp
 SB_PAL_ES_ADDRESS(0x828FBB50, 0x828FBB50)  // .data (same layout), same bytes; game/hfr.cpp
 SB_PAL_ES_ADDRESS(0x828FD86C, 0x828FD86C)  // .data (same layout), same bytes; game/hfr_diag.cpp
+SB_PAL_ES_ADDRESS(0x828FFBB0, 0x828FFBB0)  // .data (same layout), same bytes; game/fixes.cpp
+SB_PAL_ES_ADDRESS(0x82900CCC, 0x82900CCC)  // .data (same layout), same bytes; game/fixes.cpp
 SB_PAL_ES_ADDRESS(0x82908AB8, 0x82908AB8)  // .data (same layout), same bytes; game/hfr.cpp, game/hfr_diag.cpp
 SB_PAL_ES_ADDRESS(0x82908ABC, 0x82908ABC)  // .data (same layout), same bytes; game/hfr_diag.cpp
 SB_PAL_ES_ADDRESS(0x82909650, 0x82909650)  // .data (same layout), same bytes; game/hfr.cpp
@@ -95,18 +137,30 @@ SB_PAL_ES_ADDRESS(0x82909658, 0x82909658)  // .data (same layout), same bytes; g
 SB_PAL_ES_ADDRESS(0x8290965C, 0x8290965C)  // .data (same layout), same bytes; game/hfr.cpp
 SB_PAL_ES_ADDRESS(0x82909730, 0x82909730)  // .data (same layout), same bytes; game/hfr.cpp
 SB_PAL_ES_ADDRESS(0x82909770, 0x82909770)  // .data (same layout), same bytes; game/hfr.cpp
+SB_PAL_ES_ADDRESS(0x82A153B8, 0x82A153B8)  // .data (same layout), same bytes; game/fixes.cpp
 SB_PAL_ES_ADDRESS(0x82A2C480, 0x82A2C480)  // .data (same layout), same bytes; game/hfr.cpp
-SB_PAL_ES_ADDRESS(0x82A2C684, 0x82A2C684)  // .data (same layout), same bytes; game/quick_race_cops.h, game/split_screen.h
+SB_PAL_ES_ADDRESS(0x82A2C518, 0x82A2C518)  // .data (same layout), same bytes; game/fixes.cpp
+SB_PAL_ES_ADDRESS(0x82A2C684, 0x82A2C684)  // .data (same layout), same bytes; game/fixes.cpp, game/quick_race_cops.h, game/split_screen.h
+SB_PAL_ES_ADDRESS(0x82A2CB18, 0x82A2CB18)  // .data (same layout), same bytes; game/fixes.cpp
 SB_PAL_ES_ADDRESS(0x82A2CB6C, 0x82A2CB6C)  // .data (same layout), same bytes; game/hfr.cpp, game/hfr_diag.cpp, hid/input.cpp
 SB_PAL_ES_ADDRESS(0x82A2CC08, 0x82A2CC08)  // .data (same layout), same bytes; game/hfr.cpp
+SB_PAL_ES_ADDRESS(0x82A2CE00, 0x82A2CE00)  // .data (same layout), same bytes; game/fixes.cpp
 SB_PAL_ES_ADDRESS(0x82A2CE06, 0x82A2CE06)  // .data (same layout), same bytes; game/black_edition.h
 SB_PAL_ES_ADDRESS(0x82A2CF40, 0x82A2CF40)  // .data (same layout), same bytes; game/hfr.cpp
 SB_PAL_ES_ADDRESS(0x82A2D190, 0x82A2D190)  // .data (same layout), same bytes; game/front_end_matrix.h
 SB_PAL_ES_ADDRESS(0x82A2D5E0, 0x82A2D5E0)  // .data (same layout), same bytes; game/hfr.cpp
+SB_PAL_ES_ADDRESS(0x82A2D848, 0x82A2D848)  // .data (same layout), same bytes; game/fixes.cpp
+SB_PAL_ES_ADDRESS(0x82A2D86C, 0x82A2D86C)  // .data (same layout), same bytes; game/fixes.cpp
+SB_PAL_ES_ADDRESS(0x82A327C0, 0x82A327C0)  // .data (same layout), same bytes; game/fixes.cpp
 SB_PAL_ES_ADDRESS(0x82A34940, 0x82A34940)  // .data (same layout), same bytes; game/hfr.cpp
-SB_PAL_ES_ADDRESS(0x82A38070, 0x82A38070)  // .data (same layout), same bytes; game/hfr.cpp
+SB_PAL_ES_ADDRESS(0x82A38070, 0x82A38070)  // .data (same layout), same bytes; game/fixes.cpp, game/hfr.cpp
+SB_PAL_ES_ADDRESS(0x82A399AC, 0x82A399AC)  // .data (same layout), same bytes; game/fixes.cpp
+SB_PAL_ES_ADDRESS(0x82A39AD8, 0x82A39AD8)  // .data (same layout), same bytes; game/fixes.cpp
+SB_PAL_ES_ADDRESS(0x82A9B7D8, 0x82A9B7D8)  // .data (same layout), same bytes; game/fixes.cpp
 SB_PAL_ES_ADDRESS(0x82C3F590, 0x82C3F590)  // .data (same layout), same bytes; game/ultrawide.cpp
+SB_PAL_ES_ADDRESS(0x82C5A261, 0x82C5A261)  // .data (same layout), same bytes; game/fixes.cpp
 SB_PAL_ES_ADDRESS(0x82C5E348, 0x82C5E348)  // .data (same layout), same bytes; game/hfr.cpp
+SB_PAL_ES_ADDRESS(0x82C6F08C, 0x82C6F08C)  // .data (same layout), same bytes; game/fixes.cpp
 SB_PAL_ES_ADDRESS(0x82C84D3C, 0x82C84D3C)  // .data (same layout), same bytes; game/hfr_diag.cpp
 SB_PAL_ES_ADDRESS(0x82C84D44, 0x82C84D44)  // .data (same layout), same bytes; game/hfr_diag.cpp
 SB_PAL_ES_ADDRESS(0x82CD0000, 0x82CD0000)  // outside the image (heap or another window): the same; game/hfr_writeset.cpp, game/split_screen.h

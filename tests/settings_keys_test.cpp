@@ -98,7 +98,7 @@ int main()
         { Id::KeyRightStickClick, "right_stick_click", "Right Stick Click", "c", "none" },
     };
     // The keys run from the end of the Wheel options (Input's own rows, then
-    // the wheel's, come before them) to the start of Advanced, unbroken.
+    // the wheel's, come before them) to the start of the next table, unbroken.
     size_t previous = size_t(Id::WheelSettingsVersion);
     for (const Default& d : defaults)
     {
@@ -113,7 +113,7 @@ int main()
         CHECK(size_t(d.id) == previous + 1, "%s follows the row before it", o.key);
         previous = size_t(d.id) + 1;
     }
-    CHECK(size_t(Id::AsyncShaders) == previous + 1, "Advanced follows the keys");
+    CHECK(std::string_view(Info(Id(previous + 1)).table) != "keys", "the next table follows the keys");
     CHECK(EnvOverride(Id::KeyA) == nullptr, "nothing overrides a key");
 
     // A scratch folder of our own.
@@ -199,9 +199,9 @@ int main()
     // what it wrote loads back.
     CHECK(Save(file), "saves: %s", LastError().c_str());
     std::string text = ReadAll(file);
-    size_t at = text.find("\n[keys]\n"), advanced = text.find("\n[advanced]\n");
-    CHECK(at != std::string::npos && advanced != std::string::npos && at < advanced, "[keys] before [advanced]");
-    std::string section = at == std::string::npos ? "" : text.substr(at, advanced == std::string::npos ? std::string::npos : advanced - at);
+    size_t at = text.find("\n[keys]\n"), next = at == std::string::npos ? at : text.find("\n[", at + 1);
+    CHECK(at != std::string::npos && next != std::string::npos, "[keys] with a table after it");
+    std::string section = at == std::string::npos ? "" : text.substr(at, next == std::string::npos ? std::string::npos : next - at);
     CHECK(section.find("right_trigger = \"up\"\n") != std::string::npos, "saved by name");
     CHECK(section.find("left_trigger = \"keypad_1\"\n") != std::string::npos, "the table's case, not the file's");
     CHECK(section.find("left_stick_left_2 = \"none\"\n") != std::string::npos, "an emptied key");

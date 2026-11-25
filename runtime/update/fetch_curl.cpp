@@ -11,13 +11,16 @@
 //   - stdin and stderr on /dev/null, stdout a pipe read with a deadline and
 //     a size cap; no other descriptor of the game's;
 //   - default signal handling and an empty signal mask.
-// curl stops itself at --max-time; the game kills it two seconds later if
-// it hasn't, and always reaps it.
+// curl stops itself at --max-time; the game kills it two seconds
+// later if it hasn't, and always reaps it. Downloads have no
+// --max-time: curl writes the file itself (--continue-at -,
+// --fail, a stall limit) and gets killed on cancel.
 //
 // NFSMW_UPDATE_CURL=<path>: that curl instead (tests: a missing one).
 #if !defined(__APPLE__) && !defined(_WIN32)
 #include "fetch.h"
 
+#include <algorithm>
 #include <cerrno>
 #include <chrono>
 #include <cmath>
@@ -106,189 +109,369 @@ namespace update
             while (r < 0 && errno == EINTR);
             return r;
         }
+
+        const char* const kNoCurl =
+            "Checking needs curl, which this system doesn't have. "
+            "Install curl, or see the releases page.";
+
+        // How a curl run ended.
+        struct Run
+        {
+            bool spawned = false;
+            int spawnError = 0;
+            std::string out;  // its stdout
+            bool killed = false;
+            Transport killedAs = Transport::Failed;
+            bool cancelled = false;
+            int status = 0;   // from waitpid
+            pid_t reaped = 0;
+            std::string detail;
+        };
+
+        // Runs curl with `args` (after its path), stdout read into Run::out up
+        // to `cap` bytes. Killed at `deadline` (none: max()), or when tick()
+        // (called about four times a second) returns false.
+        using Clock = std::chrono::steady_clock;
+        Run RunCurl(const std::string& curl, std::vector<std::string> args,
+            Clock::time_point deadline, size_t cap,
+            const std::function<bool()>& tick = {})
+        {
+            Run run;
+            args.insert(args.begin(), curl);
+            std::vector<char*> argv;
+            for (std::string& a : args)
+                argv.push_back(a.data());
+            argv.push_back(nullptr);
+
+            std::vector<std::string> env;
+            for (const char* name : { "PATH", "https_proxy", "HTTPS_PROXY", "http_proxy",
+                     "all_proxy", "ALL_PROXY", "no_proxy", "NO_PROXY", "SSL_CERT_FILE",
+                     "SSL_CERT_DIR", "CURL_CA_BUNDLE" })
+                if (const char* value = std::getenv(name))
+                    env.push_back(std::string(name) + "=" + value);
+            std::vector<char*> envp;
+            for (std::string& e : env)
+                envp.push_back(e.data());
+            envp.push_back(nullptr);
+
+            int fds[2];
+            if (pipe2(fds, O_CLOEXEC) != 0)
+            {
+                run.spawnError = errno;
+                run.detail = std::format("pipe: {}", strerror(errno));
+                return run;
+            }
+            posix_spawn_file_actions_t actions;
+            posix_spawn_file_actions_init(&actions);
+            posix_spawn_file_actions_addopen(&actions, 0, "/dev/null", O_RDONLY, 0);
+            posix_spawn_file_actions_adddup2(&actions, fds[1], 1);
+            posix_spawn_file_actions_addopen(&actions, 2, "/dev/null", O_WRONLY, 0);
+#if defined(__GLIBC__) && (__GLIBC__ > 2 || (__GLIBC__ == 2 && __GLIBC_MINOR__ >= 34))
+            // Game descriptors without O_CLOEXEC too.
+            posix_spawn_file_actions_addclosefrom_np(&actions, 3);
+#endif
+            posix_spawnattr_t attr;
+            posix_spawnattr_init(&attr);
+            sigset_t none, all;
+            sigemptyset(&none);
+            sigfillset(&all);
+            posix_spawnattr_setsigmask(&attr, &none);
+            posix_spawnattr_setsigdefault(&attr, &all);
+            posix_spawnattr_setflags(&attr,
+                POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_SETSIGDEF);
+            pid_t pid = -1;
+            const int spawned = posix_spawn(&pid, curl.c_str(), &actions, &attr,
+                argv.data(), envp.data());
+            posix_spawn_file_actions_destroy(&actions);
+            posix_spawnattr_destroy(&attr);
+            close(fds[1]);
+            if (spawned != 0)
+            {
+                close(fds[0]);
+                run.spawnError = spawned;
+                run.detail = std::format("couldn't run curl: {}", strerror(spawned));
+                return run;
+            }
+            run.spawned = true;
+
+            // Its output, by the deadline and within the cap.
+            char buffer[16384];
+            auto nextTick = Clock::now();
+            while (true)
+            {
+                const auto now = Clock::now();
+                if (tick && now >= nextTick)
+                {
+                    if (!tick())
+                    {
+                        run.killed = run.cancelled = true;
+                        run.detail = "cancelled";
+                        break;
+                    }
+                    nextTick = now + std::chrono::milliseconds(250);
+                }
+                using std::chrono::milliseconds;
+                auto left =
+                    std::chrono::duration_cast<milliseconds>(deadline - now).count();
+                if (left <= 0)
+                {
+                    run.killed = true, run.killedAs = Transport::Timeout;
+                    run.detail = "curl was still running after the deadline";
+                    break;
+                }
+                pollfd p{ fds[0], POLLIN, 0 };
+                int ready = poll(&p, 1, int(std::min<int64_t>(left, tick ? 250 : 1000)));
+                if (ready < 0 && errno == EINTR)
+                    continue;
+                if (ready < 0)
+                {
+                    run.killed = true;
+                    run.detail = std::format("poll: {}", strerror(errno));
+                    break;
+                }
+                if (ready == 0)
+                    continue;
+                ssize_t n = read(fds[0], buffer, sizeof(buffer));
+                if (n < 0 && (errno == EINTR || errno == EAGAIN))
+                    continue;
+                if (n < 0)
+                {
+                    run.killed = true;
+                    run.detail = std::format("read: {}", strerror(errno));
+                    break;
+                }
+                if (n == 0)
+                    break;  // curl closed its output: done
+                if (run.out.size() + size_t(n) > cap)
+                {
+                    run.killed = true, run.killedAs = Transport::TooLarge;
+                    run.detail = std::format("over {} bytes", cap);
+                    break;
+                }
+                run.out.append(buffer, size_t(n));
+            }
+            close(fds[0]);
+            if (run.killed)
+                kill(pid, SIGKILL);  // still unreaped, so still ours
+
+            // Reaped in any case: at its end of output curl
+            // is exiting; give it two seconds, then the kill.
+            run.reaped = Reap(pid, run.status, WNOHANG);
+            for (auto until = Clock::now() + std::chrono::seconds(2);
+                 run.reaped == 0 && Clock::now() < until;)
+            {
+                usleep(10'000);
+                run.reaped = Reap(pid, run.status, WNOHANG);
+            }
+            if (run.reaped == 0)
+            {
+                kill(pid, SIGKILL);
+                run.reaped = Reap(pid, run.status, 0);
+                if (!run.killed)
+                {
+                    run.killed = true, run.killedAs = Transport::Timeout;
+                    run.detail = "curl didn't exit";
+                }
+            }
+            return run;
+        }
+
+        // The curl exit code of a run that wasn't killed, or -1 (detail set).
+        int ExitCode(Run& run)
+        {
+            if (run.reaped < 0 || !WIFEXITED(run.status))
+            {
+                run.detail = run.reaped < 0
+                    ? "curl's exit status was lost"
+                    : std::format("curl ended by signal {}", WTERMSIG(run.status));
+                return -1;
+            }
+            return WEXITSTATUS(run.status);
+        }
+
+        std::vector<std::string> CommonArgs(const Request& request)
+        {
+            std::vector<std::string> args = { "-q", "--silent", "--proto",
+                request.allowHttp ? "=http,https" : "=https" };
+            if (request.followRedirects)
+                args.insert(args.end(), { "--location", "--proto-redir", "=https",
+                                            "--max-redirs",
+                                            std::to_string(kMaxRedirects) });
+            args.insert(args.end(), { "--user-agent", request.userAgent });
+            for (const auto& [name, value] : request.headers)
+            {
+                args.push_back("--header");
+                args.push_back(name + ": " + value);
+            }
+            return args;
+        }
+
+        Fetched Exchange(const Request& request, bool head)
+        {
+            Fetched result;
+            const std::string curl = FindCurl();
+            if (curl.empty())
+            {
+                result.transport = Transport::Unavailable;
+                result.detail = kNoCurl;
+                return result;
+            }
+
+            const std::string seconds =
+                std::format("{}", std::ceil(request.timeoutSeconds));
+            std::vector<std::string> args = CommonArgs(request);
+            args.insert(args.end(), { "--dump-header", "-", "--max-time", seconds,
+                                        "--connect-timeout", seconds });
+            // Headers just once, from --dump-header; --max-filesize
+            // would refuse the Content-Lenght of a big file.
+            if (head)
+                args.insert(args.end(), { "--head", "--output", "/dev/null" });
+            else
+                args.insert(args.end(),
+                    { "--max-filesize", std::to_string(request.maxBytes) });
+            args.push_back("--url");
+            args.push_back(request.url);
+
+            const auto deadline = Clock::now()
+                + std::chrono::duration_cast<Clock::duration>(
+                    std::chrono::duration<double>(request.timeoutSeconds + 2.0));
+            const size_t cap = request.maxBytes + 64 * 1024;  // the body plus headers
+            Run run = RunCurl(curl, std::move(args), deadline, cap,
+                [&] { return !(request.cancel && request.cancel->load()); });
+            result.detail = run.detail;
+            if (!run.spawned)
+            {
+                result.transport =
+                    run.spawnError == ENOENT ? Transport::Unavailable : Transport::Failed;
+                if (run.spawnError == ENOENT)
+                    result.detail = kNoCurl;
+                return result;
+            }
+            if (run.killed)
+            {
+                result.transport = run.cancelled ? Transport::Failed : run.killedAs;
+                return result;
+            }
+            const int code = ExitCode(run);
+            if (code < 0)
+            {
+                result.transport = Transport::Failed;
+                result.detail = run.detail;
+                return result;
+            }
+            if (Transport t = FromExitCode(code); t != Transport::Ok)
+            {
+                result.transport = t;
+                result.detail = std::format("curl exit {}", code);
+                return result;
+            }
+            if (!ParseHttpResponse(run.out, result.response))
+            {
+                result.transport = Transport::Garbled;
+                result.detail =
+                    std::format("curl's output isn't an HTTP answer ({} bytes)",
+                        run.out.size());
+                return result;
+            }
+            if (result.response.body.size() > request.maxBytes)
+            {
+                result.transport = Transport::TooLarge;
+                result.detail = std::format("{} bytes", result.response.body.size());
+                return result;
+            }
+            result.transport = Transport::Ok;
+            return result;
+        }
+
+        uint64_t FileSize(const std::filesystem::path& path)
+        {
+            std::error_code ec;
+            const auto size = std::filesystem::file_size(path, ec);
+            return ec ? 0 : uint64_t(size);
+        }
     }
 
     Fetched Fetch(const Request& request)
     {
-        Fetched result;
+        return Exchange(request, false);
+    }
+
+    Fetched Head(const Request& request)
+    {
+        return Exchange(request, true);
+    }
+
+    Downloaded Download(const Request& request, const std::filesystem::path& part,
+        const std::function<void(uint64_t)>& progress, const std::atomic<bool>& cancel)
+    {
+        Downloaded result;
         const std::string curl = FindCurl();
         if (curl.empty())
         {
             result.transport = Transport::Unavailable;
-            result.detail = "Checking needs curl, which this system doesn't have. Install curl, or see the releases page.";
+            result.detail = "no curl";
             return result;
         }
 
+        // --fail: an error status writes nothing to `part`. --continue-at -:
+        // from its size (missing file: from the start). stdout: the status.
         const std::string seconds = std::format("{}", std::ceil(request.timeoutSeconds));
-        std::vector<std::string> args = {
-            curl, "-q", "--silent", "--dump-header", "-",
-            "--max-time", seconds, "--connect-timeout", seconds,
-            "--max-filesize", std::to_string(request.maxBytes),
-            "--proto", request.allowHttp ? "=http,https" : "=https",
-            "--user-agent", request.userAgent,
-        };
-        for (const auto& [name, value] : request.headers)
+        std::vector<std::string> args = CommonArgs(request);
+        args.insert(args.end(), { "--fail", "--continue-at", "-", "--connect-timeout",
+                                    seconds, "--speed-limit",
+                                    std::to_string(kStallBytesPerSecond), "--speed-time",
+                                    seconds, "--output", part.string(), "--write-out",
+                                    "%{http_code}", "--url", request.url });
+        Run run = RunCurl(curl, std::move(args), Clock::time_point::max(), 64, [&] {
+            if (cancel.load())
+                return false;
+            if (progress)
+                progress(FileSize(part));
+            return true;
+        });
+        result.detail = run.detail;
+        if (!run.spawned)
         {
-            args.push_back("--header");
-            args.push_back(name + ": " + value);
-        }
-        args.push_back("--url");
-        args.push_back(request.url);
-        std::vector<char*> argv;
-        for (std::string& a : args)
-            argv.push_back(a.data());
-        argv.push_back(nullptr);
-
-        std::vector<std::string> env;
-        for (const char* name : { "PATH", "https_proxy", "HTTPS_PROXY", "http_proxy", "all_proxy", "ALL_PROXY", "no_proxy", "NO_PROXY",
-                 "SSL_CERT_FILE", "SSL_CERT_DIR", "CURL_CA_BUNDLE" })
-            if (const char* value = std::getenv(name))
-                env.push_back(std::string(name) + "=" + value);
-        std::vector<char*> envp;
-        for (std::string& e : env)
-            envp.push_back(e.data());
-        envp.push_back(nullptr);
-
-        int fds[2];
-        if (pipe2(fds, O_CLOEXEC) != 0)
-        {
-            result.detail = std::format("pipe: {}", strerror(errno));
+            result.transport =
+                run.spawnError == ENOENT ? Transport::Unavailable : Transport::Failed;
             return result;
         }
-        posix_spawn_file_actions_t actions;
-        posix_spawn_file_actions_init(&actions);
-        posix_spawn_file_actions_addopen(&actions, 0, "/dev/null", O_RDONLY, 0);
-        posix_spawn_file_actions_adddup2(&actions, fds[1], 1);
-        posix_spawn_file_actions_addopen(&actions, 2, "/dev/null", O_WRONLY, 0);
-#if defined(__GLIBC__) && (__GLIBC__ > 2 || (__GLIBC__ == 2 && __GLIBC_MINOR__ >= 34))
-        posix_spawn_file_actions_addclosefrom_np(&actions, 3);  // the game's descriptors without O_CLOEXEC too
-#endif
-        posix_spawnattr_t attr;
-        posix_spawnattr_init(&attr);
-        sigset_t none, all;
-        sigemptyset(&none);
-        sigfillset(&all);
-        posix_spawnattr_setsigmask(&attr, &none);
-        posix_spawnattr_setsigdefault(&attr, &all);
-        posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_SETSIGDEF);
-        pid_t pid = -1;
-        const int spawned = posix_spawn(&pid, curl.c_str(), &actions, &attr, argv.data(), envp.data());
-        posix_spawn_file_actions_destroy(&actions);
-        posix_spawnattr_destroy(&attr);
-        close(fds[1]);
-        if (spawned != 0)
+        if (run.killed)
         {
-            close(fds[0]);
-            result.transport = spawned == ENOENT ? Transport::Unavailable : Transport::Failed;
-            result.detail = spawned == ENOENT ? "Checking needs curl, which this system doesn't have. Install curl, or see the releases page."
-                                              : std::format("couldn't run curl: {}", strerror(spawned));
+            result.cancelled = run.cancelled;
+            result.transport = run.cancelled ? Transport::Failed : run.killedAs;
             return result;
         }
-
-        // Its output, by the deadline and within the cap.
-        using Clock = std::chrono::steady_clock;
-        const auto deadline = Clock::now() + std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double>(request.timeoutSeconds + 2.0));
-        const size_t cap = request.maxBytes + 64 * 1024;  // the body and its headers
-        std::string out;
-        bool killed = false;
-        Transport killedAs = Transport::Failed;
-        char buffer[16384];
-        while (true)
-        {
-            auto left = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - Clock::now()).count();
-            if (left <= 0)
-            {
-                killed = true, killedAs = Transport::Timeout;
-                result.detail = "curl was still running after the deadline";
-                break;
-            }
-            pollfd p{ fds[0], POLLIN, 0 };
-            int ready = poll(&p, 1, int(std::min<int64_t>(left, 1000)));
-            if (ready < 0 && errno == EINTR)
-                continue;
-            if (ready < 0)
-            {
-                killed = true;
-                result.detail = std::format("poll: {}", strerror(errno));
-                break;
-            }
-            if (ready == 0)
-                continue;
-            ssize_t n = read(fds[0], buffer, sizeof(buffer));
-            if (n < 0 && (errno == EINTR || errno == EAGAIN))
-                continue;
-            if (n < 0)
-            {
-                killed = true;
-                result.detail = std::format("read: {}", strerror(errno));
-                break;
-            }
-            if (n == 0)
-                break;  // curl closed its output: done
-            if (out.size() + size_t(n) > cap)
-            {
-                killed = true, killedAs = Transport::TooLarge;
-                result.detail = std::format("over {} bytes", cap);
-                break;
-            }
-            out.append(buffer, size_t(n));
-        }
-        close(fds[0]);
-        if (killed)
-            kill(pid, SIGKILL);  // still unreaped, so still ours
-
-        // Reaped in any case: at its end of output curl is exiting; give it
-        // two seconds, then the kill.
-        int status = 0;
-        pid_t reaped = Reap(pid, status, WNOHANG);
-        for (auto until = Clock::now() + std::chrono::seconds(2); reaped == 0 && Clock::now() < until;)
-        {
-            usleep(10'000);
-            reaped = Reap(pid, status, WNOHANG);
-        }
-        if (reaped == 0)
-        {
-            kill(pid, SIGKILL);
-            reaped = Reap(pid, status, 0);
-            if (!killed)
-            {
-                killed = true, killedAs = Transport::Timeout;
-                result.detail = "curl didn't exit";
-            }
-        }
-
-        if (killed)
-        {
-            result.transport = killedAs;
+        const int code = ExitCode(run);
+        if (code < 0)
             return result;
-        }
-        if (reaped < 0 || !WIFEXITED(status))
+        const std::string& out = run.out;
+        auto digit = [](char c) { return c >= '0' && c <= '9'; };
+        if (out.size() == 3 && std::all_of(out.begin(), out.end(), digit))
+            result.status = std::stoi(out);
+        if (progress)
+            progress(FileSize(part));
+        result.detail = std::format("curl exit {}, HTTP {}", code, result.status);
+        switch (code)
         {
+        case 0:   // the file (or, for a 416, nothing more)
+        case 22:  // an error status: --fail wrote nothing
+            result.transport = result.status ? Transport::Ok : Transport::Garbled;
+            return result;
+        case 33:  // Range got ignored, the whole file came back
+            result.rangeRefused = true;
+            result.transport = Transport::Ok;
+            return result;
+        case 23:  // couldn't write the output
+            result.writeFailed = true;
             result.transport = Transport::Failed;
-            result.detail = reaped < 0 ? "curl's exit status was lost" : std::format("curl ended by signal {}", WTERMSIG(status));
+            return result;
+        default:
+            result.transport = FromExitCode(code);
+            if (result.transport == Transport::Ok)
+                result.transport = Transport::Failed;
             return result;
         }
-        const int code = WEXITSTATUS(status);
-        if (Transport t = FromExitCode(code); t != Transport::Ok)
-        {
-            result.transport = t;
-            result.detail = std::format("curl exit {}", code);
-            return result;
-        }
-        if (!ParseHttpResponse(out, result.response))
-        {
-            result.transport = Transport::Garbled;
-            result.detail = std::format("curl's output isn't an HTTP answer ({} bytes)", out.size());
-            return result;
-        }
-        if (result.response.body.size() > request.maxBytes)
-        {
-            result.transport = Transport::TooLarge;
-            result.detail = std::format("{} bytes", result.response.body.size());
-            return result;
-        }
-        result.transport = Transport::Ok;
-        return result;
     }
 }
 #endif

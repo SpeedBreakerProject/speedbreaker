@@ -1230,6 +1230,7 @@ namespace ui
             hid::wheel::StopCalibrate();
         UpdateCapture();
         ForgetUpdateDialog();
+        ForgetDownloadDialog();
         ForgetQuitPrompt();
         report::NoteMenuClosed();
         XamNotifySystemUi(false);

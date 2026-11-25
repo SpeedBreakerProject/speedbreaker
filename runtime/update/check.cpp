@@ -1,10 +1,12 @@
 // SpeedBreaker runtime. GPL-3.0-or-later (see COPYING). See check.h.
 //
-// Self-contained (no runtime headers but user/version_check.h and
-// update/release_names.h) so the test can build it alone. Formats: Semantic Versioning 2.0.0, RFC 8259 (JSON),
+// Self-contained (no runtime headers but user/version_check.h,
+// update/release_names.h and update/json.h) so the test can build it alone,
+// with update/json.cpp. Formats: Semantic Versioning 2.0.0, RFC 8259 (JSON),
 // RFC 3629 (UTF-8), RFC 9112 (HTTP/1.1 messages, as curl prints them),
 // GitHub's REST API for releases.
 #include "check.h"
+#include "json.h"
 
 #include <algorithm>
 #include <cstring>
@@ -73,71 +75,8 @@ namespace update
             return s;
         }
 
-        void AppendUtf8(uint32_t cp, std::string& out)
-        {
-            if (cp < 0x80)
-                out += char(cp);
-            else if (cp < 0x800)
-            {
-                out += char(0xC0 | (cp >> 6));
-                out += char(0x80 | (cp & 0x3F));
-            }
-            else if (cp < 0x10000)
-            {
-                out += char(0xE0 | (cp >> 12));
-                out += char(0x80 | ((cp >> 6) & 0x3F));
-                out += char(0x80 | (cp & 0x3F));
-            }
-            else
-            {
-                out += char(0xF0 | (cp >> 18));
-                out += char(0x80 | ((cp >> 12) & 0x3F));
-                out += char(0x80 | ((cp >> 6) & 0x3F));
-                out += char(0x80 | (cp & 0x3F));
-            }
-        }
-
-        // The UTF-8 sequence at s[i] (RFC 3629: no overlong forms, no
-        // surrogates, nothing past U+10FFFF): its length and code point, or
-        // 0 for a byte that starts no valid sequence.
-        size_t DecodeUtf8(std::string_view s, size_t i, uint32_t& cp)
-        {
-            const uint8_t b0 = uint8_t(s[i]);
-            if (b0 < 0x80)
-            {
-                cp = b0;
-                return 1;
-            }
-            size_t n;
-            uint8_t lo = 0x80, hi = 0xBF;
-            if (b0 >= 0xC2 && b0 <= 0xDF)
-                n = 2;
-            else if (b0 == 0xE0)
-                n = 3, lo = 0xA0;
-            else if ((b0 >= 0xE1 && b0 <= 0xEC) || b0 == 0xEE || b0 == 0xEF)
-                n = 3;
-            else if (b0 == 0xED)
-                n = 3, hi = 0x9F;
-            else if (b0 == 0xF0)
-                n = 4, lo = 0x90;
-            else if (b0 >= 0xF1 && b0 <= 0xF3)
-                n = 4;
-            else if (b0 == 0xF4)
-                n = 4, hi = 0x8F;
-            else
-                return 0;
-            if (s.size() - i < n)
-                return 0;
-            cp = b0 & (n == 2 ? 0x1F : n == 3 ? 0x0F : 0x07);
-            for (size_t k = 1; k < n; k++)
-            {
-                const uint8_t b = uint8_t(s[i + k]);
-                if (b < (k == 1 ? lo : 0x80) || b > (k == 1 ? hi : 0xBF))
-                    return 0;
-                cp = (cp << 6) | (b & 0x3F);
-            }
-            return n;
-        }
+        using json::AppendUtf8;
+        using json::DecodeUtf8;
 
         // Text for one line on screen: valid UTF-8 only, no control
         // characters (C0, DEL, C1) or bidirectional overrides, white space
@@ -240,215 +179,18 @@ namespace update
             }
         }
 
-        // --- JSON (RFC 8259) ---
+        // --- JSON (RFC 8259): update/json.h reads, this picks the fields ---
 
-        enum class Kind : uint8_t { String, Number, True, False, Null, Object, Array };
+        using json::Kind;
 
         enum Field : int { kTag, kName, kUrl, kBody, kMessage, kDraft, kPrerelease, kAssets, kFields };
         constexpr std::string_view kFieldNames[kFields] = { "tag_name", "name", "html_url", "body", "message", "draft", "prerelease", "assets" };
         // An asset's (each object in "assets").
         enum AssetField : int { kAssetName, kAssetState, kAssetSize, kAssetDigest, kAssetFields };
         constexpr std::string_view kAssetFieldNames[kAssetFields] = { "name", "state", "size", "digest" };
-        constexpr int kMaxDepth = 64;
 
-        struct JsonReader
+        struct JsonReader : json::Reader
         {
-            std::string_view s;
-            size_t i = 0;
-            std::string error;
-
-            bool Fail(std::string_view what)
-            {
-                if (error.empty())
-                    error = std::format("{} at byte {}", what, i);
-                return false;
-            }
-
-            bool Peek(char c) const
-            {
-                return i < s.size() && s[i] == c;
-            }
-
-            void Space()
-            {
-                while (i < s.size() && (s[i] == ' ' || s[i] == '\t' || s[i] == '\n' || s[i] == '\r'))
-                    i++;
-            }
-
-            bool Hex4(uint32_t& v)
-            {
-                if (s.size() - i < 4)
-                    return Fail("a short \\u escape");
-                v = 0;
-                for (int k = 0; k < 4; k++)
-                {
-                    char c = s[i];
-                    uint32_t d = IsDigit(c) ? uint32_t(c - '0') : (Lower(c) >= 'a' && Lower(c) <= 'f') ? uint32_t(Lower(c) - 'a' + 10) : 99;
-                    if (d == 99)
-                        return Fail("a bad \\u escape");
-                    v = v * 16 + d;
-                    i++;
-                }
-                return true;
-            }
-
-            // At the opening quote. `out` null: checked, not kept.
-            bool String(std::string* out)
-            {
-                i++;
-                while (true)
-                {
-                    if (i >= s.size())
-                        return Fail("an unterminated string");
-                    const uint8_t c = uint8_t(s[i]);
-                    if (c == '"')
-                    {
-                        i++;
-                        return true;
-                    }
-                    if (c < 0x20)
-                        return Fail("a control character in a string");
-                    if (c == '\\')
-                    {
-                        if (++i >= s.size())
-                            return Fail("an unterminated string");
-                        char e = s[i++], literal = 0;
-                        switch (e)
-                        {
-                        case '"': literal = '"'; break;
-                        case '\\': literal = '\\'; break;
-                        case '/': literal = '/'; break;
-                        case 'b': literal = '\b'; break;
-                        case 'f': literal = '\f'; break;
-                        case 'n': literal = '\n'; break;
-                        case 'r': literal = '\r'; break;
-                        case 't': literal = '\t'; break;
-                        case 'u':
-                        {
-                            uint32_t cp = 0;
-                            if (!Hex4(cp))
-                                return false;
-                            if (cp >= 0xD800 && cp <= 0xDBFF)
-                            {
-                                // A high surrogate: a low one must follow.
-                                uint32_t low = 0;
-                                if (s.size() - i < 2 || s[i] != '\\' || s[i + 1] != 'u')
-                                    return Fail("an unpaired surrogate");
-                                i += 2;
-                                if (!Hex4(low))
-                                    return false;
-                                if (low < 0xDC00 || low > 0xDFFF)
-                                    return Fail("an unpaired surrogate");
-                                cp = 0x10000 + ((cp - 0xD800) << 10) + (low - 0xDC00);
-                            }
-                            else if (cp >= 0xDC00 && cp <= 0xDFFF)
-                                return Fail("an unpaired surrogate");
-                            if (out)
-                                AppendUtf8(cp, *out);
-                            continue;
-                        }
-                        default:
-                            i--;
-                            return Fail("a bad escape");
-                        }
-                        if (out)
-                            *out += literal;
-                        continue;
-                    }
-                    uint32_t cp = 0;
-                    size_t n = DecodeUtf8(s, i, cp);
-                    if (n == 0)
-                        return Fail("invalid UTF-8");
-                    if (out)
-                        out->append(s.substr(i, n));
-                    i += n;
-                }
-            }
-
-            bool Digits()
-            {
-                if (i >= s.size() || !IsDigit(s[i]))
-                    return Fail("a bad number");
-                while (i < s.size() && IsDigit(s[i]))
-                    i++;
-                return true;
-            }
-
-            // `out`, if any, gets the number's text.
-            bool Number(std::string* out = nullptr)
-            {
-                const size_t start = i;
-                if (!NumberText())
-                    return false;
-                if (out)
-                    *out = s.substr(start, i - start);
-                return true;
-            }
-
-            bool NumberText()
-            {
-                if (Peek('-'))
-                    i++;
-                if (Peek('0'))
-                    i++;
-                else if (!Digits())
-                    return false;
-                if (Peek('.'))
-                {
-                    i++;
-                    if (!Digits())
-                        return false;
-                }
-                if (Peek('e') || Peek('E'))
-                {
-                    i++;
-                    if (Peek('+') || Peek('-'))
-                        i++;
-                    if (!Digits())
-                        return false;
-                }
-                return true;
-            }
-
-            bool Literal(std::string_view word)
-            {
-                if (s.substr(i, word.size()) != word)
-                    return Fail("an unknown word");
-                i += word.size();
-                return true;
-            }
-
-            bool Value(int depth, Kind* kind, std::string* text)
-            {
-                if (depth > kMaxDepth)
-                    return Fail("nesting deeper than 64 levels");
-                Space();
-                if (i >= s.size())
-                    return Fail("a missing value");
-                const char c = s[i];
-                Kind k;
-                bool ok;
-                if (c == '"')
-                    k = Kind::String, ok = String(text);
-                else if (c == '{')
-                    k = Kind::Object, ok = Object(depth + 1, nullptr);
-                else if (c == '[')
-                    k = Kind::Array, ok = Array(depth + 1);
-                else if (c == 't')
-                    k = Kind::True, ok = Literal("true");
-                else if (c == 'f')
-                    k = Kind::False, ok = Literal("false");
-                else if (c == 'n')
-                    k = Kind::Null, ok = Literal("null");
-                else if (c == '-' || IsDigit(c))
-                    k = Kind::Number, ok = Number(text);
-                else
-                    return Fail(c >= 0x20 && c < 0x7F ? std::format("an unexpected '{}'", c) : std::format("an unexpected byte 0x{:02x}", uint8_t(c)));
-                if (ok && kind)
-                    *kind = k;
-                return ok;
-            }
-
             static bool Assign(Release& r, int field, Kind kind, std::string&& text)
             {
                 auto string = [&](std::string& to, bool nullable) {
@@ -476,225 +218,108 @@ namespace update
             // At the '{'. `top`: the document's own object, whose members are read.
             bool Object(int depth, Release* top)
             {
-                if (depth > kMaxDepth)
-                    return Fail("nesting deeper than 64 levels");
-                i++;
-                Space();
-                if (Peek('}'))
-                {
-                    i++;
-                    return true;
-                }
                 uint32_t seen = 0;
-                while (true)
-                {
-                    Space();
-                    if (!Peek('"'))
-                        return Fail("a missing member name");
-                    std::string key;
-                    if (!String(top ? &key : nullptr))
-                        return false;
-                    Space();
-                    if (!Peek(':'))
-                        return Fail("a missing ':'");
-                    i++;
+                return Members(depth, top != nullptr, [&](const std::string& key) {
                     int field = -1;
                     for (int f = 0; top && f < kFields; f++)
                         if (key == kFieldNames[f])
                             field = f;
+                    if (field < 0)
+                        return Value(depth, nullptr, nullptr);
+                    if (seen & (1u << field))
+                        return Fail(std::format("a second \"{}\"", key));
+                    seen |= 1u << field;
+                    Space();
                     if (field == kAssets)
                     {
-                        if (seen & (1u << field))
-                            return Fail(std::format("a second \"{}\"", key));
-                        seen |= 1u << field;
-                        Space();
                         if (!Peek('['))
                             return Fail("\"assets\" of the wrong type");
-                        if (!Assets(depth + 1, top->assets))
-                            return false;
+                        return Assets(depth + 1, top->assets);
                     }
-                    else if (field >= 0)
-                    {
-                        if (seen & (1u << field))
-                            return Fail(std::format("a second \"{}\"", key));
-                        seen |= 1u << field;
-                        Space();
-                        const size_t at = i;
-                        Kind kind = Kind::Null;
-                        std::string text;
-                        if (!Value(depth, &kind, &text))
-                            return false;
-                        if (!Assign(*top, field, kind, std::move(text)))
-                        {
-                            i = at;
-                            return Fail(std::format("\"{}\" of the wrong type", key));
-                        }
-                    }
-                    else if (!Value(depth, nullptr, nullptr))
+                    const size_t at = i;
+                    Kind kind = Kind::Null;
+                    std::string text;
+                    if (!Value(depth, &kind, &text))
                         return false;
-                    Space();
-                    if (Peek(','))
+                    if (!Assign(*top, field, kind, std::move(text)))
                     {
-                        i++;
-                        continue;
+                        i = at;
+                        return Fail(std::format("\"{}\" of the wrong type", key));
                     }
-                    if (Peek('}'))
-                    {
-                        i++;
-                        return true;
-                    }
-                    return Fail("a missing ',' or '}'");
-                }
+                    return true;
+                });
             }
 
             // At the '[' of "assets": objects only.
             bool Assets(int depth, std::vector<Asset>& out)
             {
-                if (depth > kMaxDepth)
-                    return Fail("nesting deeper than 64 levels");
-                i++;
-                Space();
-                if (Peek(']'))
-                {
-                    i++;
-                    return true;
-                }
-                while (true)
-                {
-                    Space();
+                return Items(depth, [&] {
                     if (!Peek('{'))
                         return Fail("an asset that isn't an object");
                     Asset asset;
                     if (!AssetObject(depth + 1, asset))
                         return false;
                     out.push_back(std::move(asset));
-                    Space();
-                    if (Peek(','))
-                    {
-                        i++;
-                        continue;
-                    }
-                    if (Peek(']'))
-                    {
-                        i++;
-                        return true;
-                    }
-                    return Fail("a missing ',' or ']'");
-                }
+                    return true;
+                });
             }
 
             // At an asset's '{': its name, state, size and digest; the rest
             // (its uploader, its URLs) checked, not kept.
             bool AssetObject(int depth, Asset& a)
             {
-                if (depth > kMaxDepth)
-                    return Fail("nesting deeper than 64 levels");
-                i++;
-                Space();
-                if (Peek('}'))
-                {
-                    i++;
-                    return true;
-                }
                 uint32_t seen = 0;
-                while (true)
-                {
-                    Space();
-                    if (!Peek('"'))
-                        return Fail("a missing member name");
-                    std::string key;
-                    if (!String(&key))
-                        return false;
-                    Space();
-                    if (!Peek(':'))
-                        return Fail("a missing ':'");
-                    i++;
+                return Members(depth, true, [&](const std::string& key) {
                     int field = -1;
                     for (int f = 0; f < kAssetFields; f++)
                         if (key == kAssetFieldNames[f])
                             field = f;
-                    if (field >= 0)
-                    {
-                        if (seen & (1u << field))
-                            return Fail(std::format("an asset's second \"{}\"", key));
-                        seen |= 1u << field;
-                        Space();
-                        const size_t at = i;
-                        Kind kind = Kind::Null;
-                        std::string text;
-                        if (!Value(depth, &kind, &text))
-                            return false;
-                        bool ok = false;
-                        switch (field)
-                        {
-                        case kAssetName: ok = kind == Kind::String; a.name = std::move(text); break;
-                        case kAssetState: ok = kind == Kind::String; a.state = std::move(text); break;
-                        case kAssetDigest:
-                            ok = kind == Kind::String || kind == Kind::Null;
-                            if (kind == Kind::String)
-                                a.digest = std::move(text);
-                            break;
-                        case kAssetSize:
-                        {
-                            // A whole number of bytes, at most 2^53 (JSON's exact range).
-                            uint64_t v = 0;
-                            ok = kind == Kind::Number && ::update::Number(text, v) && v <= (uint64_t(1) << 53);
-                            if (ok)
-                                a.size = int64_t(v);
-                            break;
-                        }
-                        }
-                        if (!ok)
-                        {
-                            i = at;
-                            return Fail(std::format("an asset's \"{}\" of the wrong type", key));
-                        }
-                    }
-                    else if (!Value(depth, nullptr, nullptr))
-                        return false;
+                    if (field < 0)
+                        return Value(depth, nullptr, nullptr);
+                    if (seen & (1u << field))
+                        return Fail(std::format("an asset's second \"{}\"", key));
+                    seen |= 1u << field;
                     Space();
-                    if (Peek(','))
+                    const size_t at = i;
+                    Kind kind = Kind::Null;
+                    std::string text;
+                    if (!Value(depth, &kind, &text))
+                        return false;
+                    bool ok = false;
+                    switch (field)
                     {
-                        i++;
-                        continue;
-                    }
-                    if (Peek('}'))
+                    case kAssetName:
+                        ok = kind == Kind::String;
+                        a.name = std::move(text);
+                        break;
+                    case kAssetState:
+                        ok = kind == Kind::String;
+                        a.state = std::move(text);
+                        break;
+                    case kAssetDigest:
+                        ok = kind == Kind::String || kind == Kind::Null;
+                        if (kind == Kind::String)
+                            a.digest = std::move(text);
+                        break;
+                    case kAssetSize:
                     {
-                        i++;
-                        return true;
+                        // A whole number of bytes, at most 2^53 (JSON's exact range).
+                        uint64_t v = 0;
+                        ok = kind == Kind::Number && ::update::Number(text, v)
+                            && v <= (uint64_t(1) << 53);
+                        if (ok)
+                            a.size = int64_t(v);
+                        break;
                     }
-                    return Fail("a missing ',' or '}'");
-                }
-            }
-
-            bool Array(int depth)
-            {
-                if (depth > kMaxDepth)
-                    return Fail("nesting deeper than 64 levels");
-                i++;
-                Space();
-                if (Peek(']'))
-                {
-                    i++;
+                    }
+                    if (!ok)
+                    {
+                        i = at;
+                        return Fail(
+                            std::format("an asset's \"{}\" of the wrong type", key));
+                    }
                     return true;
-                }
-                while (true)
-                {
-                    if (!Value(depth, nullptr, nullptr))
-                        return false;
-                    Space();
-                    if (Peek(','))
-                    {
-                        i++;
-                        continue;
-                    }
-                    if (Peek(']'))
-                    {
-                        i++;
-                        return true;
-                    }
-                    return Fail("a missing ',' or ']'");
-                }
+                });
             }
         };
 

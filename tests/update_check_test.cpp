@@ -5,7 +5,8 @@
 // the release notes as plain lines, the result of every outcome, and every
 // case of which version counts as newer. From the
 // repo root:
-//   clang++ -std=c++20 -O2 -Iruntime tests/update_check_test.cpp runtime/update/check.cpp -o build/update_check_test
+//   clang++ -std=c++20 -O2 -Iruntime tests/update_check_test.cpp
+//     runtime/update/check.cpp runtime/update/json.cpp -o build/update_check_test
 //   build/update_check_test
 #include <update/check.h>
 

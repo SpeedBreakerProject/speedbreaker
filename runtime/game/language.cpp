@@ -24,7 +24,7 @@
 //
 // (The rest differs only online: SKU codes, region "NA"/"EU", date format.)
 //
-// Two overrides of the generated, weak functions (no ppc/ regeneration);
+// Overrides of the generated, weak functions (no ppc/ regeneration for these);
 // game/language.h has the decisions:
 //   - sub_822BCBC8, SetCurrentLanguage(r3): on the boot's call r3 becomes
 //     the setting's language (BootLanguage). The debug language cycling's
@@ -37,6 +37,9 @@
 //     becomes English's when the chosen language's bank is missing
 //     (SpeechIndex), so the police radio and the in-game scenes' voices play
 //     in English instead of not at all.
+//   - sub_822BCE58, the string lookup: the Polish text fixes (see "Polish
+//     text" below, with the MemcardLocalePolish midasm hook for the save
+//     system text).
 //
 // settings::Id::GameLanguage ([game] language in settings.toml,
 // NFSMW_LANGUAGE=spanish for one run); read at boot, so a change applies at
@@ -46,26 +49,33 @@
 #include "language.h"
 
 #include <kernel/function.h>
+#include <kernel/heap.h>
+#include <kernel/memory.h>
 #include <user/paths.h>
 #include <user/settings.h>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <mutex>
 #include <system_error>
+#include <unordered_map>
 
 extern "C" PPC_FUNC(__imp__sub_822BCBC8);
 extern "C" PPC_FUNC(__imp__sub_82282A58);
 extern "C" PPC_FUNC(__imp__sub_82148818);
+extern "C" PPC_FUNC(__imp__sub_822BCE58);
 
 namespace
 {
     using namespace game::language;
 
     std::atomic<int32_t> s_launch{ -1 };
+    std::atomic<int32_t> s_text{ kEnglish };  // the language SetCurrentLanguage last set
 
     int32_t Chosen()
     {
@@ -153,6 +163,7 @@ SB_HOOK(sub_822BCBC8)
         if (const int32_t r3 = BootLanguageFor(kBootCall, ctx.r3.s32, chosen, region::IsPal()); r3 != ctx.r3.s32)
             ctx.r3.s64 = r3;
     }
+    s_text.store(ctx.r3.s32, std::memory_order_relaxed);
     SB_ORIGINAL(sub_822BCBC8)(ctx, base);
 }
 
@@ -205,4 +216,113 @@ SB_HOOK(sub_82148818)
             ctx.r5.u64 = r5;
     }
     SB_ORIGINAL(sub_82148818)(ctx, base);
+}
+
+// Polish text. The disc memcard/LOCALE_POLISH.LOC holds "LANGUAGE NOT SUPPORTED"
+// stub text instead of content, so the save system gets the one below instead; and
+// six LANGUAGES\POLISH.BIN strings are adapted from English or trimmed to match it.
+namespace
+{
+    constexpr int32_t kPolish = 12;
+
+    // memcard/LOCALE_POLISH.LOC (UTF-16, no labels):
+    // the save system texts by index, whole file.
+    constexpr std::string_view kPolishLoc[] = {
+        "2.03.22",
+        "2.03.06",
+        "Kontynuuj",
+        "Kontynuuj bez zapisywania",
+        "Wybierz urządzenie",
+        "Tak",
+        "Nie",
+        "Anuluj",
+        "Brak wybranego urządzenia przechowywania danych. Do zapisywania postępów w grze niezbędny jest wybór "
+        "urządzenia przechowywania danych.",
+        "Wczytywanie %1. Proszę nie wyłączać konsoli.",
+        "%1 jest prawdopodobnie uszkodzony i nie może zostać użyty.",
+        "Urządzenie przechowywania danych zostało odłączone podczas działania. Błąd wczytywania.",
+        "%1 już istnieje na urządzeniu przechowywania danych %2. Ponowne zapisanie o tej nazwie zastąpi uprzednio "
+        "zapisany stan gry. Na pewno chcesz kontynuować?",
+        "Czy na pewno chcesz zastąpić %1 na urządzeniu przechowywania danych %2?",
+        "Zapisywanie %1. Proszę nie wyłączać konsoli.",
+        "Nie można zapisać %1.",
+        "Urządzenie przechowywania danych zostało odłączone podczas działania. Błąd zapisywania.",
+        "Czy na pewno chcesz usunąć %1 na urządzeniu przechowywania danych %2?",
+        "Usuwanie %1. Proszę nie wyłączać konsoli.",
+        "Nie można usunąć %1.",
+        "Urządzenie przechowywania danych zostało odłączone podczas działania. Błąd usuwania.",
+        "Nie ma dość wolnego miejsca na urządzeniu przechowywania danych %1.",
+    };
+
+    constexpr std::pair<uint32_t, std::string_view> kPolishBin[] = {
+        // OLX_OFFLINE_WARNING
+        { 0x66886589, "Jeżeli zdecydujesz się pojawić jako niedostępny, nie będziesz mógł wysyłać/odbierać "
+                      "zaproszeń do gry ani czatu głosowego." },
+        // OL_NoXBOX_Priv
+        { 0xCAB5A537, "Twoje obecne przywileje na Xbox Live nie pozwalają ci na dostęp do tej funkcji." },
+        // MC_CONFIRM_SAVE_THE_PROFILE_XENON
+        { 0xAE269CC1, "Czy na pewno chcesz zapisać profil o nazwie %s na urządzeniu przechowywania danych?" },
+        // MC_CARD_REMOVED
+        { 0xEA2E0059, "Wybrane urządzenie przechowywania danych zostało odłączone lub zamienione. Do zapisania "
+                      "postępów w grze i własnych ustawień niezbędne jest urządzenie przechowywania danych." },
+        // NO_STORAGE_DEVICE
+        { 0x777FBCFF, "Uprzednio wybrane urządzenie przechowywania danych nie jest już dostępne. Do zapisania "
+                      "postępów w grze i własnych ustawień niezbędne jest urządzenie przechowywania danych." },
+        // MC_AUTOSAVE_NO_CARD_XENON
+        { 0x9F47FAB2, "Funkcja autozapisu nie może zapisać postępów w grze, ponieważ wybrane urządzenie przechowywania "
+                      "danych zostało zmienione lub odłączone. Czy chcesz kontynuować bez autozapisu?" },
+    };
+
+    constexpr uint32_t kMemcardLocale = 0x3A00;  // r29 - this -> locale state
+    constexpr uint32_t kLocaleBuffer = 0x20;     // state -> loaded .LOC buffer
+    constexpr size_t kLocBuffer = 0x1000;        // its size
+
+    bool Polish()
+    {
+        return s_text.load(std::memory_order_relaxed) == kPolish;
+    }
+
+    // The Polish text for a label hash in guest memory, made once (0: none).
+    uint32_t PolishText(uint32_t hash)
+    {
+        static std::mutex lock;
+        static std::unordered_map<uint32_t, uint32_t> made;
+        std::string text;
+        for (const auto& [h, utf8] : kPolishBin)
+            if (h == hash)
+                text = ToPolishFont(utf8);
+        if (text.empty())
+            return 0;
+        std::lock_guard guard(lock);
+        uint32_t& guest = made[hash];
+        if (!guest)
+        {
+            void* p = g_userHeap.Alloc(text.size() + 1);
+            std::memcpy(p, text.c_str(), text.size() + 1);
+            guest = g_memory.MapVirtual(p);
+        }
+        return guest;
+    }
+}
+
+// After the .LOC is read, the Polish one in place of
+// the stub: (sub_82289E60, called by SetCurrentLanguage)
+void MemcardLocalePolish(PPCRegister& r29)
+{
+    static const std::vector<uint8_t> loc = BuildLoc(kPolishLoc);
+    uint8_t* base = g_memory.base;
+    const uint32_t state = Polish() ? PPC_LOAD_U32(r29.u32 - kMemcardLocale) : 0;
+    if (const uint32_t buffer = state ? PPC_LOAD_U32(state + kLocaleBuffer) : 0)
+        std::memcpy(g_memory.Translate(buffer), loc.data(),
+            std::min(loc.size(), kLocBuffer));
+}
+
+// The string lookup (label hash -> text; 0 when
+// missing, which the callers handle themselves).
+SB_HOOK(sub_822BCE58)
+{
+    const uint32_t hash = ctx.r3.u32;
+    SB_ORIGINAL(sub_822BCE58)(ctx, base);
+    if (const uint32_t fixed = ctx.r3.u32 && Polish() ? PolishText(hash) : 0)
+        ctx.r3.u64 = fixed;
 }

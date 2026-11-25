@@ -165,6 +165,31 @@ namespace ui
     // The menu closed or reopened: the dialog is gone (a check still running
     // then ends in a toast).
     void ForgetUpdateDialog();
+
+    // Download dialog (download_dialog.cpp): shows a download job's phases
+    // (download/download.h). Done: `question` -> `confirm`, then a restart
+    // prompt if `restart` says so, else `note` and OK. Abort, closing the
+    // menu or exiting stop the job and keep the part.
+    struct DownloadDialog
+    {
+        std::string title;   // "Download HD HUD Mod"
+        std::string name;    // "HD HUD Mod": "<name> v2: 120 MB to download."
+        std::string have;    // extra line for Ready ("You have v1."); can be empty
+        // Starts the job (download::Start): on open and on Try again.
+        std::function<void()> start;
+        // "Turn on HD HUD Mod?" ("" or unset: none).
+        std::function<std::string()> question;
+        std::string yes = "Yes";               // button for the question
+        std::function<void()> confirm;
+        std::function<bool()> restart;         // a restart applies it
+        std::string note;                      // otherwise, over OK
+    };
+    // Drawn, opened and forgotten same as the update dialog.
+    void OpenDownloadDialog(DownloadDialog dialog);
+    bool DrawDownloadDialog();
+    bool DownloadDialogOpen();
+    void ForgetDownloadDialog();
+
     // The menu closed: Quit Game's prompt (settings_menu.cpp, quit_game.h),
     // if it was asking, is cancelled.
     void ForgetQuitPrompt();

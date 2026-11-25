@@ -34,6 +34,22 @@ endif()
 # download page's code in Check for Updates. Part of the runtime itself, not
 # a library of its own, so the iOS app (scripts/ios/build.sh) links it too.
 list(APPEND RUNTIME_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/qrcodegen/qrcodegen.c)
+# Zstandard single-file decoder (thirdparty/zstd, vendored, C; made with
+# build/single_file_libs/create_single_file_decoder.sh from zstd): for the
+# .zst files of texture mods. Part of the runtime, same as qrcodegen.
+# SB_NO_MODS: mods are off on macOS and iOS for now (not tested there, see
+# mods::kAvailable in mods/mods.h): no game/mods.cpp, texture replacement
+# or zstd (stubs in their headers stand in).
+if(APPLE)
+    set(SB_NO_MODS ON)
+endif()
+if(SB_NO_MODS)
+    list(REMOVE_ITEM RUNTIME_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/game/mods.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/gpu/texture_override.cpp)
+else()
+    list(APPEND RUNTIME_SOURCES
+        ${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/zstd/zstddeclib.c)
+endif()
 if(APPLE)
     # Apple's own glue for macOS and iOS (the thermal state) is
     # Objective-C++ on Foundation alone, platform/apple/*.mm. Built with the
@@ -64,6 +80,9 @@ else()
     add_executable(SpeedBreaker ${RUNTIME_SOURCES})
 endif()
 target_include_directories(SpeedBreaker PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/kernel)
+if(SB_NO_MODS)
+    target_compile_definitions(SpeedBreaker PRIVATE SB_NO_MODS)
+endif()
 find_package(SDL3 REQUIRED CONFIG)
 if(IOS)
     # iOS has no Vulkan loader: the app links MoltenVK statically, and the

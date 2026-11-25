@@ -21,10 +21,12 @@
 #include <hid/input.h>
 #include <cpu/guest_thread.h>
 #include <cpu/host_cpu.h>
+#include <download/download.h>
 #include <install/install_cli.h>
 #include <install/locate.h>
 #include <install/placement.h>
 #include <install/sha256.h>
+#include <mods/mods.h>  // mod downloads: swap on start, mod state
 #include <platform/quit_signals.h>
 #include <region/region.h>
 #include <report/report.h>
@@ -34,6 +36,7 @@
 #include <user/paths.h>
 #include <user/settings.h>
 #include <user/version_check.h>
+#include <game/fixes.h>
 #include <game/language.h>
 #include <game/black_edition.h>
 
@@ -536,6 +539,7 @@ int main(int argc, char** argv)
                 while (kill(lifeline, 0) == 0 || errno != ESRCH)
                     std::this_thread::sleep_for(std::chrono::milliseconds(500));
                 fprintf(stderr, "[runtime] launcher (pid %d) is gone: exiting\n", int(lifeline));
+                download::Shutdown();
                 if (settings::Dirty())
                     settings::Save();
                 gpu::renderer::Shutdown();
@@ -659,6 +663,10 @@ int main(int argc, char** argv)
     // Black Edition (#100): the game's own flag, once, before any guest code runs.
     game::black_edition::ApplyAtLaunch();
 
+    // Downloaded mod sets move in before the game indexes mods (mods/mods.h).
+    mods::StartSession(GetUserPath());
+    fixes::ApplyAtBoot();  // the Restart fixes that write game data, before the game's code runs
+
     g_userHeap.Init();
     module::Initialize(file, uint32_t(image.base), image.size, uint32_t(image.entry_point));
     WireImports(file);
@@ -716,6 +724,7 @@ int main(int argc, char** argv)
     if (int sig = quitsignals::Requested())
         fprintf(stderr, "[runtime] %s: quitting, as the window's close button does\n", quitsignals::Name(sig));
     fprintf(stderr, "[runtime] window closed\n");
+    download::Shutdown();
     if (settings::Dirty())
         settings::Save();
     gpu::renderer::Shutdown();
