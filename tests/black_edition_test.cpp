@@ -127,8 +127,10 @@ namespace
         CHECK(o.description && std::string_view(o.description).find("Black Edition Challenge") != std::string_view::npos,
             "the description names what it adds");
         // [game] keeps its keys together, Language first (Save writes a table once).
-        CHECK(size_t(Id::BlackEdition) == size_t(Id::GameLanguage) + 1 && size_t(Id::BlackEdition) + 1 == settings::kCount,
-            "after Language, the last row");
+        CHECK(size_t(Id::BlackEdition) == size_t(Id::GameLanguage) + 1, "after Language");
+        // Catch Up was added after it, so it holds the last row.
+        CHECK(size_t(Id::CatchUp) == size_t(Id::BlackEdition) + 1 && size_t(Id::CatchUp) + 1 == settings::kCount,
+            "after Black Edition, the last row");
     }
 
     void TestFile(const std::filesystem::path& file)

@@ -283,6 +283,9 @@ sb_test(front_end_matrix_test)
 # own rows' bytes, and when the row is offered (game/quick_race_cops.h, header
 # part only).
 sb_test(quick_race_cops_test)
+# Career's catch-up (game/catch_up.h, header only): NFSMW_CATCHUP's parse and
+# clamp, and the weight scaling that keeps the game's own at 1.
+sb_test(catch_up_test)
 # Settings > Display > Fullscreen against the window's own state
 # (video/fullscreen_policy.h, header only): the green button and other system
 # changes never change the saved setting, the menu does; presenter.cpp is read

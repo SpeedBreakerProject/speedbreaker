@@ -150,6 +150,10 @@ namespace settings
         // Game (the [game] table)
         GameLanguage,  // game/language.cpp: the game's language, game::language's ids (English = 0)
         BlackEdition,  // game/black_edition.h: the disc's Black Edition content (GitHub #100); at launch
+        // How much of the AI's catch-up the races keep (game/catch_up.h): 1 the
+        // game's own weights, 0.5 half of the help and the lift. Live: read
+        // where the weight is used.
+        CatchUp,
         Count
     };
     constexpr size_t kCount = size_t(Id::Count);

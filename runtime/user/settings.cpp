@@ -568,6 +568,19 @@ namespace settings
               .table = "game", .key = "black_edition", .label = "Black Edition",
               .description = "The Black Edition's extra content, which the original disc already holds: ten more bonus cars, a circuit and two sprints in Quick Race, and the Black Edition Challenge in the Challenge Series. A save made with it on still loads with it off; that content is hidden again.",
               .env = "NFSMW_BLACK_EDITION", .defaultValue = 0 },
+            // The AI's catch-up (game/catch_up.cpp): the rubber band. The game
+            // picks a weight from { 0, 0.5, 1 } for each opponent, and the
+            // weight says how far along the blend between two curve sets that
+            // opponent sits, lifting a car that falls behind and holding back
+            // one that leads; this keeps the middle row and scales the
+            // deviations from it. Two choices: 100%, the game as it is, and
+            // 50%, the catch-up the race applies at half (a file or the
+            // environment may still hold anything from 0.5 to 1: 0 is in the
+            // formula but is not offered, and was never raced).
+            { .id = Id::CatchUp, .category = Category::Game, .type = Type::Float, .apply = Apply::Live,
+              .table = "game", .key = "catch_up", .label = "Catch Up",
+              .description = "How much of the AI's catch-up the races keep: 100% is the game's own, lifting a car that falls behind and holding back one that leads; 50% halves the catch-up the race applies, for closer racing without the rubber band showing.",
+              .env = "NFSMW_CATCHUP", .defaultValue = 1.0, .min = 0.5, .max = 1.0, .step = 0.5, .unit = "%" },
         };
         static_assert(std::size(kOptions) == kCount, "one row per settings::Id");
 

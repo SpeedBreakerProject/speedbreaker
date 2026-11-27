@@ -274,3 +274,15 @@ registers = ["f10"]
 name = "WorldSteps"
 address = 0x823A23FC
 registers = ["r30"]
+
+# Career's catch-up (runtime/game/catch_up.cpp): the AI's catch-up weight as
+# sub_823328C0 loads it from 0x82061C90 and sub_8233A6A0 picks the row (f31 =
+# the weight, { 0, 0.5, 1 }), just before `lbz r11,46(r27)`. Settings >
+# Game > Catch Up (NFSMW_CATCHUP overrides it) scales its distance from the
+# middle row (0.5); 100% is the game as it is. The PAL configs hold the same
+# hook at their own discs' address
+# (0x823329A8, mapped by survey/region_map.py).
+[[midasm_hook]]
+name = "CatchUpAidWeight"
+address = 0x823329A8
+registers = ["f31"]
