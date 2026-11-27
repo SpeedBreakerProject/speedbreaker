@@ -510,7 +510,12 @@ The line under the row says what your installed files give the language you choo
 iPhone and iPad. Black Edition (Off; on iPhone and iPad too) turns on the Black Edition content the
 original disc already holds, with no mod: ten more bonus cars, a circuit, two sprints and the Black
 Edition Challenge. It takes effect the next time the game starts. A save made with it on still
-loads with it off; that content is hidden again.
+loads with it off; that content is hidden again. Catch Up (100%) sets how much of its catch-up the
+AI keeps: the game gives each opponent a weight that lifts a car falling behind and holds one that
+leads, and 100% is that weight exactly as the Xbox 360 applies it, while 50%, the other choice,
+halves the catch-up the race applies, for closer racing without the rubber band showing. It takes
+effect at once, with no restart; it is `catch_up` in `settings.toml`'s `[game]` table, and
+`NFSMW_CATCHUP` sets it for one run.
 
 **Audio:** Master Volume (100%), Mute (Off), Mute in Background (Off), which silences the
 game while its window isn't in front, and 7.1 Speakers (Off). The game's sound is 5.1, so on a
