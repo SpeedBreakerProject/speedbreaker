@@ -79,7 +79,7 @@ namespace install
             uint64_t size = fs::file_size(xex, ec);
             if (ec)
                 return std::nullopt;
-            const Manifest& manifest = Pick(requested, ManifestForXexSize(size));
+            const Manifest& manifest = Pick(requested, ManifestForXexFile(xex));
             if (size != manifest.Xex().size)
                 return std::nullopt;
             if (requireMarker && ReadInstallMarker(dir) != std::optional<std::string>(manifest.version))

@@ -856,6 +856,15 @@ shasum -a 256 game/files-pal-de/default.xex
 # must print 23ece29d18724ea28971d52f936964d127148bd2359ff24795da7442b9069bf4
 tools/XenonRecomp/build/XenonRecomp/XenonRecomp config/pal-de/nfsmw.toml tools/XenonRecomp/XenonUtils/ppc_context.h
 python3 scripts/region_ppc.py ppc-pal-de pal_de
+
+# Optional, for the UK (PAL, English) disc too, the same way (ppc-pal-uk/; without it the build
+# refuses that disc). Not run in the game yet; docs/REGION_PAL_UK.md says how its tables were made.
+mkdir -p game/files-pal-uk ppc-pal-uk
+tools/extract-xiso/build/extract-xiso -d game/files-pal-uk -x /path/to/your-uk-backup.iso
+shasum -a 256 game/files-pal-uk/default.xex
+# must print e2ea2ff11bf84cb30430d824d7bfe699a3acf3e7400d21b9a7c938e3d7a10474
+tools/XenonRecomp/build/XenonRecomp/XenonRecomp config/pal-uk/nfsmw.toml tools/XenonRecomp/XenonUtils/ppc_context.h
+python3 scripts/region_ppc.py ppc-pal-uk pal_uk
 ```
 
 #### 3. Build

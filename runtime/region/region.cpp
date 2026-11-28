@@ -27,6 +27,13 @@ namespace pal_de
     extern const uint64_t kImageBase, kImageSize, kCodeBase, kCodeSize;
 }
 #endif
+#if SB_PAL_UK
+namespace pal_uk
+{
+    extern PPCFuncMapping PPCFuncMappings[];
+    extern const uint64_t kImageBase, kImageSize, kCodeBase, kCodeSize;
+}
+#endif
 
 namespace region
 {
@@ -52,6 +59,20 @@ namespace region
         constexpr size_t kPalDeCount = 0;
 #endif
 
+#if SB_PAL_UK
+        // survey/sibling_map.py write --region pal-uk: the Spanish table moved
+        // to the UK build's layout (a build with ppc-pal-uk/ has it).
+        constexpr AddressPair s_palUk[] = {
+#define SB_PAL_UK_ADDRESS(usa, pal) { usa, pal },
+#include "pal_uk_addresses.inc"
+#undef SB_PAL_UK_ADDRESS
+        };
+        constexpr size_t kPalUkCount = std::size(s_palUk);
+#else
+        constexpr AddressPair s_palUk[] = { { 0, 0 } };  // unused: no UK code in this build
+        constexpr size_t kPalUkCount = 0;
+#endif
+
         template <size_t N>
         constexpr bool Sorted(const AddressPair (&table)[N])
         {
@@ -62,6 +83,7 @@ namespace region
         }
         static_assert(Sorted(s_palEs), "pal_es_addresses.inc: not sorted by USA address, or a duplicate");
         static_assert(Sorted(s_palDe), "pal_de_addresses.inc: not sorted by USA address, or a duplicate");
+        static_assert(Sorted(s_palUk), "pal_uk_addresses.inc: not sorted by USA address, or a duplicate");
 
         // A PAL release's code, as scripts/region_ppc.py namespaced it.
         struct Code
@@ -83,6 +105,13 @@ namespace region
             if (release == Release::PalDe)
             {
                 code = { pal_de::PPCFuncMappings, pal_de::kImageBase, pal_de::kImageSize, pal_de::kCodeBase, pal_de::kCodeSize };
+                return true;
+            }
+#endif
+#if SB_PAL_UK
+            if (release == Release::PalUk)
+            {
+                code = { pal_uk::PPCFuncMappings, pal_uk::kImageBase, pal_uk::kImageSize, pal_uk::kCodeBase, pal_uk::kCodeSize };
                 return true;
             }
 #endif
@@ -114,6 +143,8 @@ namespace region
         {
             if (g_release == Release::PalDe)
                 return Lookup(s_palDe, kPalDeCount, usa, "PAL (German)");
+            if (g_release == Release::PalUk)
+                return Lookup(s_palUk, kPalUkCount, usa, "PAL (English, UK)");
             return Lookup(s_palEs, std::size(s_palEs), usa, "PAL (Spanish)");
         }
     }
@@ -130,6 +161,7 @@ namespace region
         {
         case Release::PalEs: return "pal-es";
         case Release::PalDe: return "pal-de";
+        case Release::PalUk: return "pal-uk";
         default: return "usa";
         }
     }
@@ -140,6 +172,7 @@ namespace region
         {
         case Release::PalEs: return "Europe (PAL, Spanish)";
         case Release::PalDe: return "Europe (PAL, German)";
+        case Release::PalUk: return "Europe (PAL, English)";
         default: return "USA";
         }
     }
@@ -152,6 +185,8 @@ namespace region
             release = Release::PalEs;
         else if (id == "pal-de")
             release = Release::PalDe;
+        else if (id == "pal-uk")
+            release = Release::PalUk;
         else
             return false;
         return true;
@@ -213,5 +248,11 @@ namespace region
     {
         count = kPalDeCount;
         return s_palDe;
+    }
+
+    const AddressPair* PalUkTable(size_t& count)
+    {
+        count = kPalUkCount;
+        return s_palUk;
     }
 }

@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
 """A PAL release's addresses for the runtime's hooks (runtime/region/region.h):
-the Spanish one's (pal-es, the default) or the German one's (pal-de):
+the Spanish one's (pal-es, the default), the German one's (pal-de) or the UK
+one's (pal-uk):
 
     python3 tests/region_addresses_check.py <repo> [<usa dir> <pal dir> <funcmap.tsv>] [--region pal-de]
+
+(pal-uk with '-' for the USA dir and the function map: survey/sibling_map.py
+check on <pal dir> alone, for a UK disc owner without a USA image.)
 
 Without the images (the default; no game data needed):
   - every guest address the runtime's sources name (runtime/region/
@@ -71,7 +75,7 @@ def main():
     region = 'pal-es'
     if '--region' in args:
         i = args.index('--region')
-        if i + 1 >= len(args) or args[i + 1] not in ('pal-es', 'pal-de'):
+        if i + 1 >= len(args) or args[i + 1] not in ('pal-es', 'pal-de', 'pal-uk'):
             sys.exit(__doc__)
         region = args[i + 1]
         del args[i:i + 2]
@@ -173,7 +177,15 @@ def main():
             elif not re.search(r'region::Addr\(0x' + f'{addr:08X}', line, re.I):
                 fails.append(f'{ref}: {addr:#010x} ({how}) used without region::Addr')
 
-    if len(args) == 4:
+    if len(args) == 4 and region == 'pal-uk' and args[1] == '-':
+        # No USA image: the UK tables are also the Spanish ones moved
+        # (survey/sibling_map.py), which checks them against the UK image alone.
+        r = subprocess.run([sys.executable, '-I', str(root / 'survey/sibling_map.py'), 'check', args[2], '--region', region,
+                            '--analyse', str(pathlib.Path(args[2]) / 'xenonanalyse.toml')], capture_output=True, text=True)
+        print(r.stdout.strip())
+        if r.returncode:
+            fails.append('survey/sibling_map.py check: ' + (r.stdout + r.stderr).strip().replace('\n', '; '))
+    elif len(args) == 4:
         usa_dir, pal_dir, funcmap = args[1:4]
         sys.path.insert(0, str(root / 'survey'))
         import region_map as rm
