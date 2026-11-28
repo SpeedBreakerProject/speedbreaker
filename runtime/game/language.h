@@ -83,10 +83,12 @@ namespace game::language
 
     // The language a release's disc is made for, by its manifest region id
     // (install/manifest.h): the Language row's default for that disc
-    // (main.cpp). -1 for the USA disc, whose default stays English.
+    // (main.cpp). -1 for the USA disc, whose default stays English. The UK
+    // disc's executable boots in English (`li r3, 0` at its boot's call) and
+    // the disc holds English PAL movies.
     constexpr int32_t DiscLanguage(std::string_view region)
     {
-        return region == "pal-es" ? kSpanish : region == "pal-de" ? kGerman : -1;
+        return region == "pal-es" ? kSpanish : region == "pal-de" ? kGerman : region == "pal-uk" ? kEnglish : -1;
     }
 
     constexpr const Language* Find(int32_t id)

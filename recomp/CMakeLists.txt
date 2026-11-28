@@ -110,3 +110,39 @@ else()
     set(SB_HAVE_PAL_DE OFF CACHE INTERNAL "ppc-pal-de is linked")
     message(STATUS "PAL (German) release: not linked (no ppc-pal-de/, or SB_PAL_DE=OFF)")
 endif()
+
+# The European (PAL, English: the UK disc) release's code, the same way
+# (../ppc-pal-uk: XenonRecomp with config/pal-uk/nfsmw.toml on that disc's
+# default.xex, then scripts/region_ppc.py ppc-pal-uk pal_uk; its tables come
+# from the Spanish ones, docs/REGION_PAL_UK.md).
+# SB_PAL_UK: AUTO (when ppc-pal-uk/ is there), ON (required) or OFF.
+set(SB_PAL_UK AUTO CACHE STRING "Link the PAL (English, UK) release's recompiled code: AUTO, ON or OFF")
+file(GLOB PPC_PAL_UK_SOURCES ${ROOT}/ppc-pal-uk/*.cpp)
+if(SB_PAL_UK STREQUAL "ON" AND NOT PPC_PAL_UK_SOURCES)
+    message(FATAL_ERROR "SB_PAL_UK=ON, but ppc-pal-uk/ has no generated sources")
+endif()
+if(PPC_PAL_UK_SOURCES AND NOT SB_PAL_UK STREQUAL "OFF")
+    file(READ ${ROOT}/ppc-pal-uk/ppc_recomp_shared.h _sb_pal_uk_head LIMIT 64)
+    if(NOT _sb_pal_uk_head MATCHES "^// Namespaced by scripts/region_ppc.py: pal_uk")
+        message(FATAL_ERROR "ppc-pal-uk/ isn't namespaced: run python3 scripts/region_ppc.py ppc-pal-uk pal_uk")
+    endif()
+    foreach(_sb_generated pal_uk_addresses.inc pal_uk_names.h)
+        if(NOT EXISTS ${ROOT}/runtime/region/${_sb_generated})
+            message(FATAL_ERROR "ppc-pal-uk/ is there, but runtime/region/${_sb_generated} isn't: run "
+                "python3 -I survey/sibling_map.py write <uk dir> --region pal-uk (docs/REGION_PAL_UK.md)")
+        endif()
+    endforeach()
+    add_library(NfsmwRecompPalUkLib STATIC ${PPC_PAL_UK_SOURCES})
+    target_compile_features(NfsmwRecompPalUkLib PUBLIC cxx_std_20)
+    target_include_directories(NfsmwRecompPalUkLib PRIVATE
+        ${ROOT}/ppc-pal-uk
+        ${ROOT}/tools/XenonRecomp/XenonUtils
+        ${ROOT}/tools/XenonRecomp/thirdparty/simde)
+    get_target_property(_sb_ppc_options NfsmwRecompLib COMPILE_OPTIONS)
+    target_compile_options(NfsmwRecompPalUkLib PRIVATE ${_sb_ppc_options})
+    set(SB_HAVE_PAL_UK ON CACHE INTERNAL "ppc-pal-uk is linked")
+    message(STATUS "PAL (English, UK) release: linked (ppc-pal-uk/)")
+else()
+    set(SB_HAVE_PAL_UK OFF CACHE INTERNAL "ppc-pal-uk is linked")
+    message(STATUS "PAL (English, UK) release: not linked (no ppc-pal-uk/, or SB_PAL_UK=OFF)")
+endif()

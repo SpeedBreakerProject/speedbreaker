@@ -37,13 +37,17 @@ using namespace install;
 #ifndef SB_PAL_DE
 #define SB_PAL_DE 0
 #endif
+#ifndef SB_PAL_UK
+#define SB_PAL_UK 0
+#endif
 
 static constexpr std::string_view kGermanXex = "23ece29d18724ea28971d52f936964d127148bd2359ff24795da7442b9069bf4";
+static constexpr std::string_view kUkXex = "e2ea2ff11bf84cb30430d824d7bfe699a3acf3e7400d21b9a7c938e3d7a10474";
 
 static void Manifests()
 {
     auto all = GameManifests();
-    CHECK(all.size() == (SB_PAL_DE ? 3u : 2u), "regions: %zu", all.size());
+    CHECK(all.size() == 2u + SB_PAL_DE + SB_PAL_UK, "regions: %zu", all.size());
     const Manifest& usa = GameManifest();
     CHECK(all[0] == &usa, "USA first (the default)");
     const Manifest* pal = ManifestForVersion("2e42eb3950fcc436");
@@ -103,6 +107,48 @@ static void Manifests()
     CHECK(without.regionName == "Europe (PAL, German)" && without.discName == "German (PAL)" && without.codeFolder == "ppc-pal-de",
         "refused, naming the disc and its code");
 #endif
+
+    // The UK disc: English PAL, its default.xex the Spanish one's size.
+    const Manifest* uk = ManifestForXexHash(kUkXex);
+    const ReleaseWithoutCodeInfo ukWithout = ReleaseWithoutCode(kUkXex);
+#if SB_PAL_UK
+    CHECK(uk && uk == all.back() && uk->region == "pal-uk" && uk->regionName == "Europe (PAL, English)", "the UK manifest, last");
+    CHECK(ukWithout.regionName.empty(), "with its code: not refused");
+    if (uk)
+    {
+        CHECK(uk->titleId == usa.titleId && uk->files.size() == 52 && uk->totalBytes == 7169042728ull, "its title, 52 files");
+        CHECK(uk->Xex().size == pal->Xex().size && ManifestForXexSize(3940352) == pal, "the Spanish size: by size, the Spanish one");
+        CHECK(ManifestForVersion(uk->version) == uk && uk->version != pal->version, "by version");
+        size_t english = 0;
+        for (const ManifestFile& f : uk->files)
+            english += f.path.ends_with("_english_pal.wmv");
+        CHECK(english == 36, "English PAL movies: %zu", english);
+    }
+#else
+    CHECK(!uk, "without its code: no UK manifest");
+    CHECK(ukWithout.regionName == "Europe (PAL, English)" && ukWithout.discName == "UK (PAL, English)" && ukWithout.codeFolder == "ppc-pal-uk",
+        "refused, naming the disc and its code");
+#endif
+}
+
+// ManifestForXexFile: the Spanish and UK default.xex share a size, so a file
+// of it is told apart by its hash; one that is neither's is the Spanish one,
+// as by size before.
+static void XexFile(const fs::path& root)
+{
+    const Manifest* pal = ManifestForVersion("2e42eb3950fcc436");
+    if (!pal)
+        return;
+    fs::path f = root / "xexfile" / "default.xex";
+    fs::create_directories(f.parent_path());
+    {
+        std::ofstream(f, std::ios::binary) << "x";
+    }
+    fs::resize_file(f, pal->Xex().size);
+    CHECK(ManifestForXexFile(f) == pal, "a stand-in of the Spanish size: the Spanish manifest");
+    fs::resize_file(f, GameManifest().Xex().size);
+    CHECK(ManifestForXexFile(f) == &GameManifest(), "of the USA size: the USA one (not hashed)");
+    CHECK(ManifestForXexFile(root / "missing.xex") == nullptr, "no file: none");
 }
 
 static void Write(const fs::path& file, const std::string& text)
@@ -316,11 +362,16 @@ static void ImageStandIn(const fs::path& file, const std::string& xex, uint64_t 
 static void NotTheDisc(const fs::path& root)
 {
     const std::string needed = NeededDisc();
-    CHECK(needed == (SB_PAL_DE ? "SpeedBreaker needs a copy of the Xbox 360 disc of Need for Speed: Most Wanted, the USA, the European "
-                                 "(PAL, Spanish) or the European (PAL, German) one."
-                               : "SpeedBreaker needs a copy of the Xbox 360 disc of Need for Speed: Most Wanted, the USA or the European "
-                                 "(PAL, Spanish) one."),
-        "what it needs: %s", needed.c_str());
+    const char* expected = SB_PAL_DE && SB_PAL_UK
+        ? "SpeedBreaker needs a copy of the Xbox 360 disc of Need for Speed: Most Wanted, the USA, the European "
+          "(PAL, Spanish), the European (PAL, German) or the European (PAL, English) one."
+        : SB_PAL_DE ? "SpeedBreaker needs a copy of the Xbox 360 disc of Need for Speed: Most Wanted, the USA, the European "
+                      "(PAL, Spanish) or the European (PAL, German) one."
+        : SB_PAL_UK ? "SpeedBreaker needs a copy of the Xbox 360 disc of Need for Speed: Most Wanted, the USA, the European "
+                      "(PAL, Spanish) or the European (PAL, English) one."
+                    : "SpeedBreaker needs a copy of the Xbox 360 disc of Need for Speed: Most Wanted, the USA or the European "
+                      "(PAL, Spanish) one.";
+    CHECK(needed == expected, "what it needs: %s", needed.c_str());
 
     const fs::path dir = root / "not-the-disc";
     const fs::path zeros = dir / "Need for Speed - Most Wanted (fake).iso";
@@ -410,6 +461,7 @@ int main(int argc, char** argv)
         return 1;
     }
     fs::path root = fs::absolute(tmpl);
+    XexFile(root);
     Installs(root, argv[0]);
     KeepRegions(root);
     GermanInstalls(root);

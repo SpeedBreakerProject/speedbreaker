@@ -14,9 +14,13 @@ PAL_ES_XEX_SHA256 = 'aad15fc218d034de3131f746e0b763dd8049a40dd676efc87667fcaf4fc
 # The German disc's (Need for Speed - Most Wanted (Germany)), as SpeedBreaker
 # v0.2.1's installer reports it.
 PAL_DE_XEX_SHA256 = '23ece29d18724ea28971d52f936964d127148bd2359ff24795da7442b9069bf4'
+# The UK (English) PAL disc's: a dashboard copy of the retail disc
+# (title 454107D9, media ID 36775B18).
+PAL_UK_XEX_SHA256 = 'e2ea2ff11bf84cb30430d824d7bfe699a3acf3e7400d21b9a7c938e3d7a10474'
 
 SKIP_DIRS = {'thirdparty'}
-SKIP_FILES = {'pal_es_addresses.inc', 'pal_es_names.h', 'pal_de_addresses.inc', 'pal_de_names.h'}
+SKIP_FILES = {'pal_es_addresses.inc', 'pal_es_names.h', 'pal_de_addresses.inc', 'pal_de_names.h',
+              'pal_uk_addresses.inc', 'pal_uk_names.h'}
 EXTENSIONS = {'.cpp', '.h', '.inc', '.mm'}
 SUB = re.compile(r'\bsub_(82[0-9A-F]{6})\b')
 LIT = re.compile(r'\b0x(82[0-9A-Fa-f]{6})(?:u|U)?\b')

@@ -396,11 +396,23 @@ if(NOT WIN32)
     target_compile_options(region_manifest_test_pal_de PRIVATE -O2 -UNDEBUG)
     target_compile_definitions(region_manifest_test_pal_de PRIVATE SB_PAL_DE=1)
     add_test(NAME region_manifest_test_pal_de COMMAND region_manifest_test_pal_de ${CMAKE_BINARY_DIR}/region_manifest_pal_de_scratch)
+    # The same with the UK code linked (SB_PAL_UK): its default.xex has the
+    # Spanish one's size, so the two are told apart by hash.
+    add_executable(region_manifest_test_pal_uk ${CMAKE_CURRENT_SOURCE_DIR}/region_manifest_test.cpp
+        ${RT}/install/placement.cpp ${RT}/install/installer.cpp ${RT}/install/locate.cpp
+        ${RT}/install/manifest.cpp ${RT}/install/result.cpp ${RT}/install/disc_source.cpp ${RT}/install/sha256.cpp
+        ${RT}/user/portable.cpp ${RT}/platform/posix/file_io.cpp)
+    target_include_directories(region_manifest_test_pal_uk PRIVATE ${RT})
+    target_link_libraries(region_manifest_test_pal_uk PRIVATE Threads::Threads)
+    target_compile_options(region_manifest_test_pal_uk PRIVATE -O2 -UNDEBUG)
+    target_compile_definitions(region_manifest_test_pal_uk PRIVATE SB_PAL_UK=1)
+    add_test(NAME region_manifest_test_pal_uk COMMAND region_manifest_test_pal_uk ${CMAKE_BINARY_DIR}/region_manifest_pal_uk_scratch)
     if(APPLE AND NOT IOS)
         target_link_libraries(install_folder_test PRIVATE "-framework CoreFoundation")  # placement.cpp's iCloud check
         target_link_libraries(portable_test PRIVATE "-framework CoreFoundation")
         target_link_libraries(region_manifest_test PRIVATE "-framework CoreFoundation")
         target_link_libraries(region_manifest_test_pal_de PRIVATE "-framework CoreFoundation")
+        target_link_libraries(region_manifest_test_pal_uk PRIVATE "-framework CoreFoundation")
     endif()
 endif()
 # The PAL (Spanish) release's hook addresses (runtime/region/region.h):
@@ -435,6 +447,19 @@ if(Python3_Interpreter_FOUND)
     else()
         add_test(NAME region_addresses_check_pal_de COMMAND Python3::Interpreter -I ${CMAKE_CURRENT_SOURCE_DIR}/region_addresses_check.py
             ${ROOT} --region pal-de)
+    endif()
+    # The same for the UK disc's tables (mw_uk/ with funcmap.tsv beside mw_usa/).
+    # Without a USA image, mw_uk/ alone (image.bin, xexsurvey.txt and
+    # XenonAnalyse's xenonanalyse.toml) checks them with survey/sibling_map.py.
+    if(SB_REGION_SURVEY AND EXISTS ${SB_REGION_SURVEY}/mw_uk/funcmap.tsv)
+        add_test(NAME region_addresses_check_pal_uk COMMAND Python3::Interpreter -I ${CMAKE_CURRENT_SOURCE_DIR}/region_addresses_check.py
+            ${ROOT} ${SB_REGION_SURVEY}/mw_usa ${SB_REGION_SURVEY}/mw_uk ${SB_REGION_SURVEY}/mw_uk/funcmap.tsv --region pal-uk)
+    elseif(SB_REGION_SURVEY AND EXISTS ${SB_REGION_SURVEY}/mw_uk/image.bin)
+        add_test(NAME region_addresses_check_pal_uk COMMAND Python3::Interpreter -I ${CMAKE_CURRENT_SOURCE_DIR}/region_addresses_check.py
+            ${ROOT} - ${SB_REGION_SURVEY}/mw_uk - --region pal-uk)
+    else()
+        add_test(NAME region_addresses_check_pal_uk COMMAND Python3::Interpreter -I ${CMAKE_CURRENT_SOURCE_DIR}/region_addresses_check.py
+            ${ROOT} --region pal-uk)
     endif()
     # survey/func_map.py (the function map region_map.py takes) and
     # region_map.py's search for jump tables only another build has, on two

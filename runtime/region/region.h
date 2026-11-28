@@ -39,6 +39,7 @@ namespace region
         Usa,
         PalEs,
         PalDe,
+        PalUk,  // the UK disc (English): the Spanish build's code, moved in 4 places
     };
 
     namespace detail
@@ -63,6 +64,11 @@ namespace region
         return detail::g_release == Release::PalDe;
     }
 
+    inline bool IsPalUk()
+    {
+        return detail::g_release == Release::PalUk;
+    }
+
     // Any European (PAL) executable: it boots in its disc's own language and
     // asks for "_pal" movies itself (game/language.h).
     inline bool IsPal()
@@ -73,8 +79,9 @@ namespace region
     // Whether this build has the release's recompiled code.
     bool Available(Release release);
 
-    // "usa", "pal-es", "pal-de" (install/manifest.h's region ids); "USA",
-    // "Europe (PAL, Spanish)", "Europe (PAL, German)".
+    // "usa", "pal-es", "pal-de", "pal-uk" (install/manifest.h's region ids);
+    // "USA", "Europe (PAL, Spanish)", "Europe (PAL, German)",
+    // "Europe (PAL, English)".
     std::string_view Id(Release release);
     std::string_view Name(Release release);
     // The release with that manifest region id, if any.
@@ -107,6 +114,7 @@ namespace region
     };
     const AddressPair* PalEsTable(size_t& count);
     const AddressPair* PalDeTable(size_t& count);
+    const AddressPair* PalUkTable(size_t& count);  // empty without SB_PAL_UK
 }
 
 #define SB_CAT2(a, b) a##b
@@ -148,7 +156,23 @@ namespace region
 #define SB_PAL_DE_ORIGINAL(name)
 #endif
 
-#if SB_PAL_ES || SB_PAL_DE
+#if SB_PAL_UK
+#include "pal_uk_names.h"
+#define SB_PAL_UK_SUB(name) SB_CAT(SB_PAL_UK_, name)
+#define SB_PAL_UK_IMP(name) SB_CAT(__imp__, SB_PAL_UK_SUB(name))
+#define SB_PAL_UK_FORWARD(name) \
+    namespace pal_uk \
+    { \
+        PPC_FUNC(SB_PAL_UK_IMP(name)); \
+        PPC_FUNC(SB_PAL_UK_SUB(name)) { ::name(ctx, base); } \
+    }
+#define SB_PAL_UK_ORIGINAL(name) ::region::IsPalUk() ? pal_uk::SB_PAL_UK_IMP(name) :
+#else
+#define SB_PAL_UK_FORWARD(name)
+#define SB_PAL_UK_ORIGINAL(name)
+#endif
+
+#if SB_PAL_ES || SB_PAL_DE || SB_PAL_UK
 // A hook of the recompiled function `name` (sub_<USA address>), followed by
 // its body: declares the original in every release, and makes each PAL
 // code's own copy of the function (weak) call this hook.
@@ -157,10 +181,11 @@ namespace region
     PPC_FUNC(name); \
     SB_PAL_ES_FORWARD(name) \
     SB_PAL_DE_FORWARD(name) \
+    SB_PAL_UK_FORWARD(name) \
     PPC_FUNC(name)
 
 // The running release's recompiled body of the hooked function `name`.
-#define SB_ORIGINAL(name) (SB_PAL_ES_ORIGINAL(name) SB_PAL_DE_ORIGINAL(name) __imp__##name)
+#define SB_ORIGINAL(name) (SB_PAL_ES_ORIGINAL(name) SB_PAL_DE_ORIGINAL(name) SB_PAL_UK_ORIGINAL(name) __imp__##name)
 #else
 #define SB_HOOK(name) \
     extern "C" PPC_FUNC(__imp__##name); \

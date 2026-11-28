@@ -323,6 +323,13 @@ PAL_DE_EXTRA_FUNCTIONS = [
     (0x823AF0F8, 0xE0, 0x823AF108, 11, 0x823AF1D0),
 ]
 
+# The UK (English) build has the same two, 0x28 further on (found by
+# find_extra_functions on its image, and checked against it the same way).
+PAL_UK_EXTRA_FUNCTIONS = [
+    (0x823AF040, 0xE0, 0x823AF050, 11, 0x823AF118),
+    (0x823AF120, 0xE0, 0x823AF130, 11, 0x823AF1F8),
+]
+
 
 class Region:
     """What differs between the PAL releases this maps to."""
@@ -343,6 +350,8 @@ REGIONS = {
                      'PAL_ES_EXTRA_FUNCTIONS', PAL_ES_EXTRA_FUNCTIONS),
     'pal-de': Region('pal-de', 'PAL (German)', 'Europe/PAL, German', hook_addresses.PAL_DE_XEX_SHA256,
                      'PAL_DE_EXTRA_FUNCTIONS', PAL_DE_EXTRA_FUNCTIONS),
+    'pal-uk': Region('pal-uk', 'PAL (English, UK)', 'Europe/PAL, English (UK)', hook_addresses.PAL_UK_XEX_SHA256,
+                     'PAL_UK_EXTRA_FUNCTIONS', PAL_UK_EXTRA_FUNCTIONS),
 }
 
 

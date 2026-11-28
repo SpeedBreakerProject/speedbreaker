@@ -76,6 +76,13 @@ ALLOWED = {
     # tests/region_addresses_check.py checks pal-es with no --region (its
     # default), so its ctest line names no region.
     ('pal-es', 'wiring', 'tests/CMakeLists.txt'): 'region_addresses_check\'s default region',
+    # The UK disc: the same two leaves, +0x28 from the Spanish ones
+    # (survey/region_map.py PAL_UK_EXTRA_FUNCTIONS; find_extra_functions and
+    # survey/sibling_map.py own_extra_tables both find them on the UK image).
+    ('pal-uk', 'function', (0x823AF040, 0xE0)): 'PAL-only leaf: the date format strings by language',
+    ('pal-uk', 'function', (0x823AF120, 0xE0)): 'PAL-only leaf: the number format strings by language',
+    ('pal-uk', 'switch', 0x823AF050): 'the jump table of the PAL-only leaf at 0x823AF040',
+    ('pal-uk', 'switch', 0x823AF130): 'the jump table of the PAL-only leaf at 0x823AF120',
 }
 
 # [main] settings that are the region's own (paths to its disc and output).

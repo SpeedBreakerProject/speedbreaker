@@ -18,6 +18,7 @@
 #pragma once
 #include <cstddef>
 #include <cstdint>
+#include <filesystem>
 #include <span>
 #include <string>
 #include <string_view>
@@ -37,8 +38,8 @@ namespace install
         uint32_t titleId;           // from default.xex's execution info (0x454107D9)
         std::span<const ManifestFile> files;
         uint64_t totalBytes;
-        std::string_view region = {};      // "usa", "pal-es", "pal-de": recorded in the install marker
-        std::string_view regionName = {};  // for the player: "USA", "Europe (PAL, Spanish)", "Europe (PAL, German)"
+        std::string_view region = {};      // "usa", "pal-es", "pal-de", "pal-uk": recorded in the install marker
+        std::string_view regionName = {};  // for the player: "USA", "Europe (PAL, Spanish)", "Europe (PAL, English)", ...
 
         // The default.xex entry (the one file every manifest must have).
         const ManifestFile& Xex() const;
@@ -58,8 +59,12 @@ namespace install
     // The compiled-in manifest with that default.xex SHA-256 (lower-case hex),
     // default.xex size, or version; nullptr if none.
     const Manifest* ManifestForXexHash(std::string_view sha256);
-    const Manifest* ManifestForXexSize(uint64_t size);
+    const Manifest* ManifestForXexSize(uint64_t size);  // the first of that size
     const Manifest* ManifestForVersion(std::string_view version);
+    // A default.xex on disk: by its size, or by its hash when two releases
+    // share that size (the Spanish and UK discs' are both 3,940,352 bytes;
+    // one that is neither's: the first of the size, as before).
+    const Manifest* ManifestForXexFile(const std::filesystem::path& xex);
 
     // A release SpeedBreaker supports whose code this build doesn't link
     // (the German disc without SB_PAL_DE), by its default.xex SHA-256: its
