@@ -154,6 +154,7 @@ uint32_t ExGetXConfigSetting(uint16_t Category, uint16_t Setting, void* Buffer, 
                 default:
                     return 1;
             }
+            break;
         }
 
         case 0x0003:
@@ -193,6 +194,7 @@ uint32_t ExGetXConfigSetting(uint16_t Category, uint16_t Setting, void* Buffer, 
                 default:
                     return 1;
             }
+            break;
         }
     }
 
